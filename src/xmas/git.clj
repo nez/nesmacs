@@ -45,18 +45,6 @@
             filtered (filterv #(not= :unknown (:status %)) parsed)]
         filtered))))
 
-(defn diff
-  "Unified diff for `path` (relative to repo root). `staged?` true -> diff --cached."
-  [dir path staged?]
-  (let [root (repo-root dir)
-        argv (-> ["git" "diff"]
-                 (cond-> staged? (conj "--cached"))
-                 (conj "--")
-                 (conj path))]
-    (if root
-      (run argv root)
-      "Not in a git repository")))
-
 (defn add [dir path]
   (let [root (repo-root dir)]
     (if root

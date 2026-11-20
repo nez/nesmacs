@@ -28,9 +28,6 @@
         (assoc-in [:bufs gitlog-name] (make-buffer canonical))
         (cmd/set-cur-buffer gitlog-name))))
 
-(defn- entry-at-point [s]
-  (listbuf/entry-at-point s))
-
 (defn show-commit [s]
   (if-let [e (listbuf/entry-at-point s)]
     (let [dir (git/repo-root (str (java.io.File. (:file (cmd/cur s)))))]

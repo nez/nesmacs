@@ -32,16 +32,18 @@
 
 (defn start
   "Start `argv` in `dir` (nil = JVM cwd), with optional `env` overrides.
-   Returns the handle; output is read with `drain!`."
-  [{:keys [argv ^String dir env]}]
+   Returns the handle; output is read with `drain!`.
+
+   By default stdin is closed: tools like rg/grep search stdin forever when
+   they see a pipe that never reaches EOF. Pass :keep-stdin? true for
+   long-lived servers (LSP) that read requests from stdin."
+  [{:keys [argv ^String dir env keep-stdin?]}]
   (let [pb (ProcessBuilder. (into-array String argv))
         _  (when dir (.directory pb (java.io.File. dir)))
         _  (when env (.putAll (.environment pb)
                               (into {} (map (fn [[k v]] [(name k) (str v)])) env)))
         p  (.start pb)
-        ;; Close stdin: tools like rg/grep search stdin forever instead of the
-        ;; filesystem when they see a pipe that never reaches EOF.
-        _  (.close (.getOutputStream p))
+        _  (when-not keep-stdin? (.close (.getOutputStream p)))
         id (swap! next-id inc)
         q  (LinkedBlockingQueue. queue-depth)
         exit (atom nil)

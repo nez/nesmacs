@@ -1,7 +1,6 @@
 JAR := target/xmas.jar
-NATIVE := xmas-native
 
-.PHONY: dev run jar native repl test pty lint check clean setup
+.PHONY: dev run jar repl test pty lint check clean setup
 
 setup:
 	./install.sh
@@ -18,8 +17,11 @@ run: jar
 jar:
 	clojure -X:uberjar
 
-native: jar
-	native-image -jar $(JAR) --no-fallback --initialize-at-build-time -o $(NATIVE)
+# native: requires GraalVM native-image (not in CI). Dropped per M7 scope.
+# To re-enable: install GraalVM, uncomment below, and verify.
+# NATIVE := xmas-native
+# native: jar
+# 	native-image -jar $(JAR) --no-fallback --initialize-at-build-time -o $(NATIVE)
 
 test:
 	clojure -M:test

@@ -4,6 +4,17 @@
 
 (def undo-limit 1000)
 
+;; Large-file threshold: skip fontification and property work above this size.
+;; 1 MB file or 100k lines.
+(def ^:private large-file-bytes 1048576)
+(def ^:private large-file-lines 100000)
+
+(defn large-file?
+  "Check if buffer should use large-file mode (skip fontification/props)."
+  [b]
+  (or (and (:file b) (> (try (.length (java.io.File. (:file b))) (catch Exception _ 0)) large-file-bytes))
+      (>= (gap/line-count (:text b)) large-file-lines)))
+
 (defn bounded-conj
   "conj v onto vec, dropping the oldest entry once size exceeds limit."
   [vec limit v]
@@ -13,8 +24,9 @@
 (defn make
   ([name] (make name "" nil))
   ([name text file]
-   {:name name :text (gap/of text) :point 0 :mark nil :file file
-    :modified false :mode :fundamental :undo [] :redo [] :version 0}))
+   (let [b {:name name :text (gap/of text) :point 0 :mark nil :file file
+            :modified false :mode :fundamental :undo [] :redo [] :version 0}]
+     (assoc b :large-file (large-file? b)))))
 
 (defn set-point [b f]
   (assoc b :point (-> (f (:text b) (:point b))
@@ -39,13 +51,14 @@
 (defn- apply-change [b from to repl]
   (let [repl-len (count repl)
         new-text (gap/edit (:text b) from to repl)
-        from-line (gap/line-of new-text from)]
+        from-line (gap/line-of new-text from)
+        is-large? (:large-file b)]
     (-> b
         (assoc :text new-text :modified true)
         (update :edit-count (fnil inc 0))
         (update :version (fnil inc 0))
-        (update :line-states truncate-states from-line)
-        (update :props (fnil props/adjust []) from to repl-len)
+        (cond-> (not is-large?) (update :line-states truncate-states from-line))
+        (cond-> (not is-large?) (update :props (fnil props/adjust []) from to repl-len))
         (update :point shift-pos from to repl-len)
         (update :mark #(when % (shift-pos % from to repl-len))))))
 

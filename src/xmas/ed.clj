@@ -13,6 +13,7 @@
             [xmas.gap :as gap]
             [xmas.job :as job]
             [xmas.listbuf :as listbuf]
+            [xmas.lsp :as lsp]
             [xmas.mode :as mode]
             [xmas.nav :as nav]
             [xmas.persist :as persist]
@@ -20,6 +21,7 @@
             [xmas.project :as project]
             [xmas.props :as props]
             [xmas.rect :as rect]
+            [xmas.session :as session]
             [xmas.term :as t]
             [xmas.text :as text]
             [xmas.view :as view]
@@ -214,6 +216,9 @@
         parent (or (.getParent f) ".")]
     (str parent "/#" (.getName f) "#")))
 
+(defn- auto-save-file ^java.io.File [^String file]
+  (java.io.File. (auto-save-path file)))
+
 (def ^:private auto-save-threshold 300)
 
 ;; --- Shell command (M-!) ---
@@ -328,7 +333,7 @@
                              (map second saved))
                      (filter string?)
                      distinct
-                     (filter #(.exists (java.io.File. (auto-save-path %))))
+                     (filter #(.exists (auto-save-file %)))
                      vec)]
       (persist/save-quiet! "auto-saved" paths))))
 
@@ -342,6 +347,17 @@
         (when (seq saved)
           (remember-auto-saves! saved)
           (swap! editor-atom reset-edit-counts saved))))))
+
+(def ^:private session-save-counter (atom 0))
+(def ^:private session-save-interval 300) ; save every ~30 seconds (300 * 100ms ticks)
+
+(defn- session-save-tick!
+  "Periodically save session to disk. Runs on the editor loop tick."
+  [editor-atom]
+  (let [count (swap! session-save-counter inc)]
+    (when (>= count session-save-interval)
+      (reset! session-save-counter 0)
+      (session/save-session! @editor-atom))))
 
 (defn save-buffer-named
   "Save buffer `name` (a :bufs key). Pure except for the file write."
@@ -359,7 +375,7 @@
                  bytes (if (= :crlf (:line-ending b))
                          (str/replace raw "\n" "\r\n") raw)]
              (atomic-spit f bytes))
-           (let [bak (java.io.File. (auto-save-path f))]
+           (let [bak (auto-save-file f)]
              (when (.exists bak) (.delete bak)))
            (-> s (update-in [:bufs name] #(assoc % :modified false :edit-count 0))
                  (msg (str "Wrote " f)))
@@ -511,15 +527,15 @@
   (->> (persist/load! "auto-saved" [])
        (filter string?)
        distinct
-       (filter #(.exists (java.io.File. (auto-save-path %))))
+       (filter #(.exists (auto-save-file %)))
        vec))
 
 (defn- recover-file
   "Open `f` and replace its text with the auto-save backup, leaving it marked
    modified so the user can inspect it before C-x C-s."
   [s f]
-  (let [backup (str (auto-save-path f))]
-    (if (.exists (java.io.File. backup))
+  (let [backup (auto-save-file f)]
+    (if (.exists backup)
       (let [text (slurp backup :encoding "UTF-8")
             s    (find-file s f)]
         (-> (cmd/update-cur s #(assoc % :text (gap/of text) :point 0
@@ -535,7 +551,7 @@
       (fn [s ans]
         (if (= "y" (str/lower-case (str/trim ans)))
           (recover-ask (recover-file s f) more)
-          (do (try (.delete (java.io.File. (auto-save-path f)))
+          (do (try (.delete (auto-save-file f))
                    (catch Exception _))
               (recover-ask s more)))))
     s))
@@ -1143,6 +1159,128 @@
     (gitstatus/open s root)
     (msg s "Not a git repository")))
 
+;; --- LSP commands ---
+
+(defn- char-col
+  "0-based UTF-16 character index of point within its line — what LSP wants."
+  [s]
+  (let [b  (cur s)
+        t  (:text b)
+        p  (:point b)
+        ln (gap/line-of t p)]
+    (- p (gap/nth-line-start t ln))))
+
+(defn- lsp-when-ready
+  "Run `(f state root-id)` once the project's LSP server is initialized.
+   `f` returns the new editor state; it is applied with swap! because the
+   initialize handshake completes later, on the editor loop."
+  [s f]
+  (if-let [root (project-root s)]
+    (let [root-id (str root)]
+      (lsp/ensure! root-id ["clojure-lsp"] root
+                   (fn [_] (swap! editor f root-id))))
+    (msg s "Not in a project")))
+
+(defn- show-hover
+  "Echo an LSP Hover result in the message bar."
+  [result]
+  (let [c   (:contents result)
+        txt (cond (string? c) c
+                  (map? c)   (:value c)
+                  (seq c)    (str/join "\n" (map :value c)))
+        txt (some-> txt (str/replace #"\s+" " "))]
+    (when txt
+      (swap! editor assoc :msg (str "LSP: " (subs txt 0 (min 200 (count txt))))))))
+
+(defn- jump-to-definition
+  "Move point to an LSP Location / LocationLink."
+  [res]
+  (let [loc   (if (vector? res) (first res) res)
+        uri   (or (:uri loc) (:targetUri loc))
+        range (or (:range loc) (:targetRange loc))]
+    (when (and uri range)
+      (swap! editor
+             #(-> % (find-file (str/replace uri #"^file://" ""))
+                    (goto-line (str (inc (get-in range [:start :line])))))))))
+
+(defn- lsp-at-point
+  "Ask the project's server something at point and hand `cb` the result."
+  [s request cb]
+  (if-not (:file (cur s))
+    (msg s "Buffer has no file")
+    (lsp-when-ready
+      s
+      (fn [state root-id]
+        (request root-id (:file (cur state)) (cmd/line-idx state) (char-col state) cb)
+        state))))
+
+(defn lsp-hover [s]      (lsp-at-point s lsp/hover show-hover))
+(defn lsp-definition [s] (lsp-at-point s lsp/definition jump-to-definition))
+
+;; Completion is cache + push, never blocking: a cache miss starts one async
+;; request and returns the cached hits (usually none); when the reply lands we
+;; stash it and nudge the minibuffer to re-run its sources, which now hit the
+;; cache. So a slow server only delays the *list*, never a keystroke.
+(defonce ^:private comp-cache (atom {}))     ; path -> {:v version :pos {[line ch] labels}}
+(defonce ^:private comp-inflight (atom {}))  ; [path version line ch] -> millis
+
+(def ^:private comp-inflight-ttl-ms 5000)
+
+(defn- cached-completion [path version line ch prefix]
+  (let [{:keys [v pos]} (get @comp-cache path)]
+    (when (= v version)
+      (->> (get pos [line ch])
+           (filter #(str/starts-with? % prefix))
+           vec))))
+
+(defn- remember-completion! [path version line ch labels]
+  (swap! comp-cache
+         (fn [m]
+           (if (= version (:v (get m path)))
+             (assoc-in m [path :pos [line ch]] labels)
+             (assoc m path {:v version :pos {[line ch] labels}})))))
+
+(defn- refresh-completion!
+  "Make complete/tick! re-run the active minibuffer's sources so a freshly
+   cached LSP reply becomes visible."
+  []
+  (swap! editor (fn [s] (if (:mini s) (assoc-in s [:mini :for] ::stale) s))))
+
+(defn lsp-completion-source
+  "M4 completion source backed by the project's LSP server. Never blocks."
+  [prefix ctx]
+  (let [state (deref ctx)
+        b     (cmd/cur state)
+        root  (when (:file b) (project-root state))]
+    (when root
+      (let [root-id  (str root)
+            path     (:file b)
+            version  (or (:version b) 0)
+            line     (cmd/line-idx state)
+            ch       (char-col state)
+            key      [path version line ch]
+            cached   (cached-completion path version line ch prefix)
+            inflight (when-let [t (get @comp-inflight key)]
+                       (< (- (System/currentTimeMillis) t) comp-inflight-ttl-ms))]
+        (cond
+          (not (lsp/server-exists? root-id))
+          (do (lsp/ensure! root-id ["clojure-lsp"] root (fn [_])) [])
+
+          (not (lsp/ready? root-id)) []
+          (or inflight cached)       cached
+          :else
+          (do
+            (swap! comp-inflight assoc key (System/currentTimeMillis))
+            (lsp/completion root-id path line ch
+                            (fn [res]
+                              (let [items  (cond (map? res)    (:items res)
+                                                 (vector? res) res)
+                                    labels (vec (keep :label items))]
+                                (remember-completion! path version line ch labels)
+                                (swap! comp-inflight dissoc key)
+                                (refresh-completion!))))
+            []))))))
+
 (defn- project-search
   "C-x p g: run rg over the project as a job; RET on a hit opens it."
   [s]
@@ -1204,7 +1342,8 @@
               (cmd/set-cur-buffer name))))))
 
 (def ^:private cx-c-map
-  {\i complete-symbol-at-point})
+  {\i complete-symbol-at-point
+   \h lsp-hover})
 
 (def ^:private nav-keys {:return nav-jump})
 
@@ -1217,12 +1356,15 @@
 
 ;; --- Config reload ---
 
+(defn- xmas-path [name]
+  (str (System/getProperty "user.home") "/.xmas/" name))
+
 (defn reload-config
   "M-x reload-config: re-run ~/.xmas/init.clj. Like M-:, it evaluates against
    a private atom and hands the result back, so api/bind! can't re-enter the
    command loop's swap!."
   [s]
-  (let [path (str (System/getProperty "user.home") "/.xmas/init.clj")]
+  (let [path (xmas-path "init.clj")]
     (if-not (.exists (java.io.File. path))
       (msg s (str "No config: " path))
       (try
@@ -1503,6 +1645,7 @@
    [:meta \s] {\o occur-cmd}
    [:meta \:] (prompt "Eval: " eval-expression)
    [:meta \x] (prompt "M-x " execute-extended-command command-completer)
+   [:meta \.] lsp-definition
    [:meta \%] (prompt "Query replace: " query-replace)
    [:meta \!] (prompt "Shell command: " async-shell-command)
    [:meta \|] (prompt "Shell command on region: " shell-command-on-region)
@@ -1660,6 +1803,11 @@
       (swap! editor job/pump!)
       (complete/tick! editor)
       (auto-save-tick! editor)
+      (session-save-tick! editor)
+      (lsp/tick! editor)
+      (when (:exit @editor)
+        ;; Clean exit: save session before leaving the loop
+        (session/save-session! @editor))
       (when-not (:exit @editor) (recur)))))
 
 (defn- run-all
@@ -1693,7 +1841,7 @@
        :windows (win/leaf "*scratch*") :cur-window []
        :rows rows :cols cols
        :completion-sources {:default [complete/buffers complete/buffer-symbols]
-                            :clojure-mode [complete/buffer-symbols complete/project-symbols]}}
+                            :clojure-mode [complete/buffer-symbols complete/project-symbols lsp-completion-source]}}
       register-builtin-modes
       register-builtin-commands))
 
@@ -1721,7 +1869,7 @@
 
 (defn- load-init-files! []
   (let [load! (fn [name loader]
-                (let [p (str (System/getProperty "user.home") "/.xmas/" name)]
+                (let [p (xmas-path name)]
                   (when (.exists (java.io.File. p))
                     (try (loader p) (log/log "loaded" name)
                          (catch Exception e (swap! editor msg-error name e))))))]
@@ -1759,6 +1907,10 @@
       (reset! editor (initial-state rows cols))
       ;; nREPL and any other out-of-band caller can use xmas.api directly.
       (alter-var-root #'api/*state* (constantly editor))
+      ;; Load session before init.clj so user config can override
+      (when-let [sess (session/load-session!)]
+        (let [[restored ok] (session/restore-session @editor sess)]
+          (when ok (reset! editor restored))))
       (load-init-files!)
       (swap! editor recover-ask (pending-recoveries))
       (silence-stdio!)
@@ -1766,4 +1918,4 @@
         (try (command-loop)
              (finally (stop-services! services)))))
     (finally
-      (run-all [#(log/log "xmas exiting") proc/kill-all! log/close! t/teardown!]))))
+      (run-all [#(log/log "xmas exiting") lsp/shutdown-all! proc/kill-all! log/close! t/teardown!]))))

@@ -18,7 +18,10 @@
    :string    {:fg 107 :bg nil :bold false}
    :keyword   {:fg 180 :bg nil :bold false}
    :builtin   {:fg 67  :bg nil :bold true}
-   :match     {:fg 232 :bg 180 :bold false}})
+   :match     {:fg 232 :bg 180 :bold false}
+   :diag-error   {:fg 231 :bg 124 :bold true}
+   :diag-warning {:fg 232 :bg 136 :bold false}
+   :diag-info    {:fg 232 :bg 109 :bold false}})
 
 (defn- ensure-visible [content point scroll rows]
   ;; A pane with body-rows <= 0 (e.g. a 1-row split that gets 0 body rows
@@ -159,13 +162,16 @@
               (recur (inc ln) nxt (conj out nxt)))))))))
 
 (defn- render-window-body
-  "Render visible lines and return the possibly-extended :line-states cache."
-  [rect content mode props scroll hscroll r-lo r-hi states]
+  "Render visible lines and return the possibly-extended :line-states cache.
+   If large-file? is true, skip fontification and property work for performance."
+  [rect content mode props scroll hscroll r-lo r-hi states large-file?]
   (let [{:keys [row col rows cols]} rect
         body-rows (dec rows)
         start-line  (gap/line-of content scroll)
         total-lines (gap/line-count content)
-        [states0 init-state] (extend-states mode content (or states []) start-line)
+        [states0 init-state] (if large-file?
+                                [(or states []) :normal]
+                                (extend-states mode content (or states []) start-line))
         result
         (loop [ln start-line r 0 state init-state states states0]
           (if (and (< r body-rows) (< ln total-lines))
@@ -173,13 +179,13 @@
                   eol  (gap/nth-line-end content ln)
                   line (line-str content pos eol)
                   len  (count line)
-                  [toks nxt-state] (face/tokenize mode line state)
-                  line-props (props/in-range props pos eol)
-                  spans0 (apply-props toks line-props pos len)
+                  [toks nxt-state] (if large-file? [nil :normal] (face/tokenize mode line state))
+                  line-props (if large-file? [] (props/in-range props pos eol))
+                  spans0 (if large-file? [[0 len :default]] (apply-props toks line-props pos len))
                   r-from (when r-lo (max 0 (min len (- (long r-lo) pos))))
                   r-to   (when r-lo (max 0 (min len (- (long r-hi) pos))))
                   spans  (merge-region spans0 r-from r-to)
-                  states' (if (> (count states) ln) states (conj states nxt-state))]
+                  states' (if large-file? states (if (> (count states) ln) states (conj states nxt-state)))]
               (write-spans! (+ row r) col cols line spans hscroll)
               (recur (inc ln) (inc r) nxt-state states'))
             {:r r :states states}))]
@@ -230,8 +236,9 @@
         hscroll (if current? (ensure-hvisible hscroll-in cursor-col cols) hscroll-in)
         [r-lo r-hi] (when (and mark current?) (sort [(long mark) (long point)]))
         props (:props buf)
+        large-file? (:large-file buf)
         states (render-window-body rect content mode props scroll hscroll
-                                   r-lo r-hi (:line-states buf))]
+                                   r-lo r-hi (:line-states buf) large-file?)]
     (render-window-modeline rect (:name buf) (:modified buf) mode (:minor-modes buf)
                             point-line cursor-col current?)
     {:window (assoc window :scroll scroll :hscroll hscroll

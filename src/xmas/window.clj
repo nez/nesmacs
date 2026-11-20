@@ -10,7 +10,7 @@
 
 (defn leaf? [w] (= :leaf (:type w)))
 
-(defn- split-node [dir a b]
+(defn split-node [dir a b]
   {:type :split :dir dir :a a :b b :ratio 0.5})
 
 (defn split

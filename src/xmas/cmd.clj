@@ -107,11 +107,6 @@
   (let [b (cur s) p (:point b) t (:text b)]
     (if (> p 0) (edit s (text/prev-pos t p) p "") s)))
 
-(defn delete-region [s from to]
-  (let [lo (min (long from) (long to))
-        hi (max (long from) (long to))]
-    (edit s lo hi "")))
-
 (defn region-bounds
   "Return [lo hi] for the active region, or nil if no mark is set."
   [s]

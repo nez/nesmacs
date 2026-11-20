@@ -39,6 +39,9 @@
 (defn- entry-at-point [s]
   (listbuf/entry-at-point s))
 
+(defn- cur-repo-root [s]
+  (git/repo-root (str (java.io.File. (:file (cmd/cur s))))))
+
 (defn refresh [s]
   (let [b (cmd/cur s)
         dir (str (java.io.File. (:file b)))]
@@ -49,7 +52,7 @@
 
 (defn stage [s]
   (if-let [e (entry-at-point s)]
-    (let [dir (git/repo-root (str (java.io.File. (:file (cmd/cur s)))))]
+    (let [dir (cur-repo-root s)]
       (when dir
         (git/add dir (:path e))
         (-> s refresh (cmd/msg (str "Staged " (:path e))))))
@@ -57,7 +60,7 @@
 
 (defn unstage [s]
   (if-let [e (entry-at-point s)]
-    (let [dir (git/repo-root (str (java.io.File. (:file (cmd/cur s)))))]
+    (let [dir (cur-repo-root s)]
       (when dir
         (git/reset dir (:path e))
         (-> s refresh (cmd/msg (str "Unstaged " (:path e))))))
@@ -65,16 +68,16 @@
 
 (defn diff-at-point [s]
   (if-let [e (entry-at-point s)]
-    (let [dir (git/repo-root (str (java.io.File. (:file (cmd/cur s)))))
+    (let [dir (cur-repo-root s)
           staged? (= :staged (:status e))]
       (gitdiff/open s dir (:path e) staged?))
     s))
 
 (defn commit-cmd [s]
-  (let [dir (git/repo-root (str (java.io.File. (:file (cmd/cur s)))))]
+  (let [dir (cur-repo-root s)]
     (when dir
       (gitcommit/open s dir))))
 
 (defn log-cmd [s]
-  (let [dir (git/repo-root (str (java.io.File. (:file (cmd/cur s)))))]
+  (let [dir (cur-repo-root s)]
     (when dir (gitlog/open s dir))))

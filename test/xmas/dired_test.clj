@@ -15,9 +15,6 @@
     (doseq [^File f (.listFiles d)] (.delete f))
     (.delete d)))
 
-(defn- state-with [buf-name buf]
-  {:buf buf-name :bufs {buf-name buf} :msg nil})
-
 (deftest open-creates-dired-buffer
   (let [d (mktemp-dir)]
     (try

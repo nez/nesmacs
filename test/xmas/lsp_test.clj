@@ -1,0 +1,71 @@
+(ns xmas.lsp-test
+  (:require [clojure.data.json :as json]
+            [clojure.test :refer [deftest is testing]]
+            [xmas.ed]
+            [xmas.lsp :as lsp]))
+
+(defn- body-of [framed]
+  (let [i (.indexOf ^String framed "\r\n\r\n")]
+    (subs framed (+ i 4))))
+
+(deftest encode-msg-is-json-with-byte-length
+  (testing "ASCII body round-trips and header counts bytes"
+    (let [framed (lsp/encode-msg {:jsonrpc "2.0" :id 1 :method "initialize"})
+          body   (body-of framed)]
+      (is (re-find #"Content-Length: \d+\r\n\r\n" framed))
+      (is (= {"jsonrpc" "2.0" "id" 1 "method" "initialize"}
+             (json/read-str body))))))
+
+(deftest content-length-counts-utf8-bytes
+  (testing "a raw multibyte frame is sliced by byte count (as servers send it)"
+    (let [body   "{\"id\":7,\"result\":{\"message\":\"café 日本\"}}"
+          len    (alength (.getBytes body "UTF-8"))
+          framed (str "Content-Length: " len "\r\n\r\n" body)
+          [msgs rest*] (lsp/decode-msgs framed)]
+      (is (> len (count body)))                 ; bytes exceed chars
+      (is (= "café 日本" (get-in (first msgs) [:result :message])))
+      (is (= "" rest*)))))
+
+(deftest decode-round-trip
+  (testing "encode -> decode yields the original map"
+    (let [msg    {:jsonrpc "2.0" :id 3 :result {:contents "doc" :n [1 2 3]}}
+          [msgs rest*] (lsp/decode-msgs (lsp/encode-msg msg))]
+      (is (= [{:jsonrpc "2.0" :id 3 :result {:contents "doc" :n [1 2 3]}}] msgs))
+      (is (= "" rest*)))))
+
+(deftest decode-multiple-messages
+  (testing "two frames in one buffer are both parsed"
+    (let [a (lsp/encode-msg {:id 1 :method "a"})
+          b (lsp/encode-msg {:id 2 :method "b"})
+          [msgs rest*] (lsp/decode-msgs (str a b))]
+      (is (= [1 2] (map :id msgs)))
+      (is (= "" rest*)))))
+
+(deftest decode-partial-waits
+  (testing "an incomplete frame is left in the rest buffer"
+    (let [framed (lsp/encode-msg {:id 9 :method "x"})
+          half   (subs framed 0 (quot (count framed) 2))
+          [msgs rest*] (lsp/decode-msgs half)]
+      (is (empty? msgs))
+      (is (= half rest*)))))
+
+(deftest decode-multibyte-round-trip
+  (testing "multibyte bodies survive a byte-correct slice"
+    (let [framed (lsp/encode-msg {:id 4 :result {:text "héllo 世界"}})
+          [msgs rest*] (lsp/decode-msgs framed)]
+      (is (= "héllo 世界" (get-in (first msgs) [:result :text])))
+      (is (= "" rest*)))))
+
+;; The completion cache is what makes LSP completion non-blocking; guard it.
+(deftest completion-cache-filters-and-resets-on-version
+  (let [remember (deref #'xmas.ed/remember-completion!)
+        cached   (deref #'xmas.ed/cached-completion)
+        path     "/lsp-cache-test/x.clj"]
+    (remember path 1 3 4 ["add" "add-watch" "assoc"])
+    (testing "filters cached labels by prefix at the same version/position"
+      (is (= ["add" "add-watch"] (cached path 1 3 4 "add")))
+      (is (= []                   (cached path 1 3 4 "zzz"))))
+    (testing "a version change invalidates old results"
+      (is (nil? (cached path 2 3 4 "add")))
+      (remember path 2 3 4 ["new"])
+      (is (= ["new"] (cached path 2 3 4 "new"))))))

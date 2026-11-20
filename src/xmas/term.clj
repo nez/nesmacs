@@ -1,7 +1,8 @@
 (ns xmas.term
   (:require [clojure.string :as str]
             [xmas.log :as log])
-  (:import [java.io InputStream]))
+  (:import [java.io InputStream]
+           [sun.misc Signal SignalHandler]))
 
 ;; Raw terminal via stty + System.in/out. No JLine.
 
@@ -22,14 +23,14 @@
 (defn on-resize!
   "Register a callback (fn [rows cols]) for terminal resize (SIGWINCH)."
   [callback]
-  (let [handler (proxy [sun.misc.SignalHandler] []
+  (let [handler (proxy [SignalHandler] []
                   (handle [_sig]
                     (try
                       (let [[rows cols] (terminal-size)]
                         (callback rows cols))
                       (catch Exception e
                         (log/log "resize error:" (.getMessage e))))))]
-    (sun.misc.Signal/handle (sun.misc.Signal. "WINCH") handler)))
+    (Signal/handle (Signal. "WINCH") handler)))
 
 ;; --- Input from System.in ---
 
