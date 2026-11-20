@@ -3,7 +3,8 @@
 An editor with the Emacs paradigm, in Clojure.
 
 Buffers, keymaps, modes and hooks, extended with plain Clojure — no Emacs Lisp
-runtime and no `~/.emacs.d`. See [PRD.md](PRD.md) for scope and non-goals.
+runtime and no `~/.emacs.d`. See [PRD.md](PRD.md) for scope and non-goals,
+and [ROADMAP.md](ROADMAP.md) for milestones.
 
 ## Architecture
 
