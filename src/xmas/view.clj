@@ -263,6 +263,28 @@
         end (text/pos-at-col s 0 n cols)]
     (if (< end n) (subs s 0 end) s)))
 
+(defn- paint-candidates
+  "Draw the completion candidate list above the echo area when a minibuffer
+   is active and candidates are available. Selected line is highlighted with
+   the :region face."
+  [{:keys [rows cols mini] :as state}]
+  (when (and mini (seq (:candidates mini)))
+    (let [cs      (vec (:candidates mini))
+          max-lines (min 8 (count cs) (max 0 (- rows 2)))
+          sel     (get-in state [:mini :sel] -1)
+          start   (max 0 (- (min (inc (max 0 sel)) (count cs)) max-lines))
+          shown   (subvec cs start (+ start max-lines))]
+      (doseq [i (range max-lines)
+              :let [r (- rows 1 max-lines) c (get shown i)]]
+        (when c
+          (t/move (+ r i) 0)
+          (if (= (or sel -1) (+ start i))
+            (t/sg (:region faces))
+            (t/reset-sg))
+          (t/tw (str/trim (str c)))
+          (t/reset-sg)
+          (pad-to-cols! (text/display-width (str c)) cols))))))
+
 (defn- render-echo-area
   [{:keys [rows cols] :as state}]
   (let [mini (:mini state) isearch (:isearch state) msg (:msg state)
@@ -313,7 +335,7 @@
     (:mini state)
     (let [mb (get (:bufs state) (:buf state))]
       [:mini (get-in state [:mini :prompt]) (str (:text mb)) (:point mb)
-       (get-in state [:mini :candidates])])
+       (get-in state [:mini :candidates]) (get-in state [:mini :sel])])
     (:isearch state)
     [:isearch (:direction (:isearch state)) (:pattern (:isearch state))]
     :else [:msg (:msg state)]))
@@ -363,6 +385,7 @@
                            (assoc % buf-name
                                   {:version version :states states}))))))
           (doseq [d divs] (paint-divider! d))
+           (paint-candidates state)
           (render-echo-area state)
           (when-not (:mini state)
             (let [rect (get layouts cur-path)

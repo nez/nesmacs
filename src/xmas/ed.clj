@@ -4,7 +4,12 @@
             [xmas.buf :as buf]
             [xmas.buflist :as buflist]
             [xmas.cmd :as cmd]
+            [xmas.complete :as complete]
             [xmas.dired :as dired]
+            [xmas.git :as git]
+            [xmas.gitcommit :as gitcommit]
+            [xmas.gitlog :as gitlog]
+            [xmas.gitstatus :as gitstatus]
             [xmas.gap :as gap]
             [xmas.job :as job]
             [xmas.listbuf :as listbuf]
@@ -541,6 +546,27 @@
   (update-in s [:bufs mini-buf-name] assoc
              :text (gap/of entry) :point (count entry)))
 
+(defn- mini-select-candidate
+  "Select candidate `j` and put it in the minibuffer, updating :for so the
+   async layer does not restart the request."
+  [s j]
+  (let [cs (vec (get-in s [:mini :candidates]))]
+    (if (and (seq cs) (<= 0 j) (< j (count cs)))
+      (let [c (nth cs j)]
+        (-> s (assoc-in [:mini :sel] j)
+              (assoc-in [:mini :for] c)
+              (mini-set c)))
+      s)))
+
+(defn- mini-next-candidate [s]
+  (let [i (get-in s [:mini :sel] -1)
+        n (count (get-in s [:mini :candidates]))]
+    (mini-select-candidate s (min (inc i) (dec n)))))
+
+(defn- mini-prev-candidate [s]
+  (let [i (get-in s [:mini :sel] (count (get-in s [:mini :candidates])))]
+    (mini-select-candidate s (max (dec i) 0))))
+
 (defn- mini-history-move
   "Move minibuffer history selection. dir=+1 goes back (older), -1 forward (newer).
    idx=-1 means cleared (no selection); 0..n-1 picks from newest to oldest."
@@ -610,13 +636,16 @@
 (defn- mini-refresh-candidates
   "Run the completer with the current minibuffer text and stash matches on
    :mini. Called after every keystroke so candidates narrow live as the
-   user types — no TAB needed."
+   user types — no TAB needed. Map completers are asynchronous: they only
+   record the input here, and `complete/tick!` fills the candidates."
   [s]
-  (if-let [completer (and (:mini s) (get-in s [:mini :completer]))]
-    (let [input (str (:text (cur s)))
-          {:keys [candidates]} (completer input s)]
-      (assoc-in s [:mini :candidates] (vec candidates)))
-    s))
+  (let [completer (and (:mini s) (get-in s [:mini :completer]))
+        input (str (:text (cur s)))]
+    (cond
+      (map? completer) (assoc-in s [:mini :input] input)
+      completer (assoc-in s [:mini :candidates]
+                          (vec (:candidates (completer input s))))
+      :else s)))
 
 (declare handle-key)
 
@@ -1068,8 +1097,10 @@
   (project/root (or (:file (cur s)) (System/getProperty "user.dir"))))
 
 (defn- project-find-file
-  "C-x p f: pick a file anywhere in the project by fuzzy name."
+  "C-x p f: pick a file anywhere in the project by fuzzy name.
+   A prefix argument (C-u) clears the project file cache."
   [s]
+  (when (:prefix-arg s) (complete/invalidate-cache!))
   (if-let [root (project-root s)]
     (let [files (project/files root)]
       (mini-start s (str "Find file in " root ": ")
@@ -1083,9 +1114,34 @@
             (if rel
               (find-file s (str root "/" rel))
               (msg s (str "No such file: " input)))))
-        (fn [input _s]
-          {:completed input :candidates (project/fuzzy files input)})))
+        {:sources [complete/project-files]}))
     (msg s "Not in a project")))
+
+(defn- symbol-prefix [^String text p]
+  (let [before (gap/substr text 0 p)]
+    (or (second (re-find #"[\w\-\*\+!\?\.]*$" before)) "")))
+
+(defn complete-symbol-at-point
+  "C-c i: complete the symbol at point asynchronously from buffers and the
+   project. The candidate is inserted replacing the prefix."
+  [s]
+  (let [b (cur s) p (:point b)
+        prefix (symbol-prefix (str (:text b)) p)]
+    (mini-start s "Complete: "
+      (fn [s chosen]
+        (let [b (cur s)]
+          (if (and (= prefix (gap/substr (:text b) (- p (count prefix)) p))
+                   (<= (+ p (count chosen)) (count (:text b))))
+            (cmd/edit s (- p (count prefix)) p chosen)
+            (msg s "Buffer moved; completion skipped"))))
+      {:sources (complete/sources-for s)})))
+
+(defn- git-status
+  "C-x g: open the git status buffer for the current project."
+  [s]
+  (if-let [root (git/repo-root (or (:file (cur s)) (System/getProperty "user.dir")))]
+    (gitstatus/open s root)
+    (msg s "Not a git repository")))
 
 (defn- project-search
   "C-x p g: run rg over the project as a job; RET on a hit opens it."
@@ -1147,6 +1203,9 @@
         (-> s (assoc-in [:bufs name] (nav/imenu-buffer name (:buf s) syms))
               (cmd/set-cur-buffer name))))))
 
+(def ^:private cx-c-map
+  {\i complete-symbol-at-point})
+
 (def ^:private nav-keys {:return nav-jump})
 
 (defn- occur-cmd [s] (mini-start s "Occur: " occur))
@@ -1180,6 +1239,40 @@
 (def job-keymap
   {[:ctrl \c] {[:ctrl \k] job/kill}
    \g         job/rerun})
+
+(defn diff-open-at-point [s]
+  ;; In a diff buffer, file headers look like "diff --git a/path b/path"
+  ;; We don't have listbuf entries; just open the file in the diff if on a header.
+  (let [b (cmd/cur s)
+        t (:text b)
+        p (:point b)
+        line-start (gap/nth-line-start t (gap/line-of t p))
+        line-end (gap/nth-line-end t (gap/line-of t p))
+        line (gap/substr t line-start line-end)]
+    (when-let [[_ path] (re-find #"diff --git a/(.+) b/" line)]
+      (let [dir (git/repo-root (or (:file (cmd/cur s)) (System/getProperty "user.dir")))]
+        (-> s (find-file (str dir "/" path))
+              (cmd/msg (str "Opened " path)))))))
+
+(def gitdiff-keymap
+  {[:ctrl \c] {[:ctrl \c] confirm-quit}
+   \g         job/rerun
+   :return    diff-open-at-point})
+
+(def gitlog-keymap
+  {[:ctrl \c] {[:ctrl \c] confirm-quit}
+   \g         gitlog/refresh
+   :return    gitlog/show-commit})
+
+(def gitstatus-keymap
+  {[:ctrl \c] {[:ctrl \c] confirm-quit}
+   \s         gitstatus/stage
+   \u         gitstatus/unstage
+   \d         gitstatus/diff-at-point
+   \c         gitstatus/commit-cmd
+   \l         gitstatus/log-cmd
+   \g         gitstatus/refresh
+   :return    gitstatus/diff-at-point})
 
 ;; --- Named-command registry (for M-x + help) ---
 
@@ -1239,7 +1332,12 @@
    "project-search"              (cmd-entry project-search "Search the current project with ripgrep.")
    "occur"                       (cmd-entry occur-cmd "List lines matching a regex in the current buffer.")
    "imenu"                       (cmd-entry imenu "List definitions in the current buffer.")
-   "reload-config"               (cmd-entry reload-config "Re-run ~/.xmas/init.clj.")})
+   "reload-config"               (cmd-entry reload-config "Re-run ~/.xmas/init.clj.")
+   "complete-symbol-at-point"    (cmd-entry complete-symbol-at-point "Complete the symbol at point.")
+   "git-status"                  (cmd-entry git-status "Show git status for the current project.")
+   "git-commit"                  (cmd-entry gitcommit/commit-at-point "Commit staged changes.")
+   "git-diff"                    (cmd-entry diff-open-at-point "Show diff for the entry at point.")
+   "git-log"                     (cmd-entry gitlog/show-commit "Show commit log.")})
 
 (defn- register-builtin-commands [s]
   (assoc s :commands (builtin-commands)))
@@ -1422,7 +1520,8 @@
    [:ctrl \h] {\k describe-key
                \f (prompt "Describe function: " describe-function command-completer)
                \v (prompt "Describe variable: " describe-variable)}
-   [:ctrl \x] {[:ctrl \s] save-buffer
+      [:ctrl \c] cx-c-map
+[:ctrl \x] {[:ctrl \s] save-buffer
                [:ctrl \f] (prompt "Find file: " find-file file-completer)
                [:ctrl \b] buflist/open
                [:ctrl \c] confirm-quit
@@ -1437,6 +1536,7 @@
                \r         cx-r-map
                 \p         {\f project-find-file
                             \g project-search}
+               \g         git-status
                \0         delete-window
                \1         delete-other-windows
                \2         split-window-below
@@ -1453,6 +1553,8 @@
   {:return   mini-accept
    [:meta \p] mini-history-prev
    [:meta \n] mini-history-next
+   [:ctrl \n] mini-next-candidate
+   [:ctrl \p] mini-prev-candidate
    :tab      mini-tab-complete})
 
 (defn handle-key
@@ -1556,6 +1658,7 @@
       ;; Pump on every tick, including idle, so jobs stream while nothing is
       ;; being typed — and only from this thread.
       (swap! editor job/pump!)
+      (complete/tick! editor)
       (auto-save-tick! editor)
       (when-not (:exit @editor) (recur)))))
 
@@ -1577,14 +1680,20 @@
       (mode/register :buflist-mode :major :keymap buflist-keymap)
       (mode/register :job-mode :major :keymap job-keymap)
       (mode/register :nav-mode :major :keymap nav-keys)
-      (mode/register :rg-mode :major :keymap rg-keys)))
+      (mode/register :rg-mode :major :keymap rg-keys)
+      (mode/register :gitstatus-mode :major :keymap gitstatus-keymap)
+      (mode/register :gitdiff-mode :major :keymap gitdiff-keymap)
+      (mode/register :gitlog-mode :major :keymap gitlog-keymap)
+      (mode/register :gitcommit-mode :major :keymap gitcommit/gitcommit-keymap)))
 
 (defn- initial-state [rows cols]
   (-> {:buf "*scratch*"
        :bufs {"*scratch*" (buf/make "*scratch*" scratch-text nil)}
        :kill [] :msg nil :mini nil :mini-history []
        :windows (win/leaf "*scratch*") :cur-window []
-       :rows rows :cols cols}
+       :rows rows :cols cols
+       :completion-sources {:default [complete/buffers complete/buffer-symbols]
+                            :clojure-mode [complete/buffer-symbols complete/project-symbols]}}
       register-builtin-modes
       register-builtin-commands))
 
