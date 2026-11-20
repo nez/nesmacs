@@ -9,14 +9,19 @@
 (def ^:private session-version 1)
 
 (defn- buffer->data
-  "Serialize a buffer to EDN-safe data. Excludes undo/redo and runtime state."
+  "Serialize a buffer to EDN-safe data. Excludes undo/redo and runtime state.
+   An unmodified file-backed buffer stores no text: the file is the source, and
+   re-serializing a 10 MB buffer every few seconds is pure waste. Modified
+   buffers keep their text so `kill -9` still loses nothing."
   [b]
-  (let [text (str (:text b))]
+  (let [^String file (:file b)
+        on-disk? (and file (not (:modified b))
+                      (.canRead (java.io.File. file)))]
     {:name (:name b)
-     :text text
+     :text (when-not on-disk? (str (:text b)))
      :point (:point b)
      :mark (:mark b)
-     :file (:file b)
+     :file file
      :modified (:modified b)
      :mode (:mode b)
      :version (:version b)
@@ -25,19 +30,33 @@
      :props (:props b [])
      :large-file (:large-file b)}))
 
+(defn- file-text
+  "Re-read a buffer's file for restore. nil when it can no longer be read, so
+   the caller drops the buffer instead of presenting empty text for a real file."
+  [^String path]
+  (try (buf/normalize-eol (slurp path :encoding "UTF-8"))
+       (catch Exception _ nil)))
+
 (defn- data->buffer
-  "Deserialize a buffer from session data."
+  "Deserialize a buffer from session data. Returns nil if its file-backed text
+   is missing from the session and can no longer be read from disk."
   [d]
-  (-> (buf/make (:name d) (:text d) (:file d))
-      (assoc :point (:point d)
-             :mark (:mark d)
-             :modified (:modified d)
-             :mode (:mode d)
-             :version (:version d)
-             :edit-count (:edit-count d)
-             :line-states (:line-states d)
-             :props (:props d)
-             :large-file (:large-file d))))
+  (let [file (:file d)
+        saved (:text d)
+        text (or saved (some-> file file-text))]
+    (when (or text (nil? file))
+      ;; Text reloaded from disk may have changed since the session was saved,
+      ;; so its cached token states and props no longer line up.
+      (-> (buf/make (:name d) (or text "") file)
+          (assoc :point (:point d)
+                 :mark (:mark d)
+                 :modified (:modified d)
+                 :mode (:mode d)
+                 :version (:version d)
+                 :edit-count (:edit-count d)
+                 :line-states (if saved (:line-states d) [])
+                 :props (if saved (:props d) [])
+                 :large-file (:large-file d))))))
 
 (defn- window-tree->data
   "Serialize window tree, replacing buffer refs with names."
@@ -93,7 +112,9 @@
     session))
 
 (defn save-tick!
-  "Editor-loop step: save the session every ~5s, but only when it changed."
+  "Editor-loop step: save the session every ~5s, but only when it changed.
+   shortcut: a modified 10 MB buffer still re-serializes on the loop thread
+   (~300 ms every 5 s); move the write off-thread if that shows up."
   [editor-atom]
   (when (>= (swap! save-counter inc) save-interval)
     (reset! save-counter 0)
@@ -155,8 +176,9 @@
           ;; Filter out buffers that no longer exist on disk (optional)
           valid-bufs (into {}
                           (filter (fn [[_ b]]
-                                    (or (nil? (:file b))
-                                        (.exists (java.io.File. (:file b)))))
+                                    (and b
+                                         (or (nil? (:file b))
+                                             (.exists (java.io.File. (:file b))))))
                                 rebuilt-bufs))
 
           ;; Ensure cur-window points to an existing buffer

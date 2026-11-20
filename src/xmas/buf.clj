@@ -1,6 +1,11 @@
 (ns xmas.buf
-  (:require [xmas.gap :as gap]
+  (:require [clojure.string :as str]
+            [xmas.gap :as gap]
             [xmas.props :as props]))
+
+(defn detect-eol [^String s] (if (str/includes? s "\r\n") :crlf :lf))
+(defn normalize-eol [^String s]
+  (-> s (str/replace "\r\n" "\n") (str/replace "\r" "\n")))
 
 (def undo-limit 1000)
 
@@ -52,13 +57,13 @@
 (defn- apply-change [b from to repl]
   (let [repl-len (count repl)
         new-text (gap/edit (:text b) from to repl)
-        from-line (gap/line-of new-text from)
         is-large? (:large-file b)]
     (-> b
         (assoc :text new-text :modified true)
         (update :edit-count (fnil inc 0))
         (update :version (fnil inc 0))
-        (cond-> (not is-large?) (update :line-states truncate-states from-line))
+        (cond-> (not is-large?)
+          (update :line-states truncate-states (gap/line-of new-text from)))
         (cond-> (not is-large?) (update :props (fnil props/adjust []) from to repl-len))
         (update :point shift-pos from to repl-len)
         (update :mark #(when % (shift-pos % from to repl-len))))))
@@ -89,7 +94,9 @@
       ;; No-op: don't mark modified, don't pollute undo/redo. A zero-width
       ;; insert of "" used to clear redo and bump :modified spuriously.
       b
-      (let [old (.toString (.subSequence ^CharSequence t (int from) (int to)))
+      (let [old (if (= from to)
+                  ""
+                  (.toString (.subSequence ^CharSequence t (int from) (int to))))
             had-redo? (seq (:redo b))]
         (-> (apply-change b from to repl)
             (update :undo push-undo {:from from :old old :new repl} had-redo?)

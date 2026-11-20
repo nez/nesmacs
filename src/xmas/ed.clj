@@ -347,10 +347,6 @@
 
 (defn save-buffer [s] (save-buffer-named s (:buf s)))
 
-(defn- detect-eol [^String s] (if (re-find #"\r\n" s) :crlf :lf))
-(defn- normalize-eol [^String s]
-  (-> s (str/replace "\r\n" "\n") (str/replace "\r" "\n")))
-
 (defn- open-buf [s path b]
   (let [s (-> s (assoc-in [:bufs path] b) (cmd/set-cur-buffer path))
         m (mode/mode-for-file path)]
@@ -380,8 +376,8 @@
 
       exists
       (try (let [raw (slurp path :encoding "UTF-8")]
-             (-> (open-buf s path (-> (buf/make name (normalize-eol raw) path)
-                                      (assoc :line-ending (detect-eol raw))))
+             (-> (open-buf s path (-> (buf/make name (buf/normalize-eol raw) path)
+                                      (assoc :line-ending (buf/detect-eol raw))))
                  (bump-recentf path)))
            (catch Exception e (msg-error s (str "Error reading " path) e)))
 
@@ -1686,7 +1682,7 @@
         s' (cond
              ;; Bracketed paste is one insert, hence one undo entry.
              (and (vector? key) (= :paste (first key)))
-             (cmd/insert-at-point s (normalize-eol (second key)))
+             (cmd/insert-at-point s (buf/normalize-eol (second key)))
 
              ;; capture-next: consume the key as data, don't dispatch
              (= :describe-key (:capture-next s))

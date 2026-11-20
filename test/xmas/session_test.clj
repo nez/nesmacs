@@ -54,3 +54,31 @@
       (let [[restored ok] (session/restore-session state sess)]
         (is ok)
         (is (= 100 (get-in restored [:bufs "*test*" :point])))))))
+
+(deftest session-omits-text-for-unmodified-file-buffers
+  (let [f (java.io.File/createTempFile "xmas-session" ".txt")]
+    (try
+      (spit f "from disk\n")
+      (let [state (assoc-in (make-state) [:bufs "*test*" :file] (.getPath f))
+            _     (session/save-session! state)
+            sess  (session/load-session!)]
+        (is (nil? (get-in sess [:bufs "*test*" :text])))
+        (let [[restored ok] (session/restore-session state sess)]
+          (is ok)
+          (is (= "from disk\n" (str (get-in restored [:bufs "*test*" :text]))))))
+      (finally (.delete f)))))
+
+(deftest session-keeps-text-for-modified-file-buffers
+  (let [f (java.io.File/createTempFile "xmas-session" ".txt")]
+    (try
+      (spit f "from disk\n")
+      (let [state (-> (make-state)
+                      (assoc-in [:bufs "*test*" :file] (.getPath f))
+                      (assoc-in [:bufs "*test*" :modified] true))
+            _     (session/save-session! state)
+            sess  (session/load-session!)]
+        (is (= "hello world" (get-in sess [:bufs "*test*" :text])))
+        (is (= "hello world"
+               (str (get-in (first (session/restore-session state sess))
+                            [:bufs "*test*" :text])))))
+      (finally (.delete f)))))
