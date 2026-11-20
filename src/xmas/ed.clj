@@ -6,8 +6,10 @@
             [xmas.cmd :as cmd]
             [xmas.dired :as dired]
             [xmas.gap :as gap]
+            [xmas.job :as job]
             [xmas.mode :as mode]
             [xmas.persist :as persist]
+            [xmas.proc :as proc]
             [xmas.props :as props]
             [xmas.rect :as rect]
             [xmas.term :as t]
@@ -252,6 +254,16 @@
           (-> s (assoc-in [:bufs name] (buf/make name output nil))
                 (cmd/set-cur-buffer name)))
         (msg s output)))))
+
+(defn async-shell-command
+  "M-!: run `cmd` as a job so a slow command never freezes the editor. The
+   shell string is user input at this boundary; xmas.proc only sees argv."
+  [s ^String cmd]
+  (if (str/blank? cmd)
+    s
+    (job/start s {:argv ["sh" "-c" cmd]
+                  :buf-name "*Shell Command*"
+                  :dir (some-> (:file (cur s)) (java.io.File.) (.getParent))})))
 
 (defn- auto-save-due
   "Pure: return [[buf-name file text version] ...] for every buffer at or above the
@@ -719,7 +731,13 @@
 
 (defn- modified-bufs [s]
   (->> (:bufs s)
-       (keep (fn [[name b]] (when (:modified b) name)))
+       (keep (fn [[name b]]
+               ;; Hidden buffers (leading space) are editor-owned — the
+               ;; minibuffer in particular is always "modified" while you type
+               ;; in it, and quitting must not ask to save it.
+               (when (and (:modified b)
+                          (not (.startsWith ^String name " ")))
+                 name)))
        sort))
 
 (defn- quit-finish [s] (assoc s :exit true))
@@ -1046,6 +1064,10 @@
    \k      buflist/kill
    \g      buflist/revert})
 
+(def job-keymap
+  {[:ctrl \c] {[:ctrl \k] job/kill}
+   \g         job/rerun})
+
 ;; --- Named-command registry (for M-x + help) ---
 
 (declare bookmark-set bookmark-jump recentf-open)
@@ -1264,7 +1286,7 @@
    [:meta \:] (prompt "Eval: " eval-expression)
    [:meta \x] (prompt "M-x " execute-extended-command command-completer)
    [:meta \%] (prompt "Query replace: " query-replace)
-   [:meta \!] (prompt "Shell command: " shell-command)
+   [:meta \!] (prompt "Shell command: " async-shell-command)
    [:meta \|] (prompt "Shell command on region: " shell-command-on-region)
    :return insert-newline
    [:ctrl \d] delete-char :backspace delete-backward-char
@@ -1401,17 +1423,19 @@
                     (some? cur-hscroll) (assoc-in (conj wp :hscroll) cur-hscroll))]
       (compare-and-set! editor snapshot updated))
     (let [key (t/read-key-timeout 100)]
-      (if (nil? key)
-        (recur)
-        (do (let [kill-before (peek (:kill @editor))]
-              (swap! editor #(handle-key % key))
-              ;; Clipboard is a boundary side effect, so it stays out of the
-              ;; pure commands and out of tests.
-              (when (and (seq (:kill @editor))
-                         (not= kill-before (peek (:kill @editor))))
-                (t/set-clipboard! (peek (:kill @editor)))))
-            (auto-save-tick! editor)
-            (when-not (:exit @editor) (recur)))))))
+      (when key
+        (let [kill-before (peek (:kill @editor))]
+          (swap! editor #(handle-key % key))
+          ;; Clipboard is a boundary side effect, so it stays out of the
+          ;; pure commands and out of tests.
+          (when (and (seq (:kill @editor))
+                     (not= kill-before (peek (:kill @editor))))
+            (t/set-clipboard! (peek (:kill @editor))))))
+      ;; Pump on every tick, including idle, so jobs stream while nothing is
+      ;; being typed — and only from this thread.
+      (swap! editor job/pump!)
+      (auto-save-tick! editor)
+      (when-not (:exit @editor) (recur)))))
 
 (defn- run-all
   "Run each no-arg fn, logging and continuing on failure."
@@ -1428,7 +1452,8 @@
       (mode/register :clojure-mode :major)
       (mode/register :emacs-lisp-mode :major)
       (mode/register :dired-mode :major :keymap dired-keymap)
-      (mode/register :buflist-mode :major :keymap buflist-keymap)))
+      (mode/register :buflist-mode :major :keymap buflist-keymap)
+      (mode/register :job-mode :major :keymap job-keymap)))
 
 (defn- initial-state [rows cols]
   (-> {:buf "*scratch*"
@@ -1493,6 +1518,7 @@
 (defn -main [& _args]
   (log/init!) (log/log "xmas starting")
   (t/install-shutdown-hook!)
+  (proc/install-shutdown-hook!)
   (try
     (t/enter-raw-mode!) (t/enable-bracketed-paste!) (t/cls)
     (t/on-resize! (fn [rows cols] (swap! editor assoc :rows rows :cols cols)))
@@ -1507,4 +1533,4 @@
         (try (command-loop)
              (finally (stop-services! services)))))
     (finally
-      (run-all [#(log/log "xmas exiting") log/close! t/teardown!]))))
+      (run-all [#(log/log "xmas exiting") proc/kill-all! log/close! t/teardown!]))))

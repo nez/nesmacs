@@ -5,6 +5,7 @@
             [clojure.test.check.properties :as prop]
             [xmas.buf :as buf]
             [xmas.ed :as ed]
+            [xmas.job :as job]
             [xmas.persist :as persist]
             [xmas.rect :as rect]
             [xmas.spec :as spec]
@@ -639,6 +640,27 @@
 (deftest shell-command-drains-large-output
   (is (= 200000 (count (#'ed/run-shell "head -c 200000 /dev/zero")))))
 
+;; --- Async jobs (M-!) ---
+
+(defn- pump-until-done [s name]
+  (loop [s s i 0]
+    (if (or (= :done (get-in s [:bufs name :job-status])) (> i 500))
+      s
+      (do (Thread/sleep 10) (recur (job/pump! s) (inc i))))))
+
+(deftest async-shell-command-streams-into-a-job-buffer
+  (let [s (ed/async-shell-command (#'xmas.ed/initial-state 24 80) "printf 'ok\\n'")
+        s (pump-until-done s "*Shell Command*")]
+    (is (= "*Shell Command*" (:buf s)))
+    (is (= "ok\n" (text s)))
+    (is (= :job-mode (:mode (ed/cur s))))))
+
+(deftest job-buffer-keys-kill-the-process
+  (let [s (ed/async-shell-command (#'xmas.ed/initial-state 24 80) "sleep 30")
+        s (-> s (ed/handle-key [:ctrl \c]) (ed/handle-key [:ctrl \k]))]
+    (is (= :killed (get-in s [:bufs "*Shell Command*" :job-status])))
+    (is (= "Killed process" (:msg s)))))
+
 ;; --- Auto-save ---
 
 (deftest auto-save-writes-backup-when-threshold-crossed
@@ -929,6 +951,14 @@
         s2 (answer-mini s1 "x")]
     (is (not (:exit s2)))
     (is (= "Quit canceled" (:msg s2)))))
+
+(deftest quit-ignores-the-minibuffer
+  ;; Regression: typing in the minibuffer marks its hidden buffer modified, so
+  ;; C-x C-c while a prompt was open asked to "Discard changes to  *mini*?".
+  (let [s (-> (make-state "abc" 0)
+              (ed/mini-start "X: " (fn [s _] s))
+              (ed/handle-key \y))]
+    (is (:exit (#'xmas.ed/confirm-quit s)))))
 
 ;; --- Search highlighting (props) ---
 

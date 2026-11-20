@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Terminal smoke test: start xmas in a pty, load config, exit with C-x C-c.
+"""Terminal smoke test: start xmas in a pty, load config, run a job, exit.
 
 Run with `make pty`. Uses a temp HOME (and -Duser.home) so it never touches the
-real ~/.xmas. Asserts the startup log: config loaded and a clean exit.
+real ~/.xmas. Asserts the startup log (config loaded, clean exit) and that a
+M-! job streams into its buffer while the editor keeps accepting keys.
 """
 import fcntl
 import os
@@ -37,7 +38,9 @@ fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
 
 out = b""
 start = time.time()
-sent = False
+sent_job = False
+job_seen_at = None
+sent_exit = False
 exited = False
 while time.time() - start < TIMEOUT:
     r, _, _ = select.select([fd], [], [], 0.2)
@@ -51,9 +54,16 @@ while time.time() - start < TIMEOUT:
             exited = True
             break
         out += data
-    if not sent and b"*scratch*" in out:
-        os.write(fd, b"\x18\x03")  # C-x C-c
-        sent = True
+    if not sent_job and b"*scratch*" in out:
+        # M-! yes | head -c 300000 RET: a firehose into a job buffer.
+        os.write(fd, b"\x1b!yes | head -c 300000\r")
+        sent_job = True
+    elif sent_job and job_seen_at is None and b"*Shell Command*" in out:
+        job_seen_at = time.time()
+    elif job_seen_at and not sent_exit and time.time() - job_seen_at > 0.2:
+        # Output is still streaming; the editor must still take C-x C-c.
+        os.write(fd, b"\x18\x03")
+        sent_exit = True
 
 try:
     os.kill(pid, 0)
@@ -69,9 +79,12 @@ logfile = home / ".xmas" / "debug.log"
 if logfile.exists():
     log = logfile.read_text(errors="replace")
 
-ok = sent and "loaded init.clj" in log and "xmas exiting" in log
-print("rendered=%s sent_keys=%s exited=%s bytes=%d" % (b"*scratch*" in out, sent, exited, len(out)))
-print("config_loaded=%s clean_exit=%s" % ("loaded init.clj" in log, "xmas exiting" in log))
+ok = (sent_job and job_seen_at is not None and sent_exit and exited
+      and "loaded init.clj" in log and "xmas exiting" in log)
+print("rendered=%s job_buffer=%s exited=%s bytes=%d"
+      % (b"*scratch*" in out, job_seen_at is not None, exited, len(out)))
+print("config_loaded=%s clean_exit=%s"
+      % ("loaded init.clj" in log, "xmas exiting" in log))
 
 for child in home.rglob("*"):
     if child.is_file():
