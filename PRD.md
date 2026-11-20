@@ -1,79 +1,49 @@
-# xmas — Road to Minimal Emacs
+# xmas — Clojure-native editor with the Emacs paradigm
 
 ## Goal
 
-Reach Emacs parity by the simplest implementation possible. Every feature must
-collapse onto a small set of primitives — buffers, pure `state -> state`
-commands, gap text, a single editor atom. Resist parallel implementations of
-the same idea: when two features look like the same problem, share the
-primitive instead of duplicating it. Cut implementation, never scope.
+Keep the Emacs model — buffers, windows, keymaps, modes, hooks, commands as
+`state -> state` transitions — on a small Clojure core. Extend it in Clojure,
+not in a second language.
 
-## Current State (v0.2)
+Every feature must collapse onto a small set of primitives: buffers, pure
+commands, gap text, one editor atom. Resist parallel implementations of the
+same idea; share the primitive instead of duplicating it.
 
-Text editor with Emacs keybindings, gap buffer with line index, elisp reader + evaluator,
-buffer/keybinding bridges, `~/.xmas/init.el` loader, `M-:` eval-expression, and a comprehensive test suite.
+## Non-goals
 
-## Phase: Tier 1 Features (v0.3)
+- Running Emacs Lisp or `~/.emacs.d`. The elisp runtime was removed; it is
+  recoverable at tag `elisp-runtime-v0` but is not maintained.
+- GNU `lisp/*.el`, `package.el`, quelpa, or Emacs third-party packages.
+- Bytecode, native modules, GUI frames.
 
-**Goal**: An editor people would choose to use for small tasks.
+Packages are Clojure libraries on `deps.edn`.
 
-### Syntax Highlighting (~200 LOC)
+## Current state
 
-- Face/property system on buffer text
-- Major mode hooks for language detection
-- At minimum: comments, strings, keywords for Clojure/elisp
+Text editor with Emacs keybindings: gap buffer with line index, window tree,
+major/minor modes with keymaps and hooks, overlays, isearch, query-replace,
+keyboard macros, registers, bookmarks, recentf, dired, buflist, shell
+commands, auto-save, terminal and web frontends, nREPL on 7888.
 
-### Multiple Windows (~300 LOC)
+Configuration is `~/.xmas/init.clj` via `xmas.api` (`bind!`, `add-hook!`,
+`register-mode!`); `M-:` evaluates Clojure in the same context.
 
-- C-x 2 (split horizontal), C-x 3 (split vertical), C-x o (other window)
-- View becomes a window tree, each window has its own buffer/scroll/point
-- C-x 0 (delete window), C-x 1 (delete other windows)
+## Next
 
-### Modes (~100 LOC)
+1. **Text properties** — replace the per-mode tokenizer in `face.clj` with
+   faces stored on buffer ranges, so `font-lock`-style highlighting and
+   overlays share one mechanism.
+2. **Completion** — in-buffer completion menu and async candidates; the
+   minibuffer already supports live filtering and Tab completion.
+3. **Project search** — ripgrep-backed `M-x rg`, results in a `listbuf`.
+4. **Git** — status/diff buffers (the first non-editor app on the platform).
+5. **LSP** — `future`-driven client; would remove Emacs's single-thread
+   limitation as a reason to keep a separate editor.
 
-- Major modes: mode-specific keymaps + hooks
-- Minor modes: toggleable overlays (e.g., line-numbers, auto-save)
-- Mode-line displays current major + active minor modes
+## Principles
 
-### Dired (~150 LOC)
-
-- C-x d: directory listing buffer
-- Enter to open, d to mark delete, x to execute
-- Navigation, refresh
-
-### Region Highlighting (~50 LOC)
-
-- Visual feedback for mark-to-point region
-- Reverse video or color overlay for selected text
-
----
-
-## Phase: Emacs Completeness (v0.4)
-
-### Commands & Input
-
-- M-x interactive command dispatch
-- Universal argument (C-u prefix)
-- Keyboard macros (C-x (, C-x ), C-x e)
-- Query replace (M-%)
-- Buffer list (C-x C-b)
-
-### Help System
-
-- C-h k (describe-key)
-- C-h f (describe-function)
-- C-h v (describe-variable)
-
-### Extensibility
-
-- Hooks (add-hook, run-hooks)
-- Advice (defadvice / add-function)
-- Customization (defcustom, defgroup)
-- Minibuffer completion with candidates
-
-### Infrastructure
-
-- Auto-save / crash recovery (#file#)
-- Process/shell integration (M-!, shell-command)
-- Text properties / overlays (foundation for real highlighting)
-- Package manager
+- Commands stay pure; side effects only at the boundary (`save-buffer`, I/O).
+- One atom, `swap!` at the loop boundary; state is a value you can test,
+  replay, and render from another process (the web client proves it).
+- A shortcut with a known limit gets a `shortcut:` comment.

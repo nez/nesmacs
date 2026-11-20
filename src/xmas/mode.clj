@@ -13,11 +13,14 @@
 
 ;; --- Hooks ---
 
+;; Accept :my-mode-hook, "my-mode-hook" and 'my-mode-hook as the same hook.
+(defn- hook-key [h] (if (or (keyword? h) (string? h)) (symbol (name h)) h))
+
 (defn add-hook [s hook-name f]
-  (update-in s [:hooks hook-name] (fnil conj []) f))
+  (update-in s [:hooks (hook-key hook-name)] (fnil conj []) f))
 
 (defn run-hooks [s hook-name]
-  (reduce (fn [s f] (f s)) s (get-in s [:hooks hook-name] [])))
+  (reduce (fn [s f] (f s)) s (get-in s [:hooks (hook-key hook-name)] [])))
 
 ;; --- Activation ---
 

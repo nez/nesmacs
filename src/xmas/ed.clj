@@ -1,13 +1,12 @@
 (ns xmas.ed
   (:require [clojure.string :as str]
+            [xmas.api :as api]
             [xmas.buf :as buf]
             [xmas.buflist :as buflist]
             [xmas.cmd :as cmd]
             [xmas.dired :as dired]
-            [xmas.el :as el]
             [xmas.gap :as gap]
             [xmas.mode :as mode]
-            [xmas.pkg :as pkg]
             [xmas.persist :as persist]
             [xmas.rect :as rect]
             [xmas.term :as t]
@@ -627,13 +626,13 @@
 ;; --- Eval expression (M-:) ---
 
 (defn- eval-expression [s input]
-  ;; Must not pass the global `editor` atom here: eval-expression runs inside
-  ;; `(swap! editor ...)`, and elisp builtins that `swap! *state*` on the
-  ;; global atom would be clobbered when the outer swap commits `s`. Thread
-  ;; a local atom instead and merge its final value back.
+  ;; Runs inside `(swap! editor ...)`, so it gets a private atom: swapping the
+  ;; live one here would make the outer CAS retry and run the form twice.
   (try
     (let [a (atom s)
-          result (el/eval-1 input a)]
+          result (binding [api/*state* a
+                           *ns* (or (find-ns 'user) *ns*)]
+                   (load-string input))]
       (msg @a (pr-str result)))
     (catch Exception e (msg-error s "Eval error" e))))
 
@@ -862,7 +861,7 @@
 
 (defn- resolve-binding [s key]
   (or (mode/lookup-key s key)
-      (get (:el-bindings s) key)
+      (get (:bindings s) key)
       (get bindings key)))
 
 (defn describe-key
@@ -890,26 +889,19 @@
 
 (defn- describe-function [s name]
   (let [n  (trim-name name)
-        cmd (get-in s [:commands n])
-        sym (symbol n)
-        el-fns (:el-fns s)]
+        cmd (get-in s [:commands n])]
     (cond
       (str/blank? n) s
       cmd (msg s (str n " -- " (:doc cmd)))
-      (and el-fns (contains? @el-fns sym)) (msg s (str n " -- (elisp function)"))
       :else (msg s (str "No function: " n)))))
 
 (defn- describe-variable [s name]
-  (let [n (trim-name name)
-        sym (symbol n)
-        vars (:el-vars s)
-        entry (when vars (find @vars sym))
-        doc (get-in s [:custom-docs sym])]
-    (cond
-      (str/blank? n) s
-      entry (msg s (str n " = " (pr-str (val entry))
-                        (when doc (str "  --  " doc))))
-      :else (msg s (str "No variable: " n)))))
+  (let [n (trim-name name)]
+    (if-let [v (and (not (str/blank? n))
+                    (some #(ns-resolve % (symbol n)) (all-ns)))]
+      (msg s (str n " = " (if (bound? v) (pr-str @v) "#<unbound>")
+                  (when-let [doc (:doc (meta v))] (str "  --  " doc))))
+      (msg s (str "No variable: " n)))))
 
 
 (defn- dired-find-file-at-point
@@ -936,7 +928,7 @@
 
 ;; --- Named-command registry (for M-x + help) ---
 
-(declare package-list bookmark-set bookmark-jump recentf-open)
+(declare bookmark-set bookmark-jump recentf-open)
 
 (defn- cmd-entry [f doc] {:fn f :doc doc})
 
@@ -981,7 +973,6 @@
    "shrink-window"               (cmd-entry shrink-window "Make the current window one row shorter.")
    "enlarge-window-horizontally" (cmd-entry enlarge-window-horizontally "Make the current window one column wider.")
    "shrink-window-horizontally"  (cmd-entry shrink-window-horizontally "Make the current window one column narrower.")
-   "package-list"                (cmd-entry package-list "Show installed packages in the echo area.")
    "bookmark-set"                (cmd-entry bookmark-set "Save point as a named bookmark.")
    "bookmark-jump"               (cmd-entry bookmark-jump "Jump to a named bookmark.")
    "recentf-open"                (cmd-entry recentf-open "Open a recently visited file.")
@@ -996,8 +987,7 @@
 ;; --- M-x ---
 
 (defn- command-names [s]
-  (sort (distinct (concat (keys (:commands s))
-                          (map str (el/list-fn-names s))))))
+  (sort (keys (:commands s))))
 
 (defn- command-completer
   "Tab-complete command names. Returns {:completed str :candidates [str]}."
@@ -1010,14 +1000,8 @@
   (if (str/blank? name)
     s
     (let [n (str/trim name)
-          cmd (get-in s [:commands n])
-          sym (symbol n)
-          el-fns (:el-fns s)]
-      (cond
-        cmd ((:fn cmd) s)
-        (and el-fns (contains? @el-fns sym))
-        (let [a (atom s)] (el/call-fn sym a) @a)
-        :else (msg s (str "No command: " n))))))
+          cmd (get-in s [:commands n])]
+      (if cmd ((:fn cmd) s) (msg s (str "No command: " n))))))
 
 ;; --- Registers ---
 ;; Each register is a value under a single character key:
@@ -1358,17 +1342,7 @@
                     (try (loader p) (log/log "loaded" name)
                          (catch Exception e (swap! editor msg-error name e))))))]
     (load-persisted-state!)
-    (load! "init.clj" load-file)
-    (load! "init.el"  #(el/eval-string (slurp % :encoding "UTF-8") editor))
-    (pkg/load-all! editor)))
-
-(defn package-list
-  "M-x command: show installed packages in the echo area."
-  [s]
-  (let [names (pkg/installed)]
-    (msg s (if (seq names)
-             (str "Installed: " (str/join " " names))
-             "No packages installed."))))
+    (load! "init.clj" #(binding [api/*state* editor] (load-file %)))))
 
 (defn- silence-stdio!
   "Redirect stdout/stderr so nREPL output doesn't corrupt the terminal."
@@ -1398,6 +1372,8 @@
     (t/on-resize! (fn [rows cols] (swap! editor assoc :rows rows :cols cols)))
     (let [[rows cols] (t/terminal-size)]
       (reset! editor (initial-state rows cols))
+      ;; nREPL and any other out-of-band caller can use xmas.api directly.
+      (alter-var-root #'api/*state* (constantly editor))
       (load-init-files!)
       (silence-stdio!)
       (let [services (start-services!)]

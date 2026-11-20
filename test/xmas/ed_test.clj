@@ -525,17 +525,15 @@
         s' (#'xmas.ed/describe-function s "no-such-func")]
     (is (.contains ^String (:msg s') "No function"))))
 
+(def describe-me "A test variable." 42)
+
 (deftest describe-variable-found
-  (let [s0 (make-state "hello")
-        s1 (assoc s0 :el-vars (atom {'answer 42}))
-        s2 (#'xmas.ed/describe-variable s1 "answer")]
-    (is (= "answer = 42" (:msg s2)))))
+  (let [s (#'xmas.ed/describe-variable (make-state "hello") "describe-me")]
+    (is (= "describe-me = 42  --  A test variable." (:msg s)))))
 
 (deftest describe-variable-missing
-  (let [s0 (make-state "hello")
-        s1 (assoc s0 :el-vars (atom {}))
-        s2 (#'xmas.ed/describe-variable s1 "nope")]
-    (is (.contains ^String (:msg s2) "No variable"))))
+  (let [s (#'xmas.ed/describe-variable (make-state "hello") "no-such-var-xyz")]
+    (is (.contains ^String (:msg s) "No variable"))))
 
 ;; --- Query replace ---
 
@@ -1235,22 +1233,22 @@
     (is (= "3" (:msg s3)))))
 
 (deftest eval-expression-persists-state-changes
-  ;; Regression: eval-expression used to pass the global `editor` atom to
-  ;; el/eval-1, but runs inside `(swap! editor ...)`. Any `swap! *state*`
-  ;; from elisp was clobbered by the outer swap committing the old `s`.
+  ;; M-: runs inside `(swap! editor ...)`, so it writes to a private atom;
+  ;; swapping the live one would make the outer CAS retry and run it twice.
   (let [s  (make-state "" 0)
         s1 (ed/handle-key s [:meta \:])
-        s2 (reduce #(ed/handle-key %1 %2) s1 (seq "(insert \"Z\")"))
+        s2 (reduce #(ed/handle-key %1 %2) s1
+                   (seq "(xmas.api/apply! xmas.cmd/insert-at-point \"Z\")"))
         s3 (ed/handle-key s2 :return)]
     (is (= "Z" (text s3)))))
 
-;; --- Elisp keybindings dispatch ---
+;; --- User keybindings dispatch ---
 
-(deftest el-bindings-dispatch
-  ;; Simulate what init.el loading does: register a binding in :el-bindings
+(deftest state-bindings-dispatch
+  ;; What api/bind! installs: :bindings on state, consulted before globals.
   (let [called (atom false)
         s (-> (make-state "abc" 0)
-              (assoc :el-bindings {[:ctrl \t] (fn [s] (reset! called true) s)}))
+              (assoc :bindings {[:ctrl \t] (fn [s] (reset! called true) s)}))
         s' (ed/handle-key s [:ctrl \t])]
     (is @called)))
 
@@ -1262,7 +1260,7 @@
   (let [seen (atom nil)
         cmd  (fn [s] (reset! seen (:prefix-arg s)) s)
         s    (-> (make-state "" 0)
-                 (assoc :el-bindings {[:ctrl \x] {[:ctrl \t] cmd}}))
+                 (assoc :bindings {[:ctrl \x] {[:ctrl \t] cmd}}))
         keys [[:ctrl \u] \4 [:ctrl \x] [:ctrl \t]]
         s'   (reduce ed/handle-key s keys)]
     (is (= {:num 4} @seen))

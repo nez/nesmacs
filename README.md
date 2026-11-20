@@ -1,6 +1,9 @@
 # xmas
 
-A minimal Emacs in Clojure.
+An editor with the Emacs paradigm, in Clojure.
+
+Buffers, keymaps, modes and hooks, extended with plain Clojure — no Emacs Lisp
+runtime and no `~/.emacs.d`. See [PRD.md](PRD.md) for scope and non-goals.
 
 ## Architecture
 
@@ -47,7 +50,39 @@ A single [atom](src/xmas/ed.clj#L13) holds the entire editor state:
 
 **Minibuffer** — Prompts (find-file, switch-buffer) reuse the buffer abstraction. [`mini-start`](src/xmas/ed.clj#L116) creates a temporary buffer named `" *mini*"` and swaps it in as active. Normal editing commands just work inside it. [`mini-accept`](src/xmas/ed.clj#L123) reads the input and calls the callback.
 
-**Keybindings** — A [nested map](src/xmas/ed.clj#L131-L146). Simple keys map to command functions. `[:ctrl \x]` maps to a sub-map for prefix sequences (`C-x C-f`, `C-x C-s`, etc.). [`handle-key`](src/xmas/ed.clj#L150) dispatches, with chars falling through to `self-insert`.
+**Keybindings** — A [nested map](src/xmas/ed.clj#L1133-L1186). Simple keys map to command functions. `[:ctrl \x]` maps to a sub-map for prefix sequences (`C-x C-f`, `C-x C-s`, etc.). [`handle-key`](src/xmas/ed.clj#L1194) dispatches, with chars falling through to `self-insert`. User bindings live on state under `:bindings` and take precedence over the built-in map; [`xmas.api`](src/xmas/api.clj) installs them from key strings.
+
+### [`xmas.api`](src/xmas/api.clj) / [`xmas.keymap`](src/xmas/keymap.clj) — Extension surface
+
+`xmas.api` is what configuration uses: `bind!`, `add-hook!`, `register-mode!`.
+It mutates the editor atom in the dynamic var `*state*` — the live editor
+normally, a private atom during `M-:` — so calls are safe inside the command
+loop's transaction. `xmas.keymap` parses Emacs key syntax (`"C-x C-f"`) and
+installs handlers, creating or replacing prefix maps as needed.
+
+## Configuration
+
+`~/.xmas/init.clj` runs once at startup, after persisted state loads. It is
+plain Clojure:
+
+```clojure
+(ns my.init
+  (:require [xmas.api :as api]))
+
+(defn hello
+  "Say hello in the echo area."
+  [s] (assoc s :msg "hello"))
+
+(api/bind! "C-c h" #'hello)          ; named commands also appear in M-x
+(api/add-hook! :clojure-mode-hook
+  (fn [s] s))
+(api/register-mode! :notes-mode :major
+  {"C-c C-c" (fn [s] (assoc s :msg "compiled"))})
+```
+
+`M-:` evaluates a Clojure form in the same context — it can open a `(ns ...)`,
+`require`, or call the API directly. A failing `init.clj` reports the error in
+the echo area and the editor keeps running.
 
 ### [`xmas.term`](src/xmas/term.clj) — Terminal I/O
 
@@ -92,12 +127,9 @@ Once connected, the running editor is fully inspectable and modifiable:
 ;; inject text into the live editor
 (swap! xmas.ed/editor xmas.ed/edit 0 0 "hello from emacs!\n")
 
-;; add a keybinding at runtime
-(alter-var-root #'xmas.ed/bindings assoc [:ctrl \t] xmas.ed/next-line)
-
-;; define a new command and bind it
-(defn my-cmd [s] (xmas.ed/msg s "it works"))
-(alter-var-root #'xmas.ed/bindings assoc [:meta \z] my-cmd)
+;; define a new command and bind it (it also appears in M-x)
+(defn my-cmd "It works." [s] (xmas.ed/msg s "it works"))
+(xmas.api/bind! "M-z" #'my-cmd)
 
 ;; open a file programmatically
 (swap! xmas.ed/editor xmas.ed/find-file "/tmp/test.txt")
