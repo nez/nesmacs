@@ -1165,6 +1165,16 @@
 (deftest eval-assq-finds-pair
   (is (= '(b 2) (ev "(assq 'b '((a 1) (b 2) (c 3)))"))))
 
+(deftest eval-sort-with-equal-elements
+  ;; Regression: the comparator returned 1 for equal elements (never 0), which
+  ;; violates the Comparator contract and made Arrays/sort throw
+  ;; "Comparison method violates its general contract!" for this input.
+  (let [xs [2 0 1 1 1 2 1 3 3 1 3 2 1 3 1 3 2 1 3 1 2 1 0 0 1 1 1 1 3 2 3 3 0 3 3
+            2 1 0 0 1 0 1 1 2 2 3 3 0 3 1 3 1 1 3 3 3 2 0 3 2 1 0 1 2 1 3 2 0]
+        form (str "(sort (list " (clojure.string/join " " xs) ") (lambda (a b) (< a b)))")
+        res (ev form)]
+    (is (= (sort xs) (vec res)))))
+
 ;; --- Tier A: string builtins ---
 
 (deftest eval-upcase

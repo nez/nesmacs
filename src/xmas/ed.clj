@@ -135,10 +135,9 @@
     (kill-range s p end)))
 
 (defn kill-region [s]
-  (if-let [mark (:mark (cur s))]
-    (let [p (:point (cur s))]
-      (-> (kill-range s (min mark p) (max mark p))
-          (update-cur #(assoc % :mark nil))))
+  (if-let [[lo hi] (cmd/region-bounds s)]
+    (-> (kill-range s lo hi)
+        (update-cur #(assoc % :mark nil)))
     s))
 
 (defn yank [s]
@@ -230,19 +229,15 @@
   "Pipe the current region through `cmd` and replace it with the command's
    output. Requires an active mark."
   [s cmd]
-  (let [b (cur s)
-        mark (:mark b)
-        point (:point b)]
-    (cond
-      (str/blank? cmd) s
-      (nil? mark)      (msg s "No region")
-      :else
-      (let [from (min (long mark) (long point))
-            to   (max (long mark) (long point))
-            input  (gap/substr (:text b) from to)
-            output (str/trimr (run-shell cmd input))]
-        (-> s (edit from to output)
-              (update-cur #(assoc % :mark nil)))))))
+  (cond
+    (str/blank? cmd)         s
+    (nil? (:mark (cur s)))   (msg s "No region")
+    :else
+    (let [[lo hi] (cmd/region-bounds s)
+          input   (gap/substr (:text (cur s)) lo hi)
+          output  (str/trimr (run-shell cmd input))]
+      (-> s (edit lo hi output)
+            (update-cur #(assoc % :mark nil))))))
 
 (defn shell-command
   "Execute `cmd` in a subshell. Short output goes to the echo area; long
@@ -394,15 +389,11 @@
       (not (contains? (:bufs s) target)) (msg s (str "No buffer: " target))
       (= 1 (count (:bufs s)))             (msg s "Cannot kill last buffer")
       :else
-      (let [fallback (or (first (remove #(or (= % target)
-                                             (.startsWith ^String % " "))
-                                        (sort (keys (:bufs s)))))
-                         "*scratch*")
-            s' (-> s (update :bufs dissoc target)
-                     (update :windows win/replace-buffer target fallback))
-            s' (cond-> s'
-                 (= target (:buf s')) (cmd/set-cur-buffer fallback))]
-        (msg s' (str "Killed " target))))))
+      (let [[s' fallback] (ensure-fallback-buf (update s :bufs dissoc target) nil)]
+        (-> s'
+            (update :windows win/replace-buffer target fallback)
+            (cond-> (= target (:buf s')) (cmd/set-cur-buffer fallback))
+            (msg (str "Killed " target)))))))
 
 (defn recenter
   "Move the current window's scroll so point lands on the middle row."
@@ -418,21 +409,18 @@
   "Prepend the buffer's :comment-start (default ';; ') to each line in the
    region. No-op without a mark."
   [s]
-  (let [b (cur s) p (:point b) m (:mark b)]
-    (if-not m
-      (msg s "No region")
-      (let [lo (min (long p) (long m))
-            hi (max (long p) (long m))
-            t  (:text b)
-            first-line (gap/line-of t lo)
-            last-line  (max first-line (gap/line-of t (max lo (dec hi))))
-            cs       (or (:comment-start b) ";; ")
-            fl-start (gap/nth-line-start t first-line)
-            ll-end   (gap/nth-line-end   t last-line)
-            slice    (str (gap/substr t fl-start ll-end))
-            commented (str/join "\n" (map #(str cs %) (str/split slice #"\n" -1)))]
-        (-> (edit s fl-start ll-end commented)
-            (update-cur #(assoc % :mark nil)))))))
+  (if-let [[lo hi] (cmd/region-bounds s)]
+    (let [t  (:text (cur s))
+          first-line (gap/line-of t lo)
+          last-line  (max first-line (gap/line-of t (max lo (dec hi))))
+          cs       (or (:comment-start (cur s)) ";; ")
+          fl-start (gap/nth-line-start t first-line)
+          ll-end   (gap/nth-line-end   t last-line)
+          slice    (str (gap/substr t fl-start ll-end))
+          commented (str/join "\n" (map #(str cs %) (str/split slice #"\n" -1)))]
+      (-> (edit s fl-start ll-end commented)
+          (update-cur #(assoc % :mark nil))))
+    (msg s "No region")))
 
 ;; --- Minibuffer ---
 
@@ -459,7 +447,7 @@
   (cond
     (contains? (:bufs s) prev-buf) [s prev-buf]
     :else
-    (if-let [n (first (remove #(.startsWith ^String % " ") (keys (:bufs s))))]
+    (if-let [n (first (remove #(.startsWith ^String % " ") (sort (keys (:bufs s)))))]
       [s n]
       [(assoc-in s [:bufs "*scratch*"] (buf/make "*scratch*")) "*scratch*"])))
 
@@ -697,8 +685,6 @@
 
 ;; --- Query replace (M-%) ---
 
-(declare handle-key)
-
 (defn- regex-find
   "Return [start end groups] for the next match of `pattern` at or after `from`, or nil."
   [^CharSequence t ^String pattern ^long from]
@@ -723,43 +709,55 @@
   (let [n (get-in s [:query-replace :count] 0)]
     (-> s (dissoc :query-replace) (msg (str "Replaced " n " occurrence(s)")))))
 
-(defn- qr-find-next [s]
+(defn- qr-find-from
+  "Return [start end groups] for the first match at or after `pos`, or nil."
+  [s ^long pos]
   (let [{:keys [from regex?]} (:query-replace s)
-        t (:text (cur s))
-        p (:point (cur s))]
-    (if regex?
-      (regex-find t from p)
-      (when-let [start (text/search-forward t from p)]
-        [start (+ start (count from)) nil]))))
+        t (:text (cur s))]
+    (when (<= pos (count t))
+      (if regex?
+        (regex-find t from pos)
+        (when-let [start (text/search-forward t from pos)]
+          [start (+ start (count from)) nil])))))
 
-(defn- qr-advance [s]
-  (if-let [[start end groups] (qr-find-next s)]
+(defn- qr-show
+  "Move point to the match `found` ([start end groups]), or exit when nil."
+  [s found]
+  (if-let [[start end groups] found]
     (-> s (cmd/goto-char start)
           (update :query-replace assoc :match-end end :groups groups)
           qr-msg)
     (qr-exit s)))
 
+(defn- qr-advance
+  "Skip the current match and show the next one. Search starts past the
+   current match's end (past a zero-width match) so `n` always progresses."
+  [s]
+  (let [{:keys [match-end]} (:query-replace s)
+        p (:point (cur s))]
+    (qr-show s (qr-find-from s (max (inc (long p)) (long (or match-end 0)))))))
+
 (defn- qr-replace-here [s]
   (let [{:keys [to regex? match-end groups]} (:query-replace s)
-        p (:point (cur s))
+        p (long (:point (cur s)))
         replacement (if regex? (expand-replacement to groups) to)
-        zero-width? (= p match-end)
+        zero-width? (= p (long match-end))
         s2 (-> s (edit p match-end replacement)
                  (update-in [:query-replace :count] (fnil inc 0)))]
     (if zero-width?
-      ;; Zero-width match (e.g. regex `$` or `a*`): the next find would
-      ;; refind the same position. Advance point past it; if at EOF, exit.
-      (let [b (cur s2) pt (:point b) tn (count (:text b))]
-        (if (>= pt tn)
+      ;; A zero-width match (e.g. regex `$` or `a*`) would be refound at the
+      ;; same spot. Step past it — and exit at EOF — so neither the search
+      ;; nor replace-all can loop forever.
+      (let [s3 (update-cur s2 #(update % :point inc))
+            b  (cur s3)]
+        (if (>= (long (:point b)) (count (:text b)))
           (qr-exit s2)
-          (qr-advance (update-cur s2 #(update % :point inc)))))
-      (qr-advance s2))))
+          (qr-show s3 (qr-find-from s3 (:point b)))))
+      (qr-show s2 (qr-find-from s2 (:point (cur s2)))))))
 
 (defn- qr-replace-all [s]
-  (loop [s s]
-    (if (:query-replace s)
-      (recur (if (qr-find-next s) (qr-replace-here s) (qr-exit s)))
-      s)))
+  (loop [s (qr-replace-here s)]
+    (if (:query-replace s) (recur (qr-replace-here s)) s)))
 
 (defn- query-replace-begin
   "Enter query-replace mode at the first match from point."
@@ -769,8 +767,8 @@
                         (catch java.util.regex.PatternSyntaxException e e)))]
     (msg s (str "Invalid regexp: " (.getDescription error)))
     (let [s (assoc s :query-replace {:from from :to to :count 0 :regex? regex?})]
-      (if (qr-find-next s)
-        (qr-advance s)
+      (if-let [found (qr-find-from s (:point (cur s)))]
+        (qr-show s found)
         (msg (dissoc s :query-replace) "No match")))))
 
 (defn- qr-prompt-to
@@ -1074,10 +1072,8 @@
             :else (msg s (str "Register " ch " is text — use C-x r i"))))
 
         :reg-copy
-        (if-let [m (:mark (cur s))]
-          (let [p (:point (cur s)) t (:text (cur s))
-                lo (min m p) hi (max m p)
-                txt (str (gap/substr t lo hi))]
+        (if-let [[lo hi] (cmd/region-bounds s)]
+          (let [txt (str (gap/substr (:text (cur s)) lo hi))]
             (-> s (assoc-in [:registers ch] {:kind :text :text txt})
                   (msg (str "Region copied to register " ch))))
           (msg s "No region"))
@@ -1169,7 +1165,7 @@
    :return insert-newline
    [:ctrl \d] delete-char :backspace delete-backward-char
    [:ctrl \k] kill-line [:ctrl \w] kill-region
-   [:ctrl \y] yank [:ctrl \space] set-mark
+   [:ctrl \y] yank [:ctrl \space] set-mark [:ctrl \@] set-mark
    [:ctrl \s] #(isearch-start % :forward)
    [:ctrl \r] #(isearch-start % :backward)
    [:ctrl \/] undo [:meta \/] redo [:ctrl \g] keyboard-quit

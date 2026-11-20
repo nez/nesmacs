@@ -100,6 +100,8 @@
     (= b 13)  :return
     (= b 10)  :return
     (= b 127) :backspace
+    ;; NUL is what a terminal sends for C-SPC / C-@ (byte 0), not "C-`".
+    (= b 0)   [:ctrl \space]
     (< b 27)  [:ctrl (char (+ b 96))]
     (< b 32)  nil
     (< b 128) (char b)

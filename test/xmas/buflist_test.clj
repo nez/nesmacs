@@ -62,3 +62,18 @@
         p-before (:point (cmd/cur s))
         s' (buflist/kill s)]
     (is (= p-before (:point (cmd/cur s'))))))
+
+(deftest switch-and-kill-use-buffer-key-not-display-name
+  ;; Regression: a file buffer's :name is its basename while its :bufs key is
+  ;; the path. switch/kill used the name, so switching pointed :buf at a
+  ;; non-existent buffer (cur became nil) and killing was a no-op.
+  (let [path "/tmp/xmas-file-buffer-key.txt"
+        s0 (state-with-bufs {"*scratch*" (buf/make "*scratch*" "" nil)
+                             path (buf/make "xmas-file-buffer-key.txt" "hi" path)}
+                            "*scratch*")
+        s  (-> (buflist/open s0)
+               (cmd/update-cur #(assoc % :point (gap/nth-line-start (:text %) 2))))
+        s' (buflist/switch s)]
+    (is (= path (:buf s')))
+    (is (some? (cmd/cur s')))
+    (is (not (contains? (:bufs (buflist/kill s)) path)))))

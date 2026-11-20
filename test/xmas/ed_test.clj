@@ -343,6 +343,28 @@
     (let [s5 (ed/other-window s4)]
       (is (= 8 (:point (ed/cur s5)))))))
 
+(deftest per-window-point-works-for-file-keyed-buffers
+  ;; A file buffer's :name is its basename; its :bufs key is the path. The
+  ;; saved-point guard compared the window's key to :name, so it never saved.
+  (let [path "/tmp/xmas-file-key.txt"
+        s0 (-> (make-state "hello world" 0)
+               (assoc :buf path)
+               (assoc :bufs {path (buf/make "xmas-file-key.txt" "hello world" path)})
+               (assoc :windows (win/leaf path)))
+        s1 (-> s0 (xmas.cmd/goto-char 5) ed/split-window-below)
+        s2 (ed/other-window s1)]
+    (is (= 5 (get-in s2 [:windows :a :point])))))
+
+(deftest kill-buffer-recreates-scratch-when-only-hidden-remains
+  ;; The fallback used to be the literal "*scratch*" even when it wasn't in
+  ;; :bufs, leaving :buf pointing at a missing buffer.
+  (let [s0 (-> (make-state "abc" 0)
+               (assoc-in [:bufs " *hidden*"] (buf/make " *hidden*" "" nil)))
+        s1 (ed/kill-buffer s0 "*test*")]
+    (is (contains? (:bufs s1) "*scratch*"))
+    (is (= "*scratch*" (:buf s1)))
+    (is (some? (ed/cur s1)))))
+
 ;; --- M-x ---
 
 (defn- with-commands [s]
@@ -528,6 +550,17 @@
   (let [s (#'xmas.ed/query-replace-begin (make-state "hello" 0) "zzz" "!" false)]
     (is (nil? (:query-replace s)))
     (is (= "No match" (:msg s)))))
+
+(deftest qr-advance-skips-the-current-match
+  ;; Regression: `n` searched from point, which is the *start* of the match
+  ;; already displayed, so it kept re-finding the same occurrence forever.
+  (let [s0 (#'xmas.ed/query-replace-begin (make-state "foo foo foo" 0) "foo" "XY" false)
+        s1 (#'xmas.ed/qr-advance s0)
+        s2 (#'xmas.ed/qr-advance s1)]
+    (is (= 0 (point s0)))
+    (is (= 4 (point s1)))
+    (is (= 8 (point s2)))
+    (is (= "foo foo foo" (text s2)))))
 
 (deftest qr-replace-here-replaces-and-advances
   (let [s0 (#'xmas.ed/query-replace-begin (make-state "foo foo foo" 0) "foo" "XY" false)

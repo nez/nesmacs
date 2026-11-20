@@ -39,7 +39,10 @@
   (let [wp (cur-window-path s)
         b  (cur s)
         win-buf (get-in s (conj wp :buffer))]
-    (if (or (nil? b) (not= (:name b) win-buf))
+    ;; Compare the :bufs key, not the buffer's display :name — for a file
+    ;; buffer the name is just the basename while the window stores the path,
+    ;; which made saved points silently never persist.
+    (if (or (nil? b) (not= (:buf s) win-buf))
       s
       (-> s (assoc-in (conj wp :point) (:point b))
             (assoc-in (conj wp :mark)  (:mark b))))))
@@ -109,7 +112,7 @@
         hi (max (long from) (long to))]
     (edit s lo hi "")))
 
-(defn- region-bounds
+(defn region-bounds
   "Return [lo hi] for the active region, or nil if no mark is set."
   [s]
   (let [b (cur s) p (:point b) m (:mark b)]

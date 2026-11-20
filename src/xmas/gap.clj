@@ -76,7 +76,7 @@
   "First index in lidx whose value is >= v. Uses Arrays/binarySearch."
   ^long [^ints lidx ^long v]
   (let [i (java.util.Arrays/binarySearch lidx (int v))]
-    (if (neg? i) (- (- i) 1) i)))
+    (if (neg? i) (dec (- i)) i)))
 
 (defn- splice-lidx
   "New int[] reflecting logical edit of [from,to) → repl in a buffer whose
@@ -220,8 +220,7 @@
   "Zero-based line number containing pos. Returns the first lidx index i
    where lidx[i] >= pos (O(log n) via `Arrays/binarySearch`)."
   ^long [^GapBuffer gb ^long pos]
-  (let [i (java.util.Arrays/binarySearch (.-lidx gb) (int pos))]
-    (if (neg? i) (- (- i) 1) i)))
+  (lidx-bound (.-lidx gb) pos))
 
 (defn nth-line-start
   "Start position of zero-based line n."

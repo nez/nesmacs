@@ -561,7 +561,7 @@
 
 (defn- el-symbol-function [sym]
   (or (get @*fns* sym)
-      (when-let [b (get @(or *macros* (atom {})) sym)]
+      (when-let [b (and *macros* (get @*macros* sym))]
         {:macro b})))
 
 (defn- el-symbol-value [sym]
@@ -895,7 +895,12 @@
    'mapcar    (fn [f l] (seq (mapv #(funcall-impl f [%]) l)))
    'mapc      (fn [f l] (run! #(funcall-impl f [%]) l) l)
    'reverse   reverse
-   'sort      (fn [l pred] (sort #(if (funcall-impl pred [%1 %2]) -1 1) l))
+   'sort      (fn [l pred]
+                (sort (fn [a b]
+                        (cond (funcall-impl pred [a b]) -1
+                              (funcall-impl pred [b a]) 1
+                              :else 0))
+                      l))
    'memq      (fn [x l] (seq (drop-while #(not= x %) l)))
    'assq      (fn [k al] (some (fn [p] (when (and (sequential? p) (= k (first p))) p)) al))
    'nthcdr    (fn [n l] (seq (drop n l)))
