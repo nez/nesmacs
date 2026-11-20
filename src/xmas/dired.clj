@@ -36,19 +36,11 @@
      :format-entry #(format-entry % self parent-path)
      :extras       {:dired-dir dir}}))
 
-(defn make-buffer
-  "Build a fresh dired buffer for `dir`."
-  [^String dir]
-  (listbuf/make (spec dir)))
-
 (defn open
   "Open `dir` in a dired buffer, reusing any existing buffer of the same name."
   [s dir]
-  (let [canonical (.getCanonicalPath (File. ^String dir))
-        name      (buf-name-for canonical)]
-    (-> s
-        (assoc-in [:bufs name] (make-buffer canonical))
-        (cmd/set-cur-buffer name))))
+  (let [canonical (.getCanonicalPath (File. ^String dir))]
+    (listbuf/open s (buf-name-for canonical) (spec canonical))))
 
 ;; --- Navigation / marks ---
 

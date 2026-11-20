@@ -16,21 +16,16 @@
   {:name         gitlog-name
    :mode         :gitlog-mode
    :header       "Git log (g to refresh)"
-   :entries      (git/log (str (java.io.File. dir)) 200)
-   :format-entry fmt})
-
-(defn make-buffer [dir]
-  (listbuf/make (spec dir)))
+   :entries      (git/log dir 200)
+   :format-entry fmt
+   :extras       {:git-dir dir}})
 
 (defn open [s dir]
-  (let [canonical (str (java.io.File. dir))]
-    (-> s
-        (assoc-in [:bufs gitlog-name] (make-buffer canonical))
-        (cmd/set-cur-buffer gitlog-name))))
+  (listbuf/open s gitlog-name (spec dir)))
 
 (defn show-commit [s]
   (if-let [e (listbuf/entry-at-point s)]
-    (let [dir (git/repo-root (str (java.io.File. (:file (cmd/cur s)))))]
+    (let [dir (git/repo-root (git/current-dir (cmd/cur s)))]
       (when dir
         (job/start s {:argv ["git" "show" (:hash e)]
                       :dir dir
@@ -40,8 +35,8 @@
 
 (defn refresh [s]
   (let [b (cmd/cur s)
-        dir (str (java.io.File. (:file b)))]
+        dir (git/current-dir b)]
     (if (git/is-repo? dir)
       (listbuf/refresh s gitlog-name (spec dir))
-      (-> s (assoc-in [:bufs gitlog-name] (make-buffer dir))
+      (-> s (assoc-in [:bufs gitlog-name] (listbuf/make (spec dir)))
           (cmd/msg "Not a git repository")))))

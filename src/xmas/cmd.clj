@@ -1,5 +1,5 @@
 (ns xmas.cmd
-  "Pure state-transition commands shared by ed (terminal) and el (elisp bridge)."
+  "Pure state-transition commands shared by the terminal loop and xmas.api."
   (:require [clojure.string :as str]
             [xmas.buf :as buf]
             [xmas.gap :as gap]

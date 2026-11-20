@@ -40,3 +40,9 @@
         fresh (make (assoc spec :version v))]
     (assoc-in s [:bufs name]
               (assoc fresh :point (min p (count (:text fresh)))))))
+
+(defn open
+  "Install a freshly built `spec` buffer and show it in the current window."
+  [s name spec]
+  (-> s (assoc-in [:bufs name] (make spec))
+        (cmd/set-cur-buffer name)))

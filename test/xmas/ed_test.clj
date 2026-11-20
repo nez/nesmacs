@@ -9,6 +9,7 @@
             [xmas.nav :as nav]
             [xmas.persist :as persist]
             [xmas.rect :as rect]
+            [xmas.session :as session]
             [xmas.spec :as spec]
             [xmas.window :as win]))
 
@@ -1779,7 +1780,7 @@
 
 (deftest session-sig-detects-changes
   (let [s (make-state "hello")]
-    (is (= (ed/session-sig s) (ed/session-sig s)))
-    (is (not= (ed/session-sig s)
-              (ed/session-sig
+    (is (= (session/signature s) (session/signature s)))
+    (is (not= (session/signature s)
+              (session/signature
                 (update-in s [:bufs "*test*"] #(buf/edit % 0 0 "x")))))))

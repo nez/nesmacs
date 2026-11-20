@@ -25,33 +25,25 @@
      :mode         :gitstatus-mode
      :header       (str "Git: " (or (git/branch-name dir) "no repo"))
      :entries      entries
-     :format-entry fmt}))
-
-(defn make-buffer [dir]
-  (listbuf/make (spec dir)))
+     :format-entry fmt
+     :extras       {:git-dir dir}}))
 
 (defn open [s dir]
-  (let [canonical (str (java.io.File. dir))]
-    (-> s
-        (assoc-in [:bufs gitstatus-name] (make-buffer canonical))
-        (cmd/set-cur-buffer gitstatus-name))))
-
-(defn- entry-at-point [s]
-  (listbuf/entry-at-point s))
+  (listbuf/open s gitstatus-name (spec dir)))
 
 (defn- cur-repo-root [s]
-  (git/repo-root (str (java.io.File. (:file (cmd/cur s))))))
+  (git/repo-root (git/current-dir (cmd/cur s))))
 
 (defn refresh [s]
   (let [b (cmd/cur s)
-        dir (str (java.io.File. (:file b)))]
+        dir (git/current-dir b)]
     (if (git/is-repo? dir)
       (listbuf/refresh s gitstatus-name (spec dir))
       (-> s (assoc-in [:bufs gitstatus-name] (listbuf/make (spec dir)))
           (cmd/msg "Not a git repository")))))
 
 (defn stage [s]
-  (if-let [e (entry-at-point s)]
+  (if-let [e (listbuf/entry-at-point s)]
     (let [dir (cur-repo-root s)]
       (when dir
         (git/add dir (:path e))
@@ -59,7 +51,7 @@
     s))
 
 (defn unstage [s]
-  (if-let [e (entry-at-point s)]
+  (if-let [e (listbuf/entry-at-point s)]
     (let [dir (cur-repo-root s)]
       (when dir
         (git/reset dir (:path e))
@@ -67,7 +59,7 @@
     s))
 
 (defn diff-at-point [s]
-  (if-let [e (entry-at-point s)]
+  (if-let [e (listbuf/entry-at-point s)]
     (let [dir (cur-repo-root s)
           staged? (= :staged (:status e))]
       (gitdiff/open s dir (:path e) staged?))

@@ -57,15 +57,30 @@
                :b (walk (:b node))}))]
     (walk tree)))
 
+;; --- Periodic save ---
+
+(def ^:private save-counter (atom 0))
+(def ^:private save-interval 50) ; ~5 seconds (50 * 100ms ticks)
+;; shortcut: up to ~5 s of edits can be lost on kill -9; auto-save covers
+;; file buffers sooner, lower this only with cheap text hashing.
+(def ^:private last-sig (atom nil))
+
+(defn signature
+  "Cheap change signature: buffer versions/points and layout, not buffer text.
+   Lets the periodic save skip idle ticks without re-serializing 10 MB buffers."
+  [s]
+  (hash [(mapv (fn [[name b]]
+                 [name (:version b) (:point b) (:modified b)])
+               (:bufs s))
+         (:windows s) (:cur-window s)
+         (:recentf s) (:bookmarks s) (:mini-history s)]))
+
 (defn save-session!
   "Save current editor state to ~/.xmas/session.edn.
    Called on clean exit and periodically."
   [state]
   (let [bufs (:bufs state)
-        buf-data (into {}
-                       (map (fn [[name b]]
-                              [name (buffer->data b)])
-                            bufs))
+        buf-data (update-vals bufs buffer->data)
         session {:version session-version
                  :timestamp (System/currentTimeMillis)
                  :bufs buf-data
@@ -76,6 +91,17 @@
                  :mini-history (:mini-history state [])}]
     (persist/save-quiet! session-file session)
     session))
+
+(defn save-tick!
+  "Editor-loop step: save the session every ~5s, but only when it changed."
+  [editor-atom]
+  (when (>= (swap! save-counter inc) save-interval)
+    (reset! save-counter 0)
+    (let [s @editor-atom
+          sig (signature s)]
+      (when (not= sig @last-sig)
+        (reset! last-sig sig)
+        (save-session! s)))))
 
 (defn- sanitize-session
   "Validate and clean loaded session data."
@@ -124,10 +150,7 @@
           mini-history (:mini-history session-data)
 
           ;; Rebuild buffers from saved data
-          rebuilt-bufs (into {}
-                            (map (fn [[name data]]
-                                   [name (data->buffer data)])
-                                 bufs))
+          rebuilt-bufs (update-vals bufs data->buffer)
 
           ;; Filter out buffers that no longer exist on disk (optional)
           valid-bufs (into {}

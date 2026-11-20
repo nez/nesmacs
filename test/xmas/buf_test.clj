@@ -262,3 +262,11 @@
         b2 (buf/undo b1)                 ;; now has a redo entry
         b3 (buf/edit b2 0 0 "")]         ;; a true no-op
     (is (identical? b2 b3))))
+
+(deftest large-file-by-size
+  (let [f (java.io.File/createTempFile "xmas-large" ".txt")]
+    (try
+      (with-open [r (java.io.RandomAccessFile. f "rw")]
+        (.setLength r (inc (* 1024 1024))))
+      (is (:large-file (buf/make "large" "" (.getPath f))))
+      (finally (.delete f)))))

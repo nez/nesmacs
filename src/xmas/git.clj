@@ -19,51 +19,51 @@
   (let [out (run ["git" "rev-parse" "--show-toplevel"] dir)]
     (when-not (str/starts-with? out "Error:") (str/trim out))))
 
+(defn current-dir
+  "Best directory to run git in for a buffer: an explicit :git-dir, a job's
+   :job-dir, the parent of its file, or the JVM cwd."
+  [b]
+  (or (:git-dir b) (:job-dir b)
+      (some-> (:file b) java.io.File. .getParent)
+      (System/getProperty "user.dir")))
+
 (defn status
   "Porcelain v2 -z status. Returns a vector of maps:
-   {:path :status :head :staged} where :status is :staged :unstaged :untracked
+   {:path :status :staged} where :status is :staged :unstaged :untracked
    and :staged boolean indicates if the index differs from HEAD."
   [dir]
   (let [root (repo-root dir)
         out (when root (run ["git" "status" "--porcelain=v2" "-z"] root))]
     (when (and root out)
-      (let [lines (str/split out (re-pattern (str (char 0))))
-            parsed (mapv (fn [line]
-                           (let [parts (str/split line #"\s+" 3)]
-                             (case (first parts)
-                               "1" {:status :staged
-                                    :staged true
-                                    :path (second parts)}
-                               "2" {:status :unstaged
-                                    :staged false
-                                    :path (second parts)}
-                               "?" {:status :untracked
-                                    :staged false
-                                    :path (second parts)}
-                               {:status :unknown})))
-                         lines)
-            filtered (filterv #(not= :unknown (:status %)) parsed)]
-        filtered))))
+      (->> (str/split out (re-pattern (str (char 0))))
+           (keep (fn [line]
+                   (let [parts (str/split line #"\s+" 3)
+                         [status staged] (case (first parts)
+                                           "1" [:staged true]
+                                           "2" [:unstaged false]
+                                           "?" [:untracked false]
+                                           nil)]
+                     (when status
+                       {:status status :staged staged :path (second parts)}))))
+           vec))))
+
+(defn- in-root
+  "Run `argv` in the repo containing `dir`, or return a plain error string."
+  [dir argv]
+  (if-let [root (repo-root dir)]
+    (run argv root)
+    "Not in a git repository"))
 
 (defn add [dir path]
-  (let [root (repo-root dir)]
-    (if root
-      (run ["git" "add" "--" path] root)
-      "Not in a git repository")))
+  (in-root dir ["git" "add" "--" path]))
 
 (defn reset [dir path]
-  (let [root (repo-root dir)]
-    (if root
-      (run ["git" "reset" "HEAD" "--" path] root)
-      "Not in a git repository")))
+  (in-root dir ["git" "reset" "HEAD" "--" path]))
 
 (defn commit
   "Commit with `message`. Returns output."
   [dir message]
-  (let [root (repo-root dir)]
-    (if root
-      (run ["git" "commit" "-m" message] root)
-      "Not in a git repository")))
+  (in-root dir ["git" "commit" "-m" message]))
 
 (defn log
   "Recent commits as a vector of {:hash :abbrev :subject :author :date}.

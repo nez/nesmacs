@@ -12,7 +12,8 @@
 (defn large-file?
   "Check if buffer should use large-file mode (skip fontification/props)."
   [b]
-  (or (and (:file b) (> (try (.length (java.io.File. (:file b))) (catch Exception _ 0)) large-file-bytes))
+  (or (> (long (or (some-> ^String (:file b) java.io.File. .length) 0))
+         large-file-bytes)
       (>= (gap/line-count (:text b)) large-file-lines)))
 
 (defn bounded-conj

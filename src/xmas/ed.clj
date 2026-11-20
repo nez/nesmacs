@@ -282,14 +282,13 @@
    Uses atomic-spit so a crash mid-write can't leave the backup truncated —
    the whole point of the backup is to be usable after unclean shutdown."
   [due]
-  (into []
-        (keep (fn [[_ file text :as entry]]
-                (try
-                  (persist/atomic-spit (auto-save-path file) text)
-                  entry
-                  (catch Exception e
-                    (log/log "auto-save failed:" file (.getMessage e))
-                    nil))))
+  (keep (fn [[_ file text :as entry]]
+          (try
+            (persist/atomic-spit (auto-save-path file) text)
+            entry
+            (catch Exception e
+              (log/log "auto-save failed:" file (.getMessage e))
+              nil)))
         due))
 
 (defn auto-save!
@@ -323,33 +322,6 @@
         (when (seq saved)
           (remember-auto-saves! saved)
           (swap! editor-atom reset-edit-counts saved))))))
-
-(def ^:private session-save-counter (atom 0))
-(def ^:private session-save-interval 50) ; ~5 seconds (50 * 100ms ticks)
-;; shortcut: up to ~5 s of edits can be lost on kill -9; auto-save covers
-;; file buffers sooner, lower this only with cheap text hashing.
-(def ^:private last-session-sig (atom nil))
-
-(defn session-sig
-  "Cheap change signature: buffer versions/points and layout, not buffer text.
-   Lets the periodic save skip idle ticks without re-serializing 10 MB buffers."
-  [s]
-  (hash [(mapv (fn [[name b]]
-                 [name (:version b) (:point b) (:modified b)])
-               (:bufs s))
-         (:windows s) (:cur-window s)
-         (:recentf s) (:bookmarks s) (:mini-history s)]))
-
-(defn- session-save-tick!
-  "Save the session every ~5s, but only when something actually changed."
-  [editor-atom]
-  (when (>= (swap! session-save-counter inc) session-save-interval)
-    (reset! session-save-counter 0)
-    (let [s @editor-atom
-          sig (session-sig s)]
-      (when (not= sig @last-session-sig)
-        (reset! last-session-sig sig)
-        (session/save-session! s)))))
 
 (defn save-buffer-named
   "Save buffer `name` (a :bufs key). Pure except for the file write."
@@ -1390,7 +1362,7 @@
         line-end (gap/nth-line-end t (gap/line-of t p))
         line (gap/substr t line-start line-end)]
     (when-let [[_ path] (re-find #"diff --git a/(.+) b/" line)]
-      (let [dir (git/repo-root (or (:file (cmd/cur s)) (System/getProperty "user.dir")))]
+      (let [dir (git/repo-root (git/current-dir (cmd/cur s)))]
         (-> s (find-file (str dir "/" path))
               (cmd/msg (str "Opened " path)))))))
 
@@ -1819,7 +1791,7 @@
       (swap! editor job/pump!)
       (complete/tick! editor)
       (auto-save-tick! editor)
-      (session-save-tick! editor)
+      (session/save-tick! editor)
       (lsp/tick! editor)
       (when (:exit @editor)
         ;; Clean exit: save session before leaving the loop

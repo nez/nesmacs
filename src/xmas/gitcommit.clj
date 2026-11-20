@@ -11,7 +11,7 @@
   (-> s
       (assoc-in [:bufs commit-name]
                 (-> (buf/make commit-name "" nil)
-                    (assoc :mode :gitcommit-mode :read-only false
+                    (assoc :mode :gitcommit-mode
                            :gitcommit-dir dir)))
       (cmd/set-cur-buffer commit-name)))
 

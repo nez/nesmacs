@@ -17,12 +17,6 @@ run: jar
 jar:
 	clojure -X:uberjar
 
-# native: requires GraalVM native-image (not in CI). Dropped per M7 scope.
-# To re-enable: install GraalVM, uncomment below, and verify.
-# NATIVE := xmas-native
-# native: jar
-# 	native-image -jar $(JAR) --no-fallback --initialize-at-build-time -o $(NATIVE)
-
 test:
 	clojure -M:test
 
@@ -36,4 +30,4 @@ check: lint test pty
 	clojure -M -e '(require (quote xmas.ed)) (println "ok")'
 
 clean:
-	rm -rf target .cpcache .nrepl-port $(NATIVE)
+	rm -rf target .cpcache .nrepl-port

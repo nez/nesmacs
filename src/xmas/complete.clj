@@ -48,12 +48,13 @@
 (defn invalidate-cache! [] (reset! cache {}))
 
 (defn- cached [k build]
-  (let [now (System/currentTimeMillis)]
-    (if-let [{stamp :stamp value :value} (get @cache k)]
-      (if (< (- now stamp) cache-ttl-ms)
-        value
-        (let [v (build)] (swap! cache assoc k {:stamp now :value v}) v))
-      (let [v (build)] (swap! cache assoc k {:stamp now :value v}) v))))
+  (let [{:keys [stamp value]} (get @cache k)
+        now (System/currentTimeMillis)]
+    (if (and stamp (< (- now stamp) cache-ttl-ms))
+      value
+      (let [v (build)]
+        (swap! cache assoc k {:stamp now :value v})
+        v))))
 
 (defn- root-files [root]
   (cached [:files root] #(project/files root)))

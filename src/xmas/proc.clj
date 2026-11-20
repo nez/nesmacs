@@ -52,9 +52,10 @@
                                        q p on-exit))
             (.setDaemon true)
             (.setName (str "xmas-proc-" id))
-            (.start))]
-    (swap! procs assoc id {:id id :process p :queue q :exit exit :thread t})
-    {:id id :process p :queue q :exit exit :thread t}))
+            (.start))
+        h {:id id :process p :queue q :exit exit :thread t}]
+    (swap! procs assoc id h)
+    h))
 
 (defn by-id [id] (get @procs id))
 
