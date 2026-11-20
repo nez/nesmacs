@@ -6,6 +6,7 @@
             [xmas.buf :as buf]
             [xmas.ed :as ed]
             [xmas.job :as job]
+            [xmas.nav :as nav]
             [xmas.persist :as persist]
             [xmas.rect :as rect]
             [xmas.spec :as spec]
@@ -1663,3 +1664,94 @@
            {"ok" {:buf "b" :pos 1} "bad" {:buf 2 :pos -1}}
            ["/ok" 42]
            ["good" {:bad true}]))))
+
+;; --- Projects, occur, imenu, reload-config ---
+
+(defn- project-fixture []
+  (let [root (.toFile (java.nio.file.Files/createTempDirectory
+                        "xmas-ed-proj"
+                        (into-array java.nio.file.attribute.FileAttribute [])))]
+    (doseq [[rel content] [[".git/HEAD" ""]
+                           ["src/a.clj" "(ns a)\n(defn needle-fn [] 1)\n"]
+                           ["src/b.clj" "needle\n"]]]
+      (let [f (java.io.File. root rel)]
+        (.mkdirs (.getParentFile f))
+        (spit f content)))
+    root))
+
+(defn- rm-rf [d]
+  (when (.isDirectory d) (doseq [c (.listFiles d)] (rm-rf c)))
+  (.delete d))
+
+(defn- with-modes [s] (#'xmas.ed/register-builtin-modes s))
+
+(deftest occur-lists-matches-and-jumps
+  (let [s1 (-> (with-modes (make-state "alpha\nbeta alpha\ngamma" 0))
+               (#'xmas.ed/occur-cmd)
+               (answer-mini "alpha"))
+        name "*Occur alpha*"]
+    (is (= name (:buf s1)))
+    (is (= 2 (count (get-in s1 [:bufs name :listbuf-entries]))))
+    (let [s2 (-> s1 (ed/handle-key [:ctrl \n]) (ed/handle-key [:ctrl \n])
+                 (ed/handle-key :return))]
+      (is (= "*test*" (:buf s2)))
+      (is (= 6 (:point (ed/cur s2)))))))
+
+(deftest imenu-lists-definitions-and-jumps
+  (let [s (-> (with-modes (make-state "(ns a)\n(defn foo [] 1)\n(def x 2)\n" 0))
+              (assoc-in [:bufs "*test*" :mode] :clojure-mode))
+        s1 (#'xmas.ed/imenu s)]
+    (is (= "*Imenu*" (:buf s1)))
+    (is (= ["foo" "x"] (mapv :name (get-in s1 [:bufs "*Imenu*" :listbuf-entries]))))
+    (let [s2 (-> s1 (ed/handle-key [:ctrl \n]) (ed/handle-key :return))]
+      (is (= "*test*" (:buf s2)))
+      (is (= 7 (:point (ed/cur s2)))))))
+
+(deftest project-find-file-opens-the-fuzzy-match
+  (let [root (project-fixture)]
+    (try
+      (let [s (-> (with-modes (make-state "" 0))
+                  (assoc-in [:bufs "*test*" :file] (str (.getPath root) "/src/a.clj"))
+                  (#'xmas.ed/project-find-file)
+                  (answer-mini "b.clj"))]
+        (is (= (str (.getCanonicalPath root) "/src/b.clj") (:buf s))))
+      (finally (rm-rf root)))))
+
+(deftest project-search-runs-rg-and-jumps
+  (let [root (project-fixture)]
+    (try
+      (let [s (-> (with-modes (make-state "" 0))
+                  (assoc-in [:bufs "*test*" :file] (str (.getPath root) "/src/a.clj"))
+                  (#'xmas.ed/project-search)
+                  (answer-mini "needle"))
+            name "*rg needle*"]
+        (is (= name (:buf s)))
+        (let [s (loop [s s i 0]
+                  (if (or (= :done (get-in s [:bufs name :job-status])) (> i 500))
+                    s (do (Thread/sleep 10) (recur (job/pump! s) (inc i)))))
+              txt (str (get-in s [:bufs name :text]))]
+          (is (clojure.string/includes? txt "src/a.clj:2:"))
+          (is (clojure.string/includes? txt "src/b.clj:1:needle"))
+          (let [{:keys [file]} (nav/rg-line (first (clojure.string/split-lines txt)))
+                s2 (-> s (assoc-in [:bufs name :point] 0)
+                       (ed/handle-key :return))]
+            (is (= (.getCanonicalPath (java.io.File. (str root "/" file)))
+                   (:buf s2))))))
+      (finally (rm-rf root)))))
+
+(deftest reload-config-runs-init-clj
+  (let [home (.toFile (java.nio.file.Files/createTempDirectory
+                        "xmas-home"
+                        (into-array java.nio.file.attribute.FileAttribute [])))
+        original (System/getProperty "user.home")]
+    (try
+      (.mkdirs (java.io.File. home ".xmas"))
+      (spit (java.io.File. home ".xmas/init.clj")
+            "(require '[xmas.api :as api]) (api/apply! assoc :reloaded true)")
+      (System/setProperty "user.home" (.getPath home))
+      (let [s (#'xmas.ed/reload-config (make-state "" 0))]
+        (is (:reloaded s))
+        (is (clojure.string/includes? (:msg s) "Reloaded")))
+      (finally
+        (System/setProperty "user.home" original)
+        (rm-rf home)))))

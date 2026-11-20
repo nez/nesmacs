@@ -39,6 +39,9 @@
         _  (when env (.putAll (.environment pb)
                               (into {} (map (fn [[k v]] [(name k) (str v)])) env)))
         p  (.start pb)
+        ;; Close stdin: tools like rg/grep search stdin forever instead of the
+        ;; filesystem when they see a pipe that never reaches EOF.
+        _  (.close (.getOutputStream p))
         id (swap! next-id inc)
         q  (LinkedBlockingQueue. queue-depth)
         exit (atom nil)

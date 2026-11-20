@@ -31,15 +31,26 @@
 
 (defn start
   "Start `argv` with its output going to buffer `buf-name`, creating the buffer
-   (and showing it) if needed. `argv` is the exact argument vector."
-  [s {:keys [argv dir buf-name]}]
+   (and showing it) if needed. `:mode` defaults to :job-mode. `argv` is the
+   exact argument vector."
+  [s {:keys [argv dir buf-name mode]}]
   (let [b (-> (buf/make buf-name "" nil)
-              (assoc :mode :job-mode :read-only true
-                     :job-command (vec argv) :job-dir dir :job-status :running))
-        h (proc/start {:argv argv :dir dir})]
-    (-> s
-        (update :bufs assoc buf-name (assoc b :job-proc (:id h)))
-        (cmd/set-cur-buffer buf-name))))
+              (assoc :mode (or mode :job-mode) :read-only true
+                     :job-command (vec argv) :job-dir dir :job-status :running))]
+    (try
+      (let [h (proc/start {:argv argv :dir dir})]
+        (-> s
+            (update :bufs assoc buf-name (assoc b :job-proc (:id h)))
+            (cmd/set-cur-buffer buf-name)))
+      (catch Exception e
+        ;; e.g. rg not installed, or a vanished cwd: show it in the buffer
+        ;; instead of letting the exception escape the command loop.
+        (-> s
+            (update :bufs assoc buf-name
+                    (-> b (assoc :job-status :failed)
+                          (buf/edit 0 0 (str "Error: " (.getMessage e) "\n"))
+                          (assoc :modified false)))
+            (cmd/set-cur-buffer buf-name))))))
 
 (defn pump!
   "Drain live job output into their buffers and reap finished processes.

@@ -7,9 +7,12 @@
             [xmas.dired :as dired]
             [xmas.gap :as gap]
             [xmas.job :as job]
+            [xmas.listbuf :as listbuf]
             [xmas.mode :as mode]
+            [xmas.nav :as nav]
             [xmas.persist :as persist]
             [xmas.proc :as proc]
+            [xmas.project :as project]
             [xmas.props :as props]
             [xmas.rect :as rect]
             [xmas.term :as t]
@@ -1059,6 +1062,116 @@
    \x      dired/do-delete
    \g      dired/revert})
 
+;; --- Projects, occur, imenu ---
+
+(defn- project-root [s]
+  (project/root (or (:file (cur s)) (System/getProperty "user.dir"))))
+
+(defn- project-find-file
+  "C-x p f: pick a file anywhere in the project by fuzzy name."
+  [s]
+  (if-let [root (project-root s)]
+    (let [files (project/files root)]
+      (mini-start s (str "Find file in " root ": ")
+        (fn [s input]
+          (let [input (str/trim input)
+                rel   (cond
+                        (.isFile (java.io.File. root input)) input
+                        (= 1 (count (project/fuzzy files input)))
+                        (first (project/fuzzy files input))
+                        :else nil)]
+            (if rel
+              (find-file s (str root "/" rel))
+              (msg s (str "No such file: " input)))))
+        (fn [input _s]
+          {:completed input :candidates (project/fuzzy files input)})))
+    (msg s "Not in a project")))
+
+(defn- project-search
+  "C-x p g: run rg over the project as a job; RET on a hit opens it."
+  [s]
+  (if-let [root (project-root s)]
+    (mini-start s (str "Search project " root ": ")
+      (fn [s pattern]
+        (if (str/blank? pattern)
+          s
+          (let [name (str "*rg " pattern "*")]
+            (-> (job/start s {:argv ["rg" "--line-number" "--with-filename" "--no-heading"
+                                     "--color" "never" "--smart-case" "--" pattern "."]
+                             :dir root
+                             :buf-name name
+                             :mode :rg-mode})
+                (assoc-in [:bufs name :nav-root] root)))))
+      (fn [input _s] {:completed input :candidates []}))
+    (msg s "Not in a project")))
+
+(defn- line-text [s]
+  (let [t  (:text (cur s))
+        ln (cmd/line-idx s)]
+    (gap/substr t (gap/nth-line-start t ln) (gap/nth-line-end t ln))))
+
+(defn nav-jump
+  "RET in an occur, imenu or rg buffer: go to that location."
+  [s]
+  (if-let [e (listbuf/entry-at-point s)]
+    (cond
+      (:file e) (-> s (find-file (str (:nav-root (cur s)) "/" (:file e)))
+                    (goto-line (str (:line e))))
+      (:buf e)  (if (contains? (:bufs s) (:buf e))
+                  (-> s (cmd/set-cur-buffer (:buf e)) (goto-line (str (:line e))))
+                  (msg s "Source buffer is gone"))
+      :else s)
+    ;; rg buffers are plain text, not listbufs: parse the line under point.
+    (if-let [{:keys [file line]} (nav/rg-line (line-text s))]
+      (-> s (find-file (str (:nav-root (cur s)) "/" file))
+            (goto-line (str line)))
+      s)))
+
+(defn- occur [s input]
+  (if (str/blank? input)
+    s
+    (try
+      (let [src     (:buf s)
+            entries (nav/occur-entries (:text (cur s)) input)
+            name    (str "*Occur " input "*")]
+        (-> s (assoc-in [:bufs name] (nav/occur-buffer name src input entries))
+              (cmd/set-cur-buffer name)))
+      (catch Exception e (msg-error s "Bad regexp" e)))))
+
+(defn- imenu [s]
+  (let [b    (cur s)
+        syms (nav/imenu-symbols b (str (:text b)))]
+    (if (empty? syms)
+      (msg s "No symbols")
+      (let [name "*Imenu*"]
+        (-> s (assoc-in [:bufs name] (nav/imenu-buffer name (:buf s) syms))
+              (cmd/set-cur-buffer name))))))
+
+(def ^:private nav-keys {:return nav-jump})
+
+(defn- occur-cmd [s] (mini-start s "Occur: " occur))
+
+(def ^:private rg-keys
+  {:return nav-jump
+   \g      job/rerun
+   [:ctrl \c] {[:ctrl \k] job/kill}})
+
+;; --- Config reload ---
+
+(defn reload-config
+  "M-x reload-config: re-run ~/.xmas/init.clj. Like M-:, it evaluates against
+   a private atom and hands the result back, so api/bind! can't re-enter the
+   command loop's swap!."
+  [s]
+  (let [path (str (System/getProperty "user.home") "/.xmas/init.clj")]
+    (if-not (.exists (java.io.File. path))
+      (msg s (str "No config: " path))
+      (try
+        (let [a (atom s)]
+          (binding [api/*state* a] (load-file path))
+          (msg @a (str "Reloaded " path)))
+        (catch Exception e (msg-error s "Reload failed" e))))))
+
 (def buflist-keymap
   {:return buflist/switch
    \k      buflist/kill
@@ -1121,7 +1234,12 @@
    "name-last-kbd-macro"         (cmd-entry name-last-kbd-macro-cmd "Save the last recorded macro under a name.")
    "execute-kbd-macro"           (cmd-entry execute-kbd-macro-cmd "Replay a named keyboard macro.")
    "query-replace"               (cmd-entry query-replace-cmd "Interactively replace literal matches.")
-   "query-replace-regexp"        (cmd-entry query-replace-regexp-cmd "Interactively replace regex matches (use \\1 etc. in replacement).")})
+   "query-replace-regexp"        (cmd-entry query-replace-regexp-cmd "Interactively replace regex matches (use \\1 etc. in replacement).")
+   "project-find-file"           (cmd-entry project-find-file "Find a file in the current project by fuzzy name.")
+   "project-search"              (cmd-entry project-search "Search the current project with ripgrep.")
+   "occur"                       (cmd-entry occur-cmd "List lines matching a regex in the current buffer.")
+   "imenu"                       (cmd-entry imenu "List definitions in the current buffer.")
+   "reload-config"               (cmd-entry reload-config "Re-run ~/.xmas/init.clj.")})
 
 (defn- register-builtin-commands [s]
   (assoc s :commands (builtin-commands)))
@@ -1283,6 +1401,8 @@
    :page-down scroll-down :page-up scroll-up
    [:ctrl \v] scroll-down [:meta \v] scroll-up
    [:meta \g] (prompt "Goto line: " goto-line)
+   [:meta \i] imenu
+   [:meta \s] {\o occur-cmd}
    [:meta \:] (prompt "Eval: " eval-expression)
    [:meta \x] (prompt "M-x " execute-extended-command command-completer)
    [:meta \%] (prompt "Query replace: " query-replace)
@@ -1315,6 +1435,8 @@
                \h         mark-whole-buffer
                \k         (prompt "Kill buffer: " kill-buffer)
                \r         cx-r-map
+                \p         {\f project-find-file
+                            \g project-search}
                \0         delete-window
                \1         delete-other-windows
                \2         split-window-below
@@ -1453,7 +1575,9 @@
       (mode/register :emacs-lisp-mode :major)
       (mode/register :dired-mode :major :keymap dired-keymap)
       (mode/register :buflist-mode :major :keymap buflist-keymap)
-      (mode/register :job-mode :major :keymap job-keymap)))
+      (mode/register :job-mode :major :keymap job-keymap)
+      (mode/register :nav-mode :major :keymap nav-keys)
+      (mode/register :rg-mode :major :keymap rg-keys)))
 
 (defn- initial-state [rows cols]
   (-> {:buf "*scratch*"
