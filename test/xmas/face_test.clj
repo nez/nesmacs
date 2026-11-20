@@ -69,3 +69,12 @@
 (deftest tokenize-string-before-comment
   (is (= [[0 5 :string] [5 6 :default] [6 10 :comment]]
          (toks :clojure-mode "\"bar\" ; hi"))))
+
+(deftest tokenize-gitdiff-lines
+  (is (= [[0 6 :diff-add]]  (toks :gitdiff-mode "+added")))
+  (is (= [[0 8 :diff-del]]  (toks :gitdiff-mode "-removed")))
+  (is (= [[0 13 :diff-hunk]] (toks :gitdiff-mode "@@ -1 +2 @@ x")))
+  (is (= [[0 10 :diff-meta]] (toks :gitdiff-mode "diff --git")))
+  (is (= [[0 9 :diff-meta]]  (toks :gitdiff-mode "+++ b/x.c")))
+  (is (= [[0 9 :diff-meta]]  (toks :gitdiff-mode "--- a/x.c")))
+  (is (= [[0 8 :default]]   (toks :gitdiff-mode " context"))))

@@ -31,5 +31,11 @@
     (is (= :major (get-in @a [:modes :my-mode :type])))
     (is (= f (get-in @a [:modes :my-mode :keymap [:ctrl \c] [:ctrl \c]])))))
 
+(deftest configure-lsp-sets-command
+  (let [a (atom (state))]
+    (binding [api/*state* a]
+      (api/configure-lsp! ["clangd" "--stdio"]))
+    (is (= ["clangd" "--stdio"] (:lsp-command @a)))))
+
 (deftest outside-config-context-throws
   (is (thrown? IllegalStateException (api/bind! "C-c x" identity))))

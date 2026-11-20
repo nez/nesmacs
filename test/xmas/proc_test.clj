@@ -24,6 +24,14 @@
         [_ _ code] (collect-until-finished h)]
     (is (= 3 code))))
 
+(deftest merges-stderr-into-output
+  ;; M2: a process writing to stderr must not fill the pipe or disappear.
+  (let [h (proc/start {:argv ["sh" "-c" "printf 'out\\n'; printf 'err\\n' >&2"]})
+        [_ text code] (collect-until-finished h)]
+    (is (= 0 code))
+    (is (.contains ^String text "out"))
+    (is (.contains ^String text "err"))))
+
 (deftest drain-yields-output-in-chunks
   ;; The limit is a soft per-tick cap: a chunk is never split, so one drain can
   ;; carry up to the reader's 8 KiB buffer.

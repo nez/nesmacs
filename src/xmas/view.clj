@@ -21,7 +21,11 @@
    :match     {:fg 232 :bg 180 :bold false}
    :diag-error   {:fg 231 :bg 124 :bold true}
    :diag-warning {:fg 232 :bg 136 :bold false}
-   :diag-info    {:fg 232 :bg 109 :bold false}})
+   :diag-info    {:fg 232 :bg 109 :bold false}
+   :diff-add     {:fg 120 :bg nil :bold false}
+   :diff-del     {:fg 167 :bg nil :bold false}
+   :diff-hunk    {:fg 67  :bg nil :bold true}
+   :diff-meta    {:fg 244 :bg nil :bold false}})
 
 (defn- ensure-visible [content point scroll rows]
   ;; A pane with body-rows <= 0 (e.g. a 1-row split that gets 0 body rows

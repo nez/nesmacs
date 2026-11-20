@@ -10,9 +10,8 @@
    restarted lazily if the process dies. A slow server never blocks typing:
    requests are async and `tick!` reads output from the editor loop.
 
-   shortcut: no rename/code-action/references/workspace-edit, no didClose on
-   buffer kill (the server keeps docs until shutdown), and diagnostics are
-   applied by absolute offset only (no incremental per-line tracking).
+   shortcut: no rename/code-action/references/workspace-edit, and diagnostics
+   are applied by absolute offset only (no incremental per-line tracking).
    Extend when a real workload needs it."
   (:require [clojure.string :as str]
             [clojure.data.json :as json]
@@ -80,7 +79,7 @@
   (boolean (get-in @servers [root-id :initialized?])))
 
 (defn- start! [root-id argv dir]
-  (let [h (proc/start {:argv argv :dir dir :keep-stdin? true})]
+  (let [h (proc/start {:argv argv :dir dir :keep-stdin? true :stderr :log})]
     (swap! servers assoc root-id
            {:handle h :inbox (atom "") :pending {} :root dir
             :initialized? false :docs {}})))
@@ -105,10 +104,10 @@
 (defn- note-version! [root-id path version]
   (swap! servers update root-id update-in [:docs path] (constantly version)))
 
-(defn- did-open! [root-id path text version]
+(defn- did-open! [root-id path text version language-id]
   (notify! root-id "textDocument/didOpen"
            {:textDocument {:uri (str "file://" path)
-                           :languageId "clojure"
+                           :languageId language-id
                            :version version
                            :text text}})
   (note-version! root-id path version))
@@ -119,6 +118,9 @@
             :contentChanges [{:text text}]})
   (note-version! root-id path version))
 
+(defn- language-id [^String path]
+  (if (str/ends-with? path ".el") "emacs-lisp" "clojure"))
+
 (defn- sync-docs! [root-id state]
   (let [s (srv root-id)]
     (when (:initialized? s)
@@ -128,8 +130,18 @@
             (let [v (or (:version b) 0)
                   seen (get-in s [:docs path])]
               (cond
-                (nil? seen)      (did-open! root-id path (str (:text b)) v)
+                (nil? seen)      (did-open! root-id path (str (:text b)) v
+                                            (language-id path))
                 (not= seen v)    (did-change! root-id path (str (:text b)) v)))))))))
+
+(defn close-doc!
+  "Notify every server that has `path` open that the document closed."
+  [path]
+  (doseq [[root-id s] @servers
+          :when (get-in s [:docs path])]
+    (notify! root-id "textDocument/didClose"
+             {:textDocument {:uri (str "file://" path)}})
+    (swap! servers update root-id update :docs dissoc path)))
 
 ;; --- Diagnostics -> props ---
 

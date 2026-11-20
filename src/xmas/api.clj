@@ -55,6 +55,11 @@
   [hook f]
   (apply! mode/add-hook hook (handler f)))
 
+(defn configure-lsp!
+  "Set the argv used to start language servers from now on."
+  [argv]
+  (apply! assoc :lsp-command (mapv str argv)))
+
 (defn register-mode!
   "Register a major or minor mode. `keymap` maps key strings to commands, e.g.
    {\"C-c C-c\" #'run}."

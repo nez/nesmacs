@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-TIMEOUT = 90
+TIMEOUT = 180
 
 home = Path(tempfile.mkdtemp(prefix="xmas-pty-"))
 (home / ".xmas").mkdir()

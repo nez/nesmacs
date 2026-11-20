@@ -14,7 +14,8 @@
 (def ^:private bench-line
   ";; This is a test line for benchmarking performance with numbers 0123456789 and symbols foo bar baz qux")
 (def ^:private large-text
-  (str/join "\n" (repeat line-count bench-line)))
+  ;; Delayed so the 10 MB fixture is built only when a benchmark runs.
+  (delay (str/join "\n" (repeat line-count bench-line))))
 
 (defn- make-bench-state [text]
   {:buf "*bench*"
@@ -36,20 +37,20 @@
         (assoc-in [:bufs "*bench*"] b')
         render!)))
 
-(deftest bench-fixture-matches-roadmap
-  (is (= line-count (gap/line-count (:text (buf/make "*bench*" large-text nil)))))
-  (is (> (count large-text) (* 10 1000 1000)) "fixture must be at least 10 MB"))
+(deftest ^:benchmark bench-fixture-matches-roadmap
+  (is (= line-count (gap/line-count (:text (buf/make "*bench*" @large-text nil)))))
+  (is (> (count @large-text) (* 10 1000 1000)) "fixture must be at least 10 MB"))
 
-(deftest bench-open-10mb
+(deftest ^:benchmark bench-open-10mb
   (let [start (System/nanoTime)
-        b (buf/make "*bench*" large-text nil)
+        b (buf/make "*bench*" @large-text nil)
         elapsed (/ (- (System/nanoTime) start) 1e6)]
     (println (str "\n=== Open 10 MB: " (int elapsed) " ms (target < 2000) ==="))
     (is (:large-file b))
     (is (< elapsed 2000.0) "opening 10 MB should take < 2 s")))
 
-(deftest bench-keystroke-100k-lines
-  (let [warm (-> (make-bench-state large-text) render! type-char type-char)
+(deftest ^:benchmark bench-keystroke-100k-lines
+  (let [warm (-> (make-bench-state @large-text) render! type-char type-char)
         iterations 20
         start (System/nanoTime)
         _ (loop [i 0 s warm]

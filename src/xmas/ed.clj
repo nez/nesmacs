@@ -409,7 +409,9 @@
       (not (contains? (:bufs s) target)) (msg s (str "No buffer: " target))
       (= 1 (count (:bufs s)))             (msg s "Cannot kill last buffer")
       :else
-      (let [[s' fallback] (ensure-fallback-buf (update s :bufs dissoc target) nil)]
+      (let [file (:file (get-in s [:bufs target]))
+            [s' fallback] (ensure-fallback-buf (update s :bufs dissoc target) nil)]
+        (when file (lsp/close-doc! file))
         (-> s'
             (update :windows win/replace-buffer target fallback)
             (cond-> (= target (:buf s')) (cmd/set-cur-buffer fallback))
@@ -1131,6 +1133,10 @@
 
 ;; --- LSP commands ---
 
+(def ^:private default-lsp-command ["clojure-lsp"])
+
+(defn- lsp-command [s] (or (:lsp-command s) default-lsp-command))
+
 (defn- char-col
   "0-based UTF-16 character index of point within its line — what LSP wants."
   [s]
@@ -1147,7 +1153,7 @@
   [s f]
   (if-let [root (project-root s)]
     (let [root-id (str root)]
-      (lsp/ensure! root-id ["clojure-lsp"] root
+      (lsp/ensure! root-id (lsp-command s) root
                    (fn [_] (swap! editor f root-id))))
     (msg s "Not in a project")))
 
@@ -1219,7 +1225,7 @@
 (defn lsp-completion-source
   "M4 completion source backed by the project's LSP server. Never blocks."
   [prefix ctx]
-  (let [state (deref ctx)
+  (let [state (:state ctx)
         b     (cmd/cur state)
         root  (when (:file b) (project-root state))]
     (when root
@@ -1234,7 +1240,7 @@
                        (< (- (System/currentTimeMillis) t) comp-inflight-ttl-ms))]
         (cond
           (not (lsp/server-exists? root-id))
-          (do (lsp/ensure! root-id ["clojure-lsp"] root (fn [_])) [])
+          (do (lsp/ensure! root-id (lsp-command state) root (fn [_])) [])
 
           (not (lsp/ready? root-id)) []
           (or inflight cached)       cached

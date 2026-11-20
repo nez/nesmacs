@@ -1,6 +1,7 @@
 (ns xmas.lsp-test
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing]]
+            [xmas.buf :as buf]
             [xmas.ed]
             [xmas.lsp :as lsp]))
 
@@ -69,3 +70,14 @@
       (is (nil? (cached path 2 3 4 "add")))
       (remember path 2 3 4 ["new"])
       (is (= ["new"] (cached path 2 3 4 "new"))))))
+
+(deftest completion-source-uses-snapshot-state
+  ;; Sources receive {:state snapshot}, not the editor atom. Reading it as an
+  ;; atom threw inside complete/start!'s try/catch, so LSP completion silently
+  ;; returned [] forever.
+  (let [path  (str (System/getProperty "user.dir") "/lsp-completion-test.clj")
+        state {:buf "f" :bufs {"f" (assoc (buf/make "f" "(foo)" path) :point 1)}
+               :lsp-command ["false"]}]
+    (with-redefs [lsp/server-exists? (constantly true)
+                  lsp/ready?         (constantly false)]
+      (is (= [] (xmas.ed/lsp-completion-source "" {:state state}))))))

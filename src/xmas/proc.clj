@@ -7,16 +7,17 @@
 
    Never call this with a shell string: pass argv and let the caller decide
    whether that means [\"sh\" \"-c\" ...]."
-  (:require [xmas.log :as log])
+  (:require [clojure.string :as str]
+            [xmas.log :as log])
   (:import [java.io InputStreamReader]
-           [java.util.concurrent LinkedBlockingQueue]))
+           [java.util.concurrent CountDownLatch LinkedBlockingQueue]))
 
 (defonce ^:private procs (atom {}))
 (defonce ^:private next-id (atom 0))
 (def ^:private queue-depth 256)
 
 (defn- reader-loop
-  [^InputStreamReader r ^LinkedBlockingQueue q ^Process p on-exit]
+  [^InputStreamReader r ^LinkedBlockingQueue q ^Process p on-exit ^CountDownLatch done]
   (let [buf (char-array 8192)]
     (try
       (loop []
@@ -28,7 +29,27 @@
       (catch InterruptedException _ (on-exit -1))
       (catch Exception e
         (log/log "proc reader:" (.getMessage e))
-        (on-exit -1)))))
+        (on-exit -1))
+      (finally (.countDown done)))))
+
+(defn- stderr-loop
+  "Drain stderr so a chatty process can't fill the pipe and deadlock.
+   :merge appends it to the job queue; :log keeps protocol pipes clean (LSP)."
+  [^InputStreamReader r ^LinkedBlockingQueue q mode ^CountDownLatch done]
+  (let [buf (char-array 8192)]
+    (try
+      (loop []
+        (let [n (.read r buf)]
+          (when-not (neg? n)
+            (let [s (String. buf 0 n)]
+              (if (= mode :merge)
+                (.put q s)
+                (log/log "proc stderr:" (str/trim-newline s))))
+            (recur))))
+      (catch InterruptedException _)
+      (catch Exception e
+        (log/log "proc stderr reader:" (.getMessage e)))
+      (finally (.countDown done)))))
 
 (defn start
   "Start `argv` in `dir` (nil = JVM cwd), with optional `env` overrides.
@@ -36,8 +57,12 @@
 
    By default stdin is closed: tools like rg/grep search stdin forever when
    they see a pipe that never reaches EOF. Pass :keep-stdin? true for
-   long-lived servers (LSP) that read requests from stdin."
-  [{:keys [argv ^String dir env keep-stdin?]}]
+   long-lived servers (LSP) that read requests from stdin.
+
+   stderr defaults to :merge so job buffers show compiler/test errors; LSP
+   passes :log to keep the JSON-RPC stream clean."
+  [{:keys [argv ^String dir env keep-stdin? stderr]
+    :or {stderr :merge}}]
   (let [pb (ProcessBuilder. (into-array String argv))
         _  (when dir (.directory pb (java.io.File. dir)))
         _  (when env (.putAll (.environment pb)
@@ -47,13 +72,20 @@
         id (swap! next-id inc)
         q  (LinkedBlockingQueue. queue-depth)
         exit (atom nil)
+        done (CountDownLatch. 2)
         on-exit (fn [code] (reset! exit code))
         t (doto (Thread. #(reader-loop (InputStreamReader. (.getInputStream p) "UTF-8")
-                                       q p on-exit))
+                                       q p on-exit done))
             (.setDaemon true)
             (.setName (str "xmas-proc-" id))
             (.start))
-        h {:id id :process p :queue q :exit exit :thread t}]
+        et (doto (Thread. #(stderr-loop (InputStreamReader. (.getErrorStream p) "UTF-8")
+                                        q stderr done))
+             (.setDaemon true)
+             (.setName (str "xmas-proc-" id "-err"))
+             (.start))
+        h {:id id :process p :queue q :exit exit :done done
+           :thread t :err-thread et}]
     (swap! procs assoc id h)
     h))
 
@@ -76,9 +108,12 @@
 (defn exit-code [h] @(:exit h))
 
 (defn finished?
-  "True once the process has exited and every buffered chunk was drained."
+  "True once the process has exited, both pipes are drained, and every
+   buffered chunk was drained."
   [h]
-  (and (some? @(:exit h)) (.isEmpty (:queue h))))
+  (and (some? @(:exit h))
+       (zero? (.getCount ^CountDownLatch (:done h)))
+       (.isEmpty (:queue h))))
 
 (defn kill!
   "Destroy `h` and unblock its reader. Never blocks the caller."
@@ -86,6 +121,7 @@
   (when h
     (.clear (:queue h))
     (.interrupt ^Thread (:thread h))
+    (when-let [et (:err-thread h)] (.interrupt ^Thread et))
     (.destroyForcibly ^Process (:process h))
     (swap! procs dissoc (:id h))))
 

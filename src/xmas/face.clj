@@ -1,6 +1,7 @@
 (ns xmas.face
   "Per-mode tokenizer. tokenize returns [spans end-state] so callers can
-   thread state across lines (e.g. to handle multi-line strings).")
+   thread state across lines (e.g. to handle multi-line strings)."
+  (:require [clojure.string :as str]))
 
 (def ^:private clj-specials
   #{"defn" "defn-" "def" "defmacro" "defmulti" "defmethod" "defprotocol"
@@ -115,3 +116,22 @@
 
 (defmethod tokenize :emacs-lisp-mode [_ line state]
   (lisp-tokens line el-specials (or state :normal)))
+
+;; --- Git diff ---
+
+(defn- diff-spans [^String line]
+  (let [n (count line)]
+    (cond
+      (zero? n) []
+      (str/starts-with? line "@@") [[0 n :diff-hunk]]
+      (or (str/starts-with? line "diff ")
+          (str/starts-with? line "index ")
+          (str/starts-with? line "--- ")
+          (str/starts-with? line "+++ "))
+      [[0 n :diff-meta]]
+      (str/starts-with? line "+") [[0 n :diff-add]]
+      (str/starts-with? line "-") [[0 n :diff-del]]
+      :else [[0 n :default]])))
+
+(defmethod tokenize :gitdiff-mode [_ line _]
+  [(diff-spans line) :normal])
