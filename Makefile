@@ -1,7 +1,7 @@
 JAR := target/xmas.jar
 NATIVE := xmas-native
 
-.PHONY: dev run jar native repl test lint check clean setup
+.PHONY: dev run jar native repl test pty lint check clean setup
 
 setup:
 	./install.sh
@@ -23,6 +23,9 @@ native: jar
 
 test:
 	clojure -M:test
+
+pty:
+	python3 test/pty/smoke.py
 
 lint:
 	clj-kondo --lint src

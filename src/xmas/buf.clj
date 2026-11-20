@@ -1,6 +1,6 @@
 (ns xmas.buf
   (:require [xmas.gap :as gap]
-            [xmas.overlay :as ov]))
+            [xmas.props :as props]))
 
 (def undo-limit 1000)
 
@@ -45,9 +45,22 @@
         (update :edit-count (fnil inc 0))
         (update :version (fnil inc 0))
         (update :line-states truncate-states from-line)
-        (update :overlays (fnil ov/adjust []) from to repl-len)
+        (update :props (fnil props/adjust []) from to repl-len)
         (update :point shift-pos from to repl-len)
         (update :mark #(when % (shift-pos % from to repl-len))))))
+
+(defn- push-undo
+  "Push an undo entry, coalescing adjacent pure insertions so typing is one
+   undo step until a move or a non-insert edit. After an undo we always start a
+   fresh entry, keeping redo boundaries meaningful."
+  [undo entry had-redo?]
+  (let [{pf :from pold :old pnew :new} (peek undo)]
+    (if (and (not had-redo?)
+             (= "" (:old entry)) (= "" pold) (string? pnew)
+             (string? (:new entry)) (not= "" (:new entry))
+             (= (:from entry) (+ pf (count pnew))))
+      (conj (pop undo) (assoc (peek undo) :new (str pnew (:new entry))))
+      (bounded-conj undo undo-limit entry))))
 
 (defn edit [b from to repl]
   (let [t         (:text b)
@@ -62,9 +75,10 @@
       ;; No-op: don't mark modified, don't pollute undo/redo. A zero-width
       ;; insert of "" used to clear redo and bump :modified spuriously.
       b
-      (let [old (.toString (.subSequence ^CharSequence t (int from) (int to)))]
+      (let [old (.toString (.subSequence ^CharSequence t (int from) (int to)))
+            had-redo? (seq (:redo b))]
         (-> (apply-change b from to repl)
-            (update :undo bounded-conj undo-limit {:from from :old old :new repl})
+            (update :undo push-undo {:from from :old old :new repl} had-redo?)
             (assoc :redo []))))))
 
 (defn- replay

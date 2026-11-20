@@ -862,40 +862,121 @@
 
 ;; --- Exit ---
 
+(defn- answer-mini [s text]
+  (reduce ed/handle-key s (concat (seq text) [:return])))
+
 (deftest exit-no-modified-buffers
   (let [s' (-> (make-state "abc" 0)
                (ed/handle-key [:ctrl \x])
                (ed/handle-key [:ctrl \c]))]
     (is (:exit s'))))
 
-(deftest exit-modified-requires-confirmation
+(deftest exit-modified-scratch-prompts-to-discard
   (let [s (-> (make-state "abc" 0) (ed/edit 0 0 "x"))
-        s' (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))]
-    (is (not (:exit s')))
-    (is (clojure.string/starts-with? (:msg s') "Modified"))))
-
-(deftest exit-second-attempt-confirms
-  ;; Regression: handle-key used to clear :exit-pending at entry of every
-  ;; keystroke, so the second C-x C-c never saw the flag and endlessly
-  ;; re-asked for confirmation.
-  (let [s (-> (make-state "abc" 0) (ed/edit 0 0 "x"))
-        s1 (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))
-        s2 (-> s1 (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))]
-    (is (:exit-pending s1))
+        s1 (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))]
     (is (not (:exit s1)))
-    (is (:exit s2))))
+    (is (clojure.string/includes? (:prompt (:mini s1)) "Discard"))
+    (is (:exit (answer-mini s1 "y")))))
 
-(deftest exit-pending-cleared-by-unrelated-command
-  ;; After the confirm prompt, any non-exit command should cancel the
-  ;; pending exit (Emacs convention).
+(deftest exit-save-file-answer-y
+  (let [f (java.io.File/createTempFile "xmas-quit" ".txt")
+        path (.getCanonicalPath f)]
+    (try
+      (spit f "abc")
+      (let [s (-> (make-state "abc" 0) (ed/find-file path) (ed/edit 0 0 "x"))
+            s1 (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))]
+        (is (not (:exit s1)))
+        (is (clojure.string/includes? (:prompt (:mini s1)) path))
+        (let [s2 (answer-mini s1 "y")]
+          (is (:exit s2))
+          (is (= "xabc" (slurp path)))
+          (is (= "Wrote " (subs (:msg s2) 0 6)))))
+      (finally (.delete f)))))
+
+(deftest exit-save-file-answer-n-skips
+  (let [f (java.io.File/createTempFile "xmas-quit" ".txt")
+        path (.getCanonicalPath f)]
+    (try
+      (spit f "abc")
+      (let [s (-> (make-state "abc" 0) (ed/find-file path) (ed/edit 0 0 "x"))
+            s1 (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))
+            s2 (answer-mini s1 "n")]
+        (is (:exit s2))
+        (is (= "abc" (slurp path))))
+      (finally (.delete f)))))
+
+(deftest exit-bang-saves-every-file-buffer
+  (let [f1 (java.io.File/createTempFile "xmas-quit-a" ".txt")
+        f2 (java.io.File/createTempFile "xmas-quit-b" ".txt")
+        p1 (.getCanonicalPath f1)
+        p2 (.getCanonicalPath f2)]
+    (try
+      (spit f1 "one")
+      (spit f2 "two")
+      (let [s  (-> (make-state "" 0)
+                   (ed/find-file p1) (ed/edit 0 0 "A")
+                   (ed/find-file p2) (ed/edit 0 0 "B"))
+            s1 (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))
+            s2 (answer-mini s1 "!")]
+        (is (:exit s2))
+        (is (= "Aone" (slurp p1)))
+        (is (= "Btwo" (slurp p2))))
+      (finally (.delete f1) (.delete f2)))))
+
+(deftest exit-unknown-answer-cancels
   (let [s (-> (make-state "abc" 0) (ed/edit 0 0 "x"))
         s1 (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))
-        s2 (ed/handle-key s1 [:ctrl \f])
-        s3 (-> s2 (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))]
-    (is (:exit-pending s1))
-    (is (nil? (:exit-pending s2)))
-    (is (not (:exit s3)))
-    (is (clojure.string/starts-with? (:msg s3) "Modified"))))
+        s2 (answer-mini s1 "x")]
+    (is (not (:exit s2)))
+    (is (= "Quit canceled" (:msg s2)))))
+
+;; --- Search highlighting (props) ---
+
+(deftest isearch-highlights-match-and-clears-on-accept
+  (let [s  (-> (make-state "foo bar foo" 0) (ed/isearch-start :forward))
+        s1 (reduce ed/handle-key s (seq "foo"))
+        b1 (ed/cur s1)
+        s2 (ed/handle-key s1 :return)
+        b2 (ed/cur s2)]
+    (is (= 1 (count (:props b1))))
+    (is (= [0 3] [(-> b1 :props first :from) (-> b1 :props first :to)]))
+    (is (empty? (:props b2)))))
+
+(deftest query-replace-highlights-current-match-and-clears-on-exit
+  (let [s  (#'xmas.ed/query-replace-begin (make-state "a b a" 0) "a" "X" false)
+        b  (ed/cur s)]
+    (is (= [0 1] [(-> b :props first :from) (-> b :props first :to)]))
+    (is (empty? (:props (ed/cur (ed/handle-key s \q)))))))
+
+;; --- Bracketed paste ---
+
+(deftest bracket-paste-is-one-insert-and-one-undo-step
+  (let [s  (make-state "" 0)
+        s' (ed/handle-key s [:paste "a\r\nb"])
+        b  (ed/cur s')]
+    (is (= "a\nb" (str (:text b))))
+    (is (= 1 (count (:undo b))))
+    (is (= "" (str (:text (ed/cur (ed/undo s'))))))))
+
+;; --- Crash recovery ---
+
+(deftest recover-file-restores-backup-text
+  (let [dir (.toFile (java.nio.file.Files/createTempDirectory
+                       "xmas-rec"
+                       (into-array java.nio.file.attribute.FileAttribute [])))
+        f   (java.io.File. dir "notes.txt")]
+    (try
+      (spit f "saved")
+      (let [path (.getCanonicalPath f)
+            bak  (java.io.File. (#'xmas.ed/auto-save-path path))]
+        (spit bak "unsaved")
+        (let [s (#'xmas.ed/recover-file (make-state "" 0) path)]
+          (is (= "unsaved" (str (:text (ed/cur s)))))
+          (is (:modified (ed/cur s)))
+          (is (clojure.string/includes? (:msg s) "Recovered"))))
+      (finally
+        (doseq [x (.listFiles dir)] (.delete x))
+        (.delete dir)))))
 
 ;; --- Minibuffer history ---
 

@@ -84,9 +84,11 @@
     (is (= 2 (:point b'')))))
 
 (deftest multi-undo
+  ;; Two separate edits. Non-adjacent so each is its own undo step — adjacent
+  ;; typing coalesces by design (see the coalescing tests below).
   (let [b (buf/make "t" "abc" nil)
-        b1 (buf/edit b 3 3 "d")
-        b2 (buf/edit b1 4 4 "e")
+        b1 (buf/edit b 3 3 "d")   ;; abcd
+        b2 (buf/edit b1 0 0 "e")  ;; eabcd
         u1 (buf/undo b2)
         u2 (buf/undo u1)]
     (is (= "abcd" (str (:text u1))))
@@ -97,6 +99,39 @@
         b' (buf/edit b 1 3 "X")]
     (is (= 1 (count (:undo b'))))
     (is (= {:from 1 :old "el" :new "X"} (first (:undo b'))))))
+
+(deftest adjacent-inserts-coalesce
+  (let [b (-> (buf/make "t" "" nil)
+              (buf/edit 0 0 "a")
+              (buf/edit 1 1 "b")
+              (buf/edit 2 2 "c"))]
+    (is (= 1 (count (:undo b))))
+    (is (= {:from 0 :old "" :new "abc"} (peek (:undo b))))
+    (is (= "" (str (:text (buf/undo b)))))))
+
+(deftest non-adjacent-insert-starts-new-entry
+  (let [b (-> (buf/make "t" "" nil)
+              (buf/edit 0 0 "a")
+              (buf/edit 0 0 "b"))]
+    (is (= 2 (count (:undo b))))))
+
+(deftest delete-breaks-insert-group
+  (let [b (-> (buf/make "t" "" nil)
+              (buf/edit 0 0 "a")
+              (buf/edit 1 1 "b")
+              (buf/edit 1 2 ""))]
+    (is (= 2 (count (:undo b))))))
+
+(deftest typing-after-undo-starts-new-entry
+  ;; Two groups, undo the second, type right at the boundary: a new entry, not
+  ;; a merge into the older one.
+  (let [b (-> (buf/make "t" "" nil)
+              (buf/edit 0 0 "a")
+              (buf/edit 0 0 "b")
+              (buf/undo)
+              (buf/edit 1 1 "c"))]
+    (is (= 2 (count (:undo b))))
+    (is (= "ac" (str (:text b))))))
 
 ;; --- Redo ---
 
@@ -114,15 +149,15 @@
 
 (deftest redo-multi-step
   (let [b (buf/make "t" "abc" nil)
-        b1 (buf/edit b 3 3 "d")
-        b2 (buf/edit b1 4 4 "e")
+        b1 (buf/edit b 3 3 "d")   ;; abcd
+        b2 (buf/edit b1 0 0 "e")  ;; eabcd
         u1 (buf/undo b2)
         u2 (buf/undo u1)
         r1 (buf/redo u2)
         r2 (buf/redo r1)]
     (is (= "abc" (str (:text u2))))
     (is (= "abcd" (str (:text r1))))
-    (is (= "abcde" (str (:text r2))))))
+    (is (= "eabcd" (str (:text r2))))))
 
 (deftest edit-clears-redo
   (let [b (buf/make "t" "abc" nil)
@@ -144,26 +179,27 @@
 
 (deftest redo-then-undo-roundtrips-many
   (let [b  (buf/make "t" "abc" nil)
-        b1 (buf/edit b 3 3 "d")
-        b2 (buf/edit b1 4 4 "e")
+        b1 (buf/edit b 3 3 "d")   ;; abcd
+        b2 (buf/edit b1 0 0 "e")  ;; eabcd
         u1 (buf/undo b2)
         u2 (buf/undo u1)
         r1 (buf/redo u2)
         r2 (buf/redo r1)
         u3 (buf/undo r2)
         u4 (buf/undo u3)]
-    (is (= "abcde" (str (:text r2))))
+    (is (= "eabcd" (str (:text r2))))
     (is (= "abcd"  (str (:text u3))))
     (is (= "abc"   (str (:text u4))))))
 
 ;; --- Undo limit ---
 
 (deftest undo-limit-caps-history
-  (let [b (reduce (fn [b i]
-                    (buf/edit b i i (str (char (+ 65 (mod i 26))))))
+  ;; Insert at 0 every time: never adjacent to the previous entry, so each edit
+  ;; is a distinct step and the cap is actually exercised.
+  (let [b (reduce (fn [b _] (buf/edit b 0 0 "x"))
                   (buf/make "t" "" nil)
                   (range 1100))]
-    (is (<= (count (:undo b)) buf/undo-limit))))
+    (is (= buf/undo-limit (count (:undo b))))))
 
 ;; --- :line-states truncation on edit/undo/redo ---
 
@@ -210,6 +246,12 @@
     (is (= "heYY" (str (:text (buf/edit b 2 100 "YY")))))
     ;; from past end — clamped
     (is (= "helloZ" (str (:text (buf/edit b 100 200 "Z")))))))
+
+(deftest edit-adjusts-props
+  (let [b  (assoc (buf/make "t" "hello" nil)
+                  :props [(xmas.props/make 2 4 :match)])
+        b' (buf/edit b 0 0 "XX")]
+    (is (= [4 6] [(-> b' :props first :from) (-> b' :props first :to)]))))
 
 (deftest edit-noop-is-inert
   ;; Regression: (buf/edit b p p "") used to run the full edit pipeline —

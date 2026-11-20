@@ -2,7 +2,7 @@
   (:require [clojure.string :as str]
             [xmas.face :as face]
             [xmas.gap :as gap]
-            [xmas.overlay :as ov]
+            [xmas.props :as props]
             [xmas.term :as t]
             [xmas.text :as text]
             [xmas.window :as win]))
@@ -17,7 +17,8 @@
    :comment   {:fg 102 :bg nil :bold false}
    :string    {:fg 107 :bg nil :bold false}
    :keyword   {:fg 180 :bg nil :bold false}
-   :builtin   {:fg 67  :bg nil :bold true}})
+   :builtin   {:fg 67  :bg nil :bold true}
+   :match     {:fg 232 :bg 180 :bold false}})
 
 (defn- ensure-visible [content point scroll rows]
   ;; A pane with body-rows <= 0 (e.g. a 1-row split that gets 0 body rows
@@ -119,19 +120,18 @@
   [spans r-lo r-hi]
   (apply-face-range spans r-lo r-hi :region))
 
-(defn- apply-overlays
-  "Overlay each buffer-global overlay onto line-local spans. Overlays are
-   sorted by :priority ascending so higher-priority overlays paint last and
-   thus win visually."
-  [spans overlays line-pos line-len]
+(defn- apply-props
+  "Paint buffer-global props onto line-local spans. Props sort by :priority
+   ascending so higher-priority ones paint last and win visually."
+  [spans props line-pos line-len]
   (reduce
-    (fn [acc ov]
-      (let [from-local (max 0 (- (:from ov) line-pos))
-            to-local   (min line-len (- (:to ov) line-pos))]
+    (fn [acc p]
+      (let [from-local (max 0 (- (:from p) line-pos))
+            to-local   (min line-len (- (:to p) line-pos))]
         (if (< from-local to-local)
-          (apply-face-range acc from-local to-local (:face ov))
+          (apply-face-range acc from-local to-local (:face p))
           acc)))
-    spans (sort-by #(or (:priority %) 0) overlays)))
+    spans (sort-by #(or (:priority %) 0) props)))
 
 ;; --- Window rendering ---
 
@@ -160,7 +160,7 @@
 
 (defn- render-window-body
   "Render visible lines and return the possibly-extended :line-states cache."
-  [rect content mode overlays scroll hscroll r-lo r-hi states]
+  [rect content mode props scroll hscroll r-lo r-hi states]
   (let [{:keys [row col rows cols]} rect
         body-rows (dec rows)
         start-line  (gap/line-of content scroll)
@@ -174,8 +174,8 @@
                   line (line-str content pos eol)
                   len  (count line)
                   [toks nxt-state] (face/tokenize mode line state)
-                  line-ovs (ov/in-range overlays pos eol)
-                  spans0 (apply-overlays toks line-ovs pos len)
+                  line-props (props/in-range props pos eol)
+                  spans0 (apply-props toks line-props pos len)
                   r-from (when r-lo (max 0 (min len (- (long r-lo) pos))))
                   r-to   (when r-lo (max 0 (min len (- (long r-hi) pos))))
                   spans  (merge-region spans0 r-from r-to)
@@ -229,8 +229,8 @@
         cursor-col (text/display-width content (gap/nth-line-start content point-line) point)
         hscroll (if current? (ensure-hvisible hscroll-in cursor-col cols) hscroll-in)
         [r-lo r-hi] (when (and mark current?) (sort [(long mark) (long point)]))
-        overlays (:overlays buf)
-        states (render-window-body rect content mode overlays scroll hscroll
+        props (:props buf)
+        states (render-window-body rect content mode props scroll hscroll
                                    r-lo r-hi (:line-states buf))]
     (render-window-modeline rect (:name buf) (:modified buf) mode (:minor-modes buf)
                             point-line cursor-col current?)
@@ -306,7 +306,7 @@
   (let [buf (get (:bufs state) (:buffer window))]
     [(:buffer window) (:version buf) (:point buf) (:mark buf)
      (:mode buf) (:minor-modes buf) (:modified buf) (:name buf)
-     (:overlays buf) (:scroll window) (:hscroll window) current?]))
+     (:props buf) (:scroll window) (:hscroll window) current?]))
 
 (defn- echo-sig [state]
   (cond

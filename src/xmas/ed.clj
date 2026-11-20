@@ -8,6 +8,7 @@
             [xmas.gap :as gap]
             [xmas.mode :as mode]
             [xmas.persist :as persist]
+            [xmas.props :as props]
             [xmas.rect :as rect]
             [xmas.term :as t]
             [xmas.text :as text]
@@ -298,6 +299,19 @@
   (let [due (auto-save-due s)]
     (reset-edit-counts s (spit-due! due))))
 
+(defn- remember-auto-saves!
+  "Persist the set of files with a live `#file#` backup, so the next start can
+   offer recovery. Entries whose backup is gone are pruned."
+  [saved]
+  (when (seq saved)
+    (let [paths (->> (concat (persist/load! "auto-saved" [])
+                             (map second saved))
+                     (filter string?)
+                     distinct
+                     (filter #(.exists (java.io.File. (auto-save-path %))))
+                     vec)]
+      (persist/save-quiet! "auto-saved" paths))))
+
 (defn- auto-save-tick!
   "Drive auto-save against the editor atom. Spits happen once per tick
    (outside `swap!`), then the counter reset is swapped in atomically."
@@ -306,13 +320,18 @@
     (when (seq due)
       (let [saved (spit-due! due)]
         (when (seq saved)
+          (remember-auto-saves! saved)
           (swap! editor-atom reset-edit-counts saved))))))
 
-(defn save-buffer [s]
-  (let [b (cur s)
+(defn save-buffer-named
+  "Save buffer `name` (a :bufs key). Pure except for the file write."
+  [s name]
+  (let [b (cmd/buf s name)
         f (:file b)]
-    (if (str/blank? f)
-      (msg s "No file")
+    (cond
+      (nil? b) (msg s (str "No buffer: " name))
+      (str/blank? f) (msg s "No file")
+      :else
       (try (let [raw  (str (:text b))
                  ;; Preserve the EOL style the file had on read. Without
                  ;; this, opening and saving a CRLF file silently rewrote
@@ -322,9 +341,11 @@
              (atomic-spit f bytes))
            (let [bak (java.io.File. (auto-save-path f))]
              (when (.exists bak) (.delete bak)))
-           (-> s (update-cur #(assoc % :modified false :edit-count 0))
+           (-> s (update-in [:bufs name] #(assoc % :modified false :edit-count 0))
                  (msg (str "Wrote " f)))
            (catch Exception e (msg-error s "Save failed" e))))))
+
+(defn save-buffer [s] (save-buffer-named s (:buf s)))
 
 (defn- detect-eol [^String s] (if (re-find #"\r\n" s) :crlf :lf))
 (defn- normalize-eol [^String s]
@@ -462,6 +483,43 @@
       (on-done s' input))
     s))
 
+;; --- Crash recovery ---
+
+(defn- pending-recoveries
+  "Files with an auto-save backup left by a previous run."
+  []
+  (->> (persist/load! "auto-saved" [])
+       (filter string?)
+       distinct
+       (filter #(.exists (java.io.File. (auto-save-path %))))
+       vec))
+
+(defn- recover-file
+  "Open `f` and replace its text with the auto-save backup, leaving it marked
+   modified so the user can inspect it before C-x C-s."
+  [s f]
+  (let [backup (str (auto-save-path f))]
+    (if (.exists (java.io.File. backup))
+      (let [text (slurp backup :encoding "UTF-8")
+            s    (find-file s f)]
+        (-> (cmd/update-cur s #(assoc % :text (gap/of text) :point 0
+                                        :modified true))
+            (msg (str "Recovered " f " from auto-save — C-x C-s to keep"))))
+      (msg s (str "No auto-save for " f)))))
+
+(defn- recover-ask
+  "Prompt for each pending backup. `y` restores it, `n` deletes it."
+  [s paths]
+  (if-let [[f & more] (seq paths)]
+    (mini-start s (str "Recover unsaved changes to " f "? (y/n) ")
+      (fn [s ans]
+        (if (= "y" (str/lower-case (str/trim ans)))
+          (recover-ask (recover-file s f) more)
+          (do (try (.delete (java.io.File. (auto-save-path f)))
+                   (catch Exception _))
+              (recover-ask s more)))))
+    s))
+
 (defn- mini-set
   "Replace minibuffer contents with entry, point at end."
   [s entry]
@@ -547,6 +605,18 @@
 
 (declare handle-key)
 
+;; --- Buffer props ---
+
+(defn- set-prop
+  "Replace every prop owned by `owner` in the current buffer with one range."
+  [s owner face from to]
+  (cmd/update-cur s
+    #(assoc % :props (props/put (props/remove-owner (:props %) owner)
+                                (props/make from to face {:owner owner})))))
+
+(defn- clear-prop [s owner]
+  (cmd/update-cur s #(assoc % :props (props/remove-owner (:props %) owner))))
+
 ;; --- Incremental search ---
 
 (defn- isearch-do
@@ -559,7 +629,7 @@
         b (cur s) t (:text b) p (:point b)
         tn (count t) pn (count pattern)]
     (if (empty? pattern)
-      s
+      (clear-prop s :isearch)
       (let [found (if (= direction :forward)
                     (text/search-forward  t pattern (if extend? p (min (+ p pn) tn)))
                     ;; Extend: allow the match starting at p (ending at p+pn)
@@ -567,7 +637,8 @@
                     ;; char patterns were yanked away from the current match.
                     (text/search-backward t pattern (if extend? (+ p pn) p)))]
         (if found
-          (set-point s (fn [_ _] found))
+          (-> (set-point s (fn [_ _] found))
+              (set-prop :isearch :match found (+ found pn)))
           (msg s (str "Failing I-search: " pattern)))))))
 
 (defn isearch-start [s direction]
@@ -582,11 +653,12 @@
 (defn- isearch-accept [s]
   ;; Clear :msg too — otherwise a "Failing I-search: foo" from the final
   ;; keystroke survives into the normal echo area after RET.
-  (-> s (dissoc :isearch) (assoc :msg nil)))
+  (-> s (clear-prop :isearch) (dissoc :isearch) (assoc :msg nil)))
 
 (defn- isearch-cancel [s]
   (let [origin (get-in s [:isearch :origin])]
-    (-> s (dissoc :isearch)
+    (-> s (clear-prop :isearch)
+          (dissoc :isearch)
           (set-point (fn [_ _] origin))
           (msg "Quit"))))
 
@@ -643,11 +715,56 @@
   [p on-done & [completer]]
   (fn [s] (mini-start s p on-done completer)))
 
-(defn- confirm-quit [s]
-  (if (or (:exit-pending s) (not-any? :modified (vals (:bufs s))))
-    (assoc s :exit true)
-    (-> s (assoc :exit-pending true)
-          (msg "Modified buffers exist. C-x C-c again to quit."))))
+;; --- Quit: offer to save each modified buffer ---
+
+(defn- modified-bufs [s]
+  (->> (:bufs s)
+       (keep (fn [[name b]] (when (:modified b) name)))
+       sort))
+
+(defn- quit-finish [s] (assoc s :exit true))
+
+(defn- quit-save-all
+  "`!` answer: save every modified file buffer, discard the rest, then quit.
+   A failed save cancels the quit rather than losing the buffer."
+  [s names]
+  (let [s (reduce (fn [s n]
+                    (if (:file (cmd/buf s n)) (save-buffer-named s n) s))
+                  s names)]
+    (if (some #(:modified (cmd/buf s %)) names)
+      (msg s "Quit canceled: a buffer could not be saved")
+      (quit-finish s))))
+
+(defn- quit-ask
+  "Ask about one modified buffer at a time. `y` saves (or discards a buffer
+   with no file), `n` skips it, `!` saves the rest; any other answer cancels."
+  [s names]
+  (if-let [[n & more] (seq names)]
+    (let [b (:file (cmd/buf s n)) ]
+      (if b
+        (mini-start s (str "Save " b "? (y/n/!) ")
+          (fn [s ans]
+            (case (str/lower-case (str/trim ans))
+              "y" (let [s (save-buffer-named s n)]
+                    (if (:modified (cmd/buf s n))
+                      (msg s (str "Quit canceled: " b " was not saved"))
+                      (quit-ask s more)))
+              "n" (quit-ask s more)
+              "!" (quit-save-all s names)
+              (msg s "Quit canceled"))))
+        (mini-start s (str "Discard changes to " (:name (cmd/buf s n)) "? (y/n/!) ")
+          (fn [s ans]
+            (case (str/lower-case (str/trim ans))
+              "y" (quit-ask s more)
+              "n" (quit-ask s more)
+              "!" (quit-save-all s names)
+              (msg s "Quit canceled"))))))
+    (quit-finish s)))
+
+(defn confirm-quit [s]
+  (if-let [names (seq (modified-bufs s))]
+    (quit-ask (dissoc s :exit-pending :exit) names)
+    (quit-finish s)))
 
 ;; --- Window commands ---
 
@@ -706,7 +823,9 @@
 
 (defn- qr-exit [s]
   (let [n (get-in s [:query-replace :count] 0)]
-    (-> s (dissoc :query-replace) (msg (str "Replaced " n " occurrence(s)")))))
+    (-> s (clear-prop :qr)
+          (dissoc :query-replace)
+          (msg (str "Replaced " n " occurrence(s)")))))
 
 (defn- qr-find-from
   "Return [start end groups] for the first match at or after `pos`, or nil."
@@ -724,6 +843,7 @@
   [s found]
   (if-let [[start end groups] found]
     (-> s (cmd/goto-char start)
+          (set-prop :qr :match start end)
           (update :query-replace assoc :match-end end :groups groups)
           qr-msg)
     (qr-exit s)))
@@ -1195,10 +1315,13 @@
   "Pure state transition. Handles prefix keys via :pending state.
    Works identically for terminal and web — one key at a time."
   [s key]
-  (let [prev-exit-pending (:exit-pending s)
-        s (assoc s :msg nil)
+  (let [s (assoc s :msg nil)
         s (cond-> s (:macro-recording s) (update :macro-recording conj key))
         s' (cond
+             ;; Bracketed paste is one insert, hence one undo entry.
+             (and (vector? key) (= :paste (first key)))
+             (cmd/insert-at-point s (normalize-eol (second key)))
+
              ;; capture-next: consume the key as data, don't dispatch
              (= :describe-key (:capture-next s))
              (capture-describe-key (dissoc s :capture-next) key)
@@ -1251,12 +1374,9 @@
                           (not (map? binding))
                           (not= binding universal-argument))
                      (dissoc :prefix-arg))))))]
-    ;; Refresh live-filter candidates while a minibuffer is active, then
-    ;; expire any :exit-pending the previous command set.
+    ;; Refresh live-filter candidates while a minibuffer is active.
     (cond-> s'
-      (:mini s') mini-refresh-candidates
-      (and (not (:pending s')) prev-exit-pending (:exit-pending s'))
-      (dissoc :exit-pending))))
+      (:mini s') mini-refresh-candidates)))
 
 ;; --- Main ---
 
@@ -1283,7 +1403,13 @@
     (let [key (t/read-key-timeout 100)]
       (if (nil? key)
         (recur)
-        (do (swap! editor #(handle-key % key))
+        (do (let [kill-before (peek (:kill @editor))]
+              (swap! editor #(handle-key % key))
+              ;; Clipboard is a boundary side effect, so it stays out of the
+              ;; pure commands and out of tests.
+              (when (and (seq (:kill @editor))
+                         (not= kill-before (peek (:kill @editor))))
+                (t/set-clipboard! (peek (:kill @editor)))))
             (auto-save-tick! editor)
             (when-not (:exit @editor) (recur)))))))
 
@@ -1368,13 +1494,14 @@
   (log/init!) (log/log "xmas starting")
   (t/install-shutdown-hook!)
   (try
-    (t/enter-raw-mode!) (t/cls)
+    (t/enter-raw-mode!) (t/enable-bracketed-paste!) (t/cls)
     (t/on-resize! (fn [rows cols] (swap! editor assoc :rows rows :cols cols)))
     (let [[rows cols] (t/terminal-size)]
       (reset! editor (initial-state rows cols))
       ;; nREPL and any other out-of-band caller can use xmas.api directly.
       (alter-var-root #'api/*state* (constantly editor))
       (load-init-files!)
+      (swap! editor recover-ask (pending-recoveries))
       (silence-stdio!)
       (let [services (start-services!)]
         (try (command-loop)
