@@ -30,7 +30,6 @@
             [nrepl.server :as nrepl]
             [xmas.web :as web]
             [xmas.dev :as dev])
-  (:import [java.nio.file Files StandardCopyOption])
   (:gen-class))
 
 ;; --- Editor state ---
@@ -186,29 +185,6 @@
       (gap/nth-line-start t (-> n dec (max 0) (min (dec (gap/line-count t)))))))
     (msg s "Not a number")))
 
-(defn- atomic-spit
-  "Write s to path atomically (write to sibling temp, preserve POSIX perms, then rename).
-   If any step after tmp creation fails, the tmp file is removed so a
-   read-only dir or disk-full scenario doesn't leave `.xmas-*.tmp` debris."
-  [^String path ^String s]
-  (let [target (.toPath (.getAbsoluteFile (java.io.File. path)))
-        parent (.getParent target)
-        tmp    (Files/createTempFile parent ".xmas-" ".tmp"
-                 (into-array java.nio.file.attribute.FileAttribute []))
-        nolink (into-array java.nio.file.LinkOption [])
-        done?  (atom false)]
-    (try
-      (spit (.toFile tmp) s :encoding "UTF-8")
-      (when (Files/exists target nolink)
-        (try (Files/setPosixFilePermissions tmp (Files/getPosixFilePermissions target nolink))
-             (catch UnsupportedOperationException _)))
-      (Files/move tmp target
-        (into-array [StandardCopyOption/ATOMIC_MOVE StandardCopyOption/REPLACE_EXISTING]))
-      (reset! done? true)
-      (finally
-        (when-not @done?
-          (try (Files/deleteIfExists tmp) (catch Exception _)))))))
-
 (defn- auto-save-path
   "#file# backup path for a buffer file."
   [^String file]
@@ -309,7 +285,7 @@
   (into []
         (keep (fn [[_ file text :as entry]]
                 (try
-                  (atomic-spit (auto-save-path file) text)
+                  (persist/atomic-spit (auto-save-path file) text)
                   entry
                   (catch Exception e
                     (log/log "auto-save failed:" file (.getMessage e))
@@ -349,15 +325,31 @@
           (swap! editor-atom reset-edit-counts saved))))))
 
 (def ^:private session-save-counter (atom 0))
-(def ^:private session-save-interval 300) ; save every ~30 seconds (300 * 100ms ticks)
+(def ^:private session-save-interval 50) ; ~5 seconds (50 * 100ms ticks)
+;; shortcut: up to ~5 s of edits can be lost on kill -9; auto-save covers
+;; file buffers sooner, lower this only with cheap text hashing.
+(def ^:private last-session-sig (atom nil))
+
+(defn session-sig
+  "Cheap change signature: buffer versions/points and layout, not buffer text.
+   Lets the periodic save skip idle ticks without re-serializing 10 MB buffers."
+  [s]
+  (hash [(mapv (fn [[name b]]
+                 [name (:version b) (:point b) (:modified b)])
+               (:bufs s))
+         (:windows s) (:cur-window s)
+         (:recentf s) (:bookmarks s) (:mini-history s)]))
 
 (defn- session-save-tick!
-  "Periodically save session to disk. Runs on the editor loop tick."
+  "Save the session every ~5s, but only when something actually changed."
   [editor-atom]
-  (let [count (swap! session-save-counter inc)]
-    (when (>= count session-save-interval)
-      (reset! session-save-counter 0)
-      (session/save-session! @editor-atom))))
+  (when (>= (swap! session-save-counter inc) session-save-interval)
+    (reset! session-save-counter 0)
+    (let [s @editor-atom
+          sig (session-sig s)]
+      (when (not= sig @last-session-sig)
+        (reset! last-session-sig sig)
+        (session/save-session! s)))))
 
 (defn save-buffer-named
   "Save buffer `name` (a :bufs key). Pure except for the file write."
@@ -374,7 +366,7 @@
                  ;; it as LF — a destructive edit we didn't intend.
                  bytes (if (= :crlf (:line-ending b))
                          (str/replace raw "\n" "\r\n") raw)]
-             (atomic-spit f bytes))
+             (persist/atomic-spit f bytes))
            (let [bak (auto-save-file f)]
              (when (.exists bak) (.delete bak)))
            (-> s (update-in [:bufs name] #(assoc % :modified false :edit-count 0))
@@ -831,6 +823,12 @@
   (if-let [names (seq (modified-bufs s))]
     (quit-ask (dissoc s :exit-pending :exit) names)
     (quit-finish s)))
+
+(defn suspend
+  "Request suspend. The command loop performs it outside swap! so no state
+   lock is held while the process is stopped."
+  [s]
+  (assoc s :suspend-requested true))
 
 ;; --- Window commands ---
 
@@ -1659,6 +1657,7 @@
    [:ctrl \u] universal-argument
    [:ctrl \t] transpose-chars
    [:ctrl \l] recenter
+   [:ctrl \z] suspend
    [:meta \;] comment-region
    [:ctrl \h] {\k describe-key
                \f (prompt "Describe function: " describe-function command-completer)
@@ -1769,8 +1768,20 @@
 
 ;; --- Main ---
 
+(defn run-key
+  "handle-key with a per-command guard: a command that throws must not bring
+   down the editor or lose unsaved buffers."
+  [s key]
+  (try
+    (handle-key s key)
+    (catch Exception e
+      (log/log "command error:" (.getMessage e))
+      (msg-error s "Command error" e))))
+
 (defn command-loop []
   (loop []
+    (when-let [[rows cols] (t/apply-pending-resize!)]
+      (swap! editor assoc :rows rows :cols cols))
     ;; CAS the scroll writeback against the rendered snapshot so a concurrent
     ;; mutation (nREPL/web) doesn't clobber the other thread's update.
     (let [snapshot @editor
@@ -1792,12 +1803,17 @@
     (let [key (t/read-key-timeout 100)]
       (when key
         (let [kill-before (peek (:kill @editor))]
-          (swap! editor #(handle-key % key))
+          (swap! editor run-key key)
           ;; Clipboard is a boundary side effect, so it stays out of the
           ;; pure commands and out of tests.
           (when (and (seq (:kill @editor))
                      (not= kill-before (peek (:kill @editor))))
             (t/set-clipboard! (peek (:kill @editor))))))
+      ;; Suspend runs here, outside swap!, so no state lock is held while
+      ;; stopped. The flag is cleared first so resume doesn't stop again.
+      (when (:suspend-requested @editor)
+        (swap! editor dissoc :suspend-requested)
+        (t/suspend!))
       ;; Pump on every tick, including idle, so jobs stream while nothing is
       ;; being typed — and only from this thread.
       (swap! editor job/pump!)
@@ -1902,7 +1918,7 @@
   (proc/install-shutdown-hook!)
   (try
     (t/enter-raw-mode!) (t/enable-bracketed-paste!) (t/cls)
-    (t/on-resize! (fn [rows cols] (swap! editor assoc :rows rows :cols cols)))
+    (t/on-resize!)
     (let [[rows cols] (t/terminal-size)]
       (reset! editor (initial-state rows cols))
       ;; nREPL and any other out-of-band caller can use xmas.api directly.

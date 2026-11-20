@@ -32,7 +32,7 @@ pty:
 lint:
 	clj-kondo --lint src
 
-check: lint test
+check: lint test pty
 	clojure -M -e '(require (quote xmas.ed)) (println "ok")'
 
 clean:

@@ -44,3 +44,7 @@
       (is (= "" @out))
       (term/set-clipboard! "hi")
       (is (= (term/clipboard-seq "hi") @out)))))
+(deftest resize-is-applied-once
+  (term/note-resize!)
+  (is (= [24 80] (term/apply-pending-resize! (fn [] [24 80]))))
+  (is (nil? (term/apply-pending-resize! (fn [] [1 1])))))

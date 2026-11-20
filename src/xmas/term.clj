@@ -20,17 +20,30 @@
 (defn enter-raw-mode! [] (stty! "raw" "-echo" "-icanon" "-isig"))
 (defn exit-raw-mode! [] (stty! "cooked" "echo" "icanon" "isig"))
 
+(def ^:private resize-pending (atom false))
+
+(defn note-resize!
+  "Mark a pending SIGWINCH. The editor loop applies it; doing stty work inside
+   the signal handler would block on a thread we don't control."
+  [] (reset! resize-pending true))
+
+(defn apply-pending-resize!
+  "Return [rows cols] once per resize signal, nil otherwise. Optional size-fn
+   lets tests avoid a real tty."
+  ([] (apply-pending-resize! terminal-size))
+  ([size-fn]
+   (when (compare-and-set! resize-pending true false)
+     (try (size-fn)
+          (catch Exception e
+            (log/log "resize error:" (.getMessage e))
+            nil)))))
+
 (defn on-resize!
-  "Register a callback (fn [rows cols]) for terminal resize (SIGWINCH)."
-  [callback]
-  (let [handler (proxy [SignalHandler] []
-                  (handle [_sig]
-                    (try
-                      (let [[rows cols] (terminal-size)]
-                        (callback rows cols))
-                      (catch Exception e
-                        (log/log "resize error:" (.getMessage e))))))]
-    (Signal/handle (Signal. "WINCH") handler)))
+  "Install the SIGWINCH handler. It only sets a flag; see apply-pending-resize!."
+  []
+  (Signal/handle (Signal. "WINCH")
+                 (proxy [SignalHandler] []
+                   (handle [_sig] (note-resize!)))))
 
 ;; --- Input from System.in ---
 
@@ -207,6 +220,19 @@
 
 (defn sg [{:keys [fg bg bold]}]
   (esc (str/join ";" (cond-> [0] bold (conj 1) fg (conj 38 5 fg) bg (conj 48 5 bg))) "m"))
+
+(defn suspend!
+  "Stop the process with SIGTSTP and restore raw mode on resume. Must run
+   outside swap! so the state atom isn't held while suspended."
+  []
+  (try
+    (exit-raw-mode!)
+    (Signal/handle (Signal. "TSTP") SignalHandler/SIG_DFL)
+    (Signal/raise (Signal. "TSTP"))
+    (finally
+      (enter-raw-mode!)
+      (enable-bracketed-paste!)
+      (cls))))
 
 (defn teardown!
   "Restore the terminal to a sane state. Each step is isolated so a failure

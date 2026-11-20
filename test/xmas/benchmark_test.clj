@@ -1,17 +1,20 @@
 (ns xmas.benchmark-test
+  "Roadmap M7 targets: open 10 MB under 2 s, keystroke on 100k lines under
+   50 ms. These are timing assertions, so they can be noisy on a loaded box;
+   the fixture sizes match the roadmap exactly."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [xmas.buf :as buf]
+            [xmas.complete :as complete]
             [xmas.gap :as gap]
             [xmas.view :as view]
-            [xmas.window :as win]
-            [xmas.complete :as complete]))
+            [xmas.window :as win]))
 
-;; Benchmark tests - these verify performance characteristics but don't fail on CI.
-;; They print timing info for manual inspection.
-;; Roadmap targets: open 10 MB < 2 s; keystroke on 100k lines < 50 ms.
-
-(def ^:private large-text (str/join "\n" (repeat 50000 ";; This is a test line for benchmarking\n")))
+(def ^:private line-count 100000)
+(def ^:private bench-line
+  ";; This is a test line for benchmarking performance with numbers 0123456789 and symbols foo bar baz qux")
+(def ^:private large-text
+  (str/join "\n" (repeat line-count bench-line)))
 
 (defn- make-bench-state [text]
   {:buf "*bench*"
@@ -21,57 +24,38 @@
    :completion-sources {:default [complete/buffers complete/buffer-symbols]
                         :clojure-mode [complete/buffer-symbols complete/project-symbols]}})
 
-(defn- render-loop [state n]
-  (loop [i 0 s state]
-    (if (< i n)
-      (let [snapshot s
-            {:keys [sig line-state-updates]} (view/render snapshot)
-            wp (get-in snapshot [:windows :cur-window] [])
-            updated (-> snapshot
-                        (assoc :render-sig sig)
-                        (update-in (conj wp :scroll) (fn [_] 0)))]
-        (recur (inc i) updated))
-      s)))
+(defn- render! [state]
+  (view/render state)
+  state)
 
-(deftest bench-large-file-render
-  (let [state (make-bench-state large-text)
-        iterations 100
-        text (:text (get-in state [:bufs "*bench*"]))
-        lines (gap/line-count text)]
-    (println "\n=== Large File Render Benchmark ===")
-    (println (str "Lines: " lines))
-    (println (str "Chars: " (count (str text))))
-    (let [start (System/nanoTime)
-          _ (render-loop state iterations)
-          elapsed (/ (- (System/nanoTime) start) 1e6)]
-      (println (str "Render " iterations " frames: " (int elapsed) " ms"))
-      (println (str "Avg per frame: " (float (/ elapsed iterations)) " ms"))
-      (is (< (/ elapsed iterations) 50.0) "Avg frame time should be < 50ms"))))
+(defn- type-char [state]
+  (let [b (get-in state [:bufs "*bench*"])
+        p (min (:point b) (max 0 (dec (count (str (:text b))))))
+        b' (buf/edit b p p "x")]
+    (-> state
+        (assoc-in [:bufs "*bench*"] b')
+        render!)))
 
-(deftest bench-large-file-open
-  (println "\n=== Large File Open Benchmark ===")
+(deftest bench-fixture-matches-roadmap
+  (is (= line-count (gap/line-count (:text (buf/make "*bench*" large-text nil)))))
+  (is (> (count large-text) (* 10 1000 1000)) "fixture must be at least 10 MB"))
+
+(deftest bench-open-10mb
   (let [start (System/nanoTime)
         b (buf/make "*bench*" large-text nil)
         elapsed (/ (- (System/nanoTime) start) 1e6)]
-    (println (str "Buffer creation: " (int elapsed) " ms"))
-    (is (< elapsed 2000.0) "Buffer creation should be < 2000ms (roadmap: 10MB < 2s)"))
-  ;; Pre-create buffer for edit tests
-  (let [b (buf/make "*bench*" large-text nil)]
-    ;; Edit at end (typing at point) - more realistic
-    (let [start (System/nanoTime)
-          _ (buf/set-point b (fn [_ _] (count (:text b))))  ;; move to end
-          _ (buf/edit b (count (:text b)) (count (:text b)) ";; appended\n")
-          elapsed (/ (- (System/nanoTime) start) 1e6)]
-      (println (str "Edit at end: " (int elapsed) " ms"))
-      (is (< elapsed 100.0) "Edit at end should be < 100ms"))
-    ;; Edit at middle - also realistic
-    (let [start (System/nanoTime)
-          mid (quot (count (:text b)) 2)
-          _ (buf/set-point b (fn [_ _] mid))
-          _ (buf/edit b mid mid ";; middle\n")
-          elapsed (/ (- (System/nanoTime) start) 1e6)]
-      (println (str "Edit at middle: " (int elapsed) " ms"))
-      (is (< elapsed 100.0) "Edit at middle should be < 100ms"))))
+    (println (str "\n=== Open 10 MB: " (int elapsed) " ms (target < 2000) ==="))
+    (is (:large-file b))
+    (is (< elapsed 2000.0) "opening 10 MB should take < 2 s")))
 
-;; Run with: clojure -M:test -n xmas.benchmark-test
-;; Or run individually: clojure -M:test -v xmas.benchmark-test/bench-large-file-render
+(deftest bench-keystroke-100k-lines
+  (let [warm (-> (make-bench-state large-text) render! type-char type-char)
+        iterations 20
+        start (System/nanoTime)
+        _ (loop [i 0 s warm]
+            (when (< i iterations) (recur (inc i) (type-char s))))
+        elapsed (/ (- (System/nanoTime) start) 1e6)
+        per-key (/ elapsed iterations)]
+    (println (str "\n=== Keystroke on " line-count " lines: "
+                  (float per-key) " ms (target < 50) ==="))
+    (is (< per-key 50.0) "edit + render per keystroke should be < 50 ms")))

@@ -514,7 +514,7 @@
 (deftest describe-key-undefined
   (let [s0 (with-commands (make-state "hello"))
         s1 (ed/describe-key s0)
-        s2 (ed/handle-key s1 [:ctrl \z])]
+        s2 (ed/handle-key s1 [:ctrl \q])]
     (is (.contains ^String (:msg s2) "undefined"))))
 
 (deftest describe-function-found
@@ -691,7 +691,7 @@
   (let [s (-> (make-state "x")
               (assoc-in [:bufs "*test*" :file] "/does/not/matter")
               (assoc-in [:bufs "*test*" :edit-count] 500))]
-    (with-redefs-fn {#'xmas.ed/atomic-spit (fn [& _] (throw (java.io.IOException. "full")))}
+    (with-redefs-fn {#'xmas.persist/atomic-spit (fn [& _] (throw (java.io.IOException. "full")))}
       #(is (= 500 (get-in (ed/auto-save! s)
                           [:bufs "*test*" :edit-count]))))))
 
@@ -1656,6 +1656,15 @@
   (is (= :default-val
          (persist/load! "definitely-not-a-real-file-name-xxx" :default-val))))
 
+(deftest persist-atomic-spit-writes-and-replaces
+  (let [f (java.io.File/createTempFile "xmas-atomic" ".edn")]
+    (try
+      (persist/atomic-spit (.getPath f) "one")
+      (is (= "one" (slurp f)))
+      (persist/atomic-spit (.getPath f) "two")
+      (is (= "two" (slurp f)))
+      (finally (.delete f)))))
+
 (deftest persisted-state-is-shape-checked
   (is (= {:bookmarks {"ok" {:buf "b" :pos 1}}
           :recentf ["/ok"]
@@ -1755,3 +1764,22 @@
       (finally
         (System/setProperty "user.home" original)
         (rm-rf home)))))
+
+;; --- M7 resilience ---
+
+(deftest run-key-survives-command-exception
+  (let [s (assoc (make-state "hello")
+                 :bindings {[:ctrl \q] (fn [_] (throw (ex-info "boom" {})))})]
+    (is (= "hello" (text (ed/run-key s [:ctrl \q]))))
+    (is (.contains ^String (:msg (ed/run-key s [:ctrl \q])) "Command error"))))
+
+(deftest suspend-sets-flag
+  (is (true? (:suspend-requested (ed/handle-key (make-state "") [:ctrl \z]))))
+  (is (true? (:suspend-requested (ed/suspend (make-state ""))))))
+
+(deftest session-sig-detects-changes
+  (let [s (make-state "hello")]
+    (is (= (ed/session-sig s) (ed/session-sig s)))
+    (is (not= (ed/session-sig s)
+              (ed/session-sig
+                (update-in s [:bufs "*test*"] #(buf/edit % 0 0 "x")))))))

@@ -56,13 +56,6 @@ else
   exit 1
 fi
 
-# --- GraalVM native-image (optional) ---
-if command -v native-image >/dev/null 2>&1; then
-  echo "[ok] native-image $(native-image --version 2>&1 | head -1)"
-else
-  echo "[--] native-image not found (optional — 'make native' for instant startup)"
-fi
-
 # --- Fetch deps ---
 echo ""
 echo "Fetching dependencies..."
@@ -82,4 +75,3 @@ echo "  make dev     — run from source"
 echo "  make run     — build + run uberjar"
 echo "  make lint    — run clj-kondo"
 echo "  make test    — run tests"
-echo "  make native  — native binary (needs GraalVM)"
