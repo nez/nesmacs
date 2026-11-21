@@ -20,6 +20,7 @@
     :or   {version 0 extras {}}}]
   (let [text (str/join "\n" (cons header (map format-entry entries)))]
     (-> (buf/make name text nil)
+        (assoc :journal? false)
         (assoc :mode mode :read-only true
                :listbuf-entries (vec entries) :version version)
         (merge extras))))

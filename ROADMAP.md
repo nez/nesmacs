@@ -196,6 +196,9 @@ Size M. Risk low.
 - Diagnostics as M1 props; hover in the echo area; `M-.` definition;
   completion as an M4 source.
 - Start with `clojure-lsp`; keep the client language-agnostic.
+- `make lsp` runs the end-to-end check against the real `clojure-lsp` binary
+  (diagnostics, hover, completion, definition, crash restart); it is excluded
+  from `make test` because it needs the server and its indexing time.
 - Evaluate `lsp4clj` before hand-rolling the protocol layer.
 
 **Done when:** clojure-lsp shows squiggles and completions, `M-.` jumps,
@@ -218,12 +221,18 @@ Size L. Risk high.
 
 - Session restore: buffers, windows, points, recent files (undo history is
   explicitly not persisted).
+- Edit journal: each command appends its text edits to `~/.xmas/journal.edn`,
+  so `kill -9` loses at most the command in flight. On restart the journal
+  replays over the last snapshot (trimmed to keep it small) and is then folded
+  into a new snapshot. A save also records a marker, so edits already in the
+  file are not replayed twice.
 - Large-file mode: above a threshold, skip fontification and property work,
   render lazily. Targets: open 10 MB < 2 s; keystroke on 100k lines < 50 ms.
 - Terminal robustness: resize during render, suspend/resume (`C-z`), a command
   that throws never leaves the terminal in raw mode or the screen corrupt.
 - `make native` verified for the current feature set, or dropped from the docs.
-- Benchmarks as tests where stable; pty smoke in `make check`.
+- Benchmarks as tests where stable; pty smoke and a `kill -9` recovery test in
+  `make check`.
 
 **Done when:** `kill -9` + restart restores the session, a 100k-line file is
 usable, and no failure mode leaves a broken terminal.

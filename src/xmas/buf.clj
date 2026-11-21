@@ -31,7 +31,8 @@
   ([name] (make name "" nil))
   ([name text file]
    (let [b {:name name :text (gap/of text) :point 0 :mark nil :file file
-            :modified false :mode :fundamental :undo [] :redo [] :version 0}]
+            :modified false :mode :fundamental :undo [] :redo []
+            :version 0 :journal? true}]
      (assoc b :large-file (large-file? b)))))
 
 (defn set-point [b f]
@@ -57,16 +58,20 @@
 (defn- apply-change [b from to repl]
   (let [repl-len (count repl)
         new-text (gap/edit (:text b) from to repl)
+        v (inc (or (:version b) 0))
         is-large? (:large-file b)]
     (-> b
-        (assoc :text new-text :modified true)
+        (assoc :text new-text :modified true :version v)
         (update :edit-count (fnil inc 0))
-        (update :version (fnil inc 0))
         (cond-> (not is-large?)
           (update :line-states truncate-states (gap/line-of new-text from)))
         (cond-> (not is-large?) (update :props (fnil props/adjust []) from to repl-len))
         (update :point shift-pos from to repl-len)
-        (update :mark #(when % (shift-pos % from to repl-len))))))
+        (update :mark #(when % (shift-pos % from to repl-len)))
+        ;; The editor loop drains this into ~/.xmas/journal.edn, so a kill -9
+        ;; between session snapshots loses at most the command in flight.
+        (cond-> (:journal? b)
+          (update :journal (fnil conj []) {:v v :from from :to to :repl repl})))))
 
 (defn- push-undo
   "Push an undo entry, coalescing adjacent pure insertions so typing is one

@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is testing]]
             [xmas.buf :as buf]
             [xmas.ed]
+            [xmas.gap :as gap]
             [xmas.lsp :as lsp]))
 
 (defn- body-of [framed]
@@ -57,6 +58,26 @@
       (is (= "héllo 世界" (get-in (first msgs) [:result :text])))
       (is (= "" rest*)))))
 
+(deftest uri-round-trip-covers-spaces-and-unicode
+  (doseq [path ["/tmp/plain/x.clj"
+                "/tmp/with space/x.clj"
+                "/tmp/café/日本.clj"]]
+    (is (= path (lsp/uri->path (#'xmas.lsp/path->uri path)))))
+  (testing "a server URI with file:/// is decoded too"
+    (is (= "/tmp/x.clj" (lsp/uri->path "file:///tmp/x.clj")))))
+
+(deftest diagnostic-ranges-clamp-at-end-and-drop-stale
+  (let [offs (deref #'xmas.lsp/lsp-range->offsets)
+        text (gap/of "abc\ndef\n")]
+    (is (= [4 7] (offs text {:start {:line 1 :character 0}
+                             :end   {:line 1 :character 3}})))
+    (testing "end line == line-count means end of text"
+      (is (= [4 8] (offs text {:start {:line 1 :character 0}
+                               :end   {:line 3 :character 0}}))))
+    (testing "a stale range beyond the text is dropped, not misapplied"
+      (is (nil? (offs text {:start {:line 5 :character 0}
+                            :end   {:line 6 :character 0}}))))))
+
 ;; The completion cache is what makes LSP completion non-blocking; guard it.
 (deftest completion-cache-filters-and-resets-on-version
   (let [remember (deref #'xmas.ed/remember-completion!)
@@ -70,6 +91,16 @@
       (is (nil? (cached path 2 3 4 "add")))
       (remember path 2 3 4 ["new"])
       (is (= ["new"] (cached path 2 3 4 "new"))))))
+
+(deftest completion-cache-does-not-swallow-uncached-positions
+  ;; `[]` is truthy, so an uncached position at a cached version used to fall
+  ;; into the cache branch and never send a request.
+  (let [remember (deref #'xmas.ed/remember-completion!)
+        cached   (deref #'xmas.ed/cached-completion)
+        path     "/lsp-cache-pos/x.clj"]
+    (remember path 1 3 4 ["add"])
+    (is (= ["add"] (cached path 1 3 4 "add")))
+    (is (nil? (cached path 1 3 9 "add")))))
 
 (deftest completion-source-uses-snapshot-state
   ;; Sources receive {:state snapshot}, not the editor atom. Reading it as an

@@ -35,7 +35,7 @@
    exact argument vector."
   [s {:keys [argv dir buf-name mode]}]
   (let [b (-> (buf/make buf-name "" nil)
-              (assoc :mode (or mode :job-mode) :read-only true
+              (assoc :mode (or mode :job-mode) :read-only true :journal? false
                      :job-command (vec argv) :job-dir dir :job-status :running))]
     (try
       (let [h (proc/start {:argv argv :dir dir})]

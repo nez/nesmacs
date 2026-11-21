@@ -1,11 +1,28 @@
 (ns xmas.session-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is use-fixtures]]
             [xmas.ed :as ed]
             [xmas.session :as session]
             [xmas.buf :as buf]
+            [xmas.persist :as persist]
             [xmas.window :as win]
             [xmas.cmd :as cmd]
             [xmas.complete :as complete]))
+
+(defn- temp-dir []
+  (doto (java.io.File/createTempFile "xmas-session-dir" "")
+    (.delete)
+    (.mkdirs)))
+
+(defn- delete-tree [^java.io.File f]
+  (doseq [c (reverse (file-seq f))] (.delete c)))
+
+;; Never read or write the real ~/.xmas from tests; the journal tests in
+;; particular would otherwise trim a running editor's journal.
+(use-fixtures :each
+  (fn [f]
+    (let [dir (temp-dir)]
+      (try (binding [persist/*dir* dir] (f))
+           (finally (delete-tree dir))))))
 
 (defn- make-state []
   {:buf "*test*"
@@ -82,3 +99,92 @@
                (str (get-in (first (session/restore-session state sess))
                             [:bufs "*test*" :text])))))
       (finally (.delete f)))))
+
+(deftest journal-replays-edits-since-the-snapshot
+  (let [dir (temp-dir)]
+    (try
+      (binding [persist/*dir* dir]
+        (let [base (make-state)
+              s1   (update-in base [:bufs "*test*"] #(buf/edit % 5 5 ","))
+              s2   (update-in s1 [:bufs "*test*"] #(buf/edit % 0 0 ">> "))]
+          (session/save-session! base)
+          (session/journal-tick! (atom s2))
+          (let [sess (session/load-session!)
+                [restored ok] (session/restore-session base sess)
+                recovered (session/recover-journal! restored)]
+            (is ok)
+            (is (= ">> hello, world"
+                   (str (get-in recovered [:bufs "*test*" :text]))))
+            (is (nil? (persist/read-lines "journal"))))))
+      (finally (delete-tree dir)))))
+
+(deftest journal-trims-what-the-snapshot-covers
+  (let [dir (temp-dir)]
+    (try
+      (binding [persist/*dir* dir]
+        (let [base (make-state)
+              s2   (-> base
+                       (update-in [:bufs "*test*"] #(buf/edit % 5 5 ","))
+                       (update-in [:bufs "*test*"] #(buf/edit % 0 0 ">> ")))
+              a    (atom s2)]
+          (session/journal-tick! a)
+          (is (seq (persist/read-lines "journal")))
+          (session/save-session! @a)
+          (is (nil? (persist/read-lines "journal")))
+          (swap! a update-in [:bufs "*test*"] #(buf/edit % 0 0 "x"))
+          (session/journal-tick! a)
+          (is (= [{:v 3 :from 0 :to 0 :repl "x" :buf "*test*"}]
+                 (persist/read-lines "journal")))))
+      (finally (delete-tree dir)))))
+
+(deftest journal-does-not-replay-edits-already-on-disk
+  ;; Save after the snapshot, then crash: the file already contains the edit,
+  ;; so replaying it again would duplicate it.
+  (let [dir (temp-dir)]
+    (try
+      (binding [persist/*dir* dir]
+        (let [f (java.io.File. dir "doc.txt")
+              _ (spit f "hello")
+              base (update-in (make-state) [:bufs "*test*"]
+                              #(assoc % :file (.getPath f) :version 0))
+              s1 (update-in base [:bufs "*test*"] #(buf/edit % 5 5 "!"))]
+          (session/save-session! base)
+          (session/journal-tick! (atom s1))
+          (spit f "hello!")
+          (session/note-saved! "*test*" 1)
+          (let [[restored ok] (session/restore-session base (session/load-session!))
+                recovered (session/recover-journal! restored)]
+            (is ok)
+            (is (= "hello!" (str (get-in recovered [:bufs "*test*" :text]))))
+            (is (= 1 (get-in recovered [:bufs "*test*" :version]))))))
+      (finally (delete-tree dir)))))
+
+(deftest journal-ignores-corrupt-lines
+  (let [dir (temp-dir)]
+    (try
+      (binding [persist/*dir* dir]
+        (let [base (make-state)]
+          (session/save-session! base)
+          (spit (java.io.File. dir "journal.edn")
+                (str "{:broken\n42\n"
+                     "{:buf \"*test*\" :v 1 :from 5 :to 5 :repl \"!\"}\n"))
+          (let [[restored ok] (session/restore-session base (session/load-session!))
+                recovered (session/recover-journal! restored)]
+            (is ok)
+            (is (= "hello! world"
+                   (str (get-in recovered [:bufs "*test*" :text])))))))
+      (finally (delete-tree dir)))))
+
+(deftest session-keeps-modified-buffer-with-missing-file
+  (let [dir (temp-dir)]
+    (try
+      (binding [persist/*dir* dir]
+        (let [state (-> (make-state)
+                        (assoc-in [:bufs "*test*" :file] "/nonexistent/xmas.txt")
+                        (assoc-in [:bufs "*test*" :modified] true))]
+          (session/save-session! state)
+          (let [[restored ok] (session/restore-session (make-state)
+                                                       (session/load-session!))]
+            (is ok)
+            (is (contains? (:bufs restored) "*test*")))))
+      (finally (delete-tree dir)))))

@@ -9,8 +9,12 @@
   (:import [java.io PushbackReader]
            [java.nio.file Files StandardCopyOption]))
 
+(def ^:dynamic *dir*
+  "Override the persistence directory; tests bind it to a temp dir."
+  nil)
+
 (defn- xmas-dir ^java.io.File []
-  (io/file (System/getProperty "user.home") ".xmas"))
+  (or *dir* (io/file (System/getProperty "user.home") ".xmas")))
 
 (defn- file ^java.io.File [^String name]
   (io/file (xmas-dir) (str name ".edn")))
@@ -34,6 +38,7 @@
       (Files/move tmp target
         (into-array [StandardCopyOption/ATOMIC_MOVE StandardCopyOption/REPLACE_EXISTING]))
       (reset! done? true)
+      true
       (finally
         (when-not @done?
           (try (Files/deleteIfExists tmp) (catch Exception _)))))))
@@ -68,3 +73,50 @@
        (catch Exception e
          (log/log "persistence write failed:" name (.getMessage e))
          nil)))
+
+(defn append-lines!
+  "Append EDN values to `name`, one per line. Returns true when written."
+  [name values]
+  (let [f (file name)]
+    (try
+      (when-let [d (.getParentFile f)] (when-not (.exists d) (.mkdirs d)))
+      ;; create through atomic-spit so a fresh journal gets the same
+      ;; owner-only permissions as the other persisted files
+      (when-not (.exists f) (atomic-spit (.getPath f) ""))
+      (spit f (apply str (map #(str (pr-str %) "\n") values))
+            :append true :encoding "UTF-8")
+      true
+      (catch Exception e
+        (log/log "persistence append failed:" name (.getMessage e))
+        false))))
+
+(defn write-lines!
+  "Atomically replace `name` with `values`, one EDN value per line."
+  [name values]
+  (try
+    (let [f (file name)
+          d (.getParentFile f)]
+      (when d (when-not (.exists d) (.mkdirs d)))
+      (atomic-spit (.getPath f) (apply str (map #(str (pr-str %) "\n") values))))
+    (catch Exception e
+      (log/log "persistence write failed:" name (.getMessage e))
+      false)))
+
+(defn read-lines
+  "Read the EDN values in `name`, skipping corrupt lines (a killed process can
+   leave the last line torn)."
+  [name]
+  (let [f (file name)]
+    (when (.exists f)
+      (try
+        (with-open [r (io/reader f :encoding "UTF-8")]
+          (doall (keep (fn [line]
+                         (try (edn/read-string line)
+                              (catch Exception _ nil)))
+                       (line-seq r))))
+        (catch Exception e
+          (log/log "persistence read failed:" name (.getMessage e))
+          nil)))))
+
+(defn delete! [name]
+  (try (.delete (file name)) (catch Exception _ nil)))

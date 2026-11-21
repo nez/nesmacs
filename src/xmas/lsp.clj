@@ -28,6 +28,17 @@
 
 (defn- utf8-len ^long [^String s] (alength (.getBytes s "UTF-8")))
 
+(defn- path->uri
+  "file: URI for `path`. Uses File.toURI so spaces and non-ASCII are escaped."
+  [^String path]
+  (str (.toURI (java.io.File. path))))
+
+(defn uri->path
+  "Inverse of `path->uri`; percent-decodes and handles file:/ and file:///."
+  [uri]
+  (try (.getPath (java.io.File. (java.net.URI. uri)))
+       (catch Exception _ (str/replace uri #"^file://" ""))))
+
 (defn encode-msg
   "Frame `msg` (a Clojure map) as an LSP message. Content-Length is bytes."
   [msg]
@@ -93,11 +104,17 @@
   (when-let [s (srv root-id)]
     (let [id (swap! next-id inc)]
       (swap! servers update root-id update :pending assoc id cb)
-      (send! (:handle s) {:jsonrpc "2.0" :id id :method method :params params}))))
+      (try (send! (:handle s) {:jsonrpc "2.0" :id id :method method :params params})
+           (catch Exception e
+             (log/log "LSP request failed:" method (.getMessage e))
+             (drop! root-id))))))
 
 (defn- notify! [root-id method params]
   (when-let [s (srv root-id)]
-    (send! (:handle s) {:jsonrpc "2.0" :method method :params params})))
+    (try (send! (:handle s) {:jsonrpc "2.0" :method method :params params})
+         (catch Exception e
+           (log/log "LSP notify failed:" method (.getMessage e))
+           (drop! root-id)))))
 
 ;; --- Document sync ---
 
@@ -106,7 +123,7 @@
 
 (defn- did-open! [root-id path text version language-id]
   (notify! root-id "textDocument/didOpen"
-           {:textDocument {:uri (str "file://" path)
+           {:textDocument {:uri (path->uri path)
                            :languageId language-id
                            :version version
                            :text text}})
@@ -114,7 +131,7 @@
 
 (defn- did-change! [root-id path text version]
   (notify! root-id "textDocument/didChange"
-           {:textDocument {:uri (str "file://" path) :version version}
+           {:textDocument {:uri (path->uri path) :version version}
             :contentChanges [{:text text}]})
   (note-version! root-id path version))
 
@@ -126,7 +143,8 @@
     (when (:initialized? s)
       (doseq [[_ b] (:bufs state)]
         (when-let [path (:file b)]
-          (when (str/starts-with? path (:root s))
+          (when (or (= path (:root s))
+                    (str/starts-with? path (str (:root s) java.io.File/separator)))
             (let [v (or (:version b) 0)
                   seen (get-in s [:docs path])]
               (cond
@@ -140,7 +158,7 @@
   (doseq [[root-id s] @servers
           :when (get-in s [:docs path])]
     (notify! root-id "textDocument/didClose"
-             {:textDocument {:uri (str "file://" path)}})
+             {:textDocument {:uri (path->uri path)}})
     (swap! servers update root-id update :docs dissoc path)))
 
 ;; --- Diagnostics -> props ---
@@ -151,9 +169,12 @@
 
 (defn- lsp-range->offsets [text {:keys [start end]}]
   (when-let [s (line-offset text (:line start))]
-    (let [e (or (line-offset text (:line end)) (+ s (:character end)))]
-      [(+ s (:character start 0))
-       (max (+ s (:character start 0)) (+ e (:character end 0)))])))
+    (let [e (if (= (:line end) (gap/line-count text))
+              (count text)
+              (line-offset text (:line end)))]
+      (when e
+        [(+ s (:character start 0))
+         (max (+ s (:character start 0)) (+ e (:character end 0)))]))))
 
 (defn- diag-face [severity]
   (case severity 1 :diag-error 2 :diag-warning 3 :diag-info :diag-info))
@@ -177,7 +198,7 @@
     "textDocument/publishDiagnostics"
     (when params
       (apply-diagnostics! editor
-                          (str/replace (:uri params) #"^file://" "")
+                          (uri->path (:uri params))
                           (:diagnostics params)))
     "window/showMessage" (when-let [m (:message params)] (log/log "LSP:" root-id m))
     (log/log "LSP unhandled notification" root-id method)))
@@ -188,7 +209,10 @@
       (do (swap! servers update root-id update :pending dissoc id)
           (if error
             (log/log "LSP error" id error)
-            (cb result)))
+            ;; A throwing callback must not drop the messages decoded after it.
+            (try (cb result)
+                 (catch Exception e
+                   (log/log "LSP callback:" (.getMessage e))))))
       (log/log "LSP response for unknown id" id))))
 
 (defn- read-output! [editor root-id]
@@ -234,7 +258,7 @@
       (queue-init! root-id cb)
       (request! root-id "initialize"
                 {:processId (.pid (ProcessHandle/current))
-                 :rootUri (str "file://" dir)
+                 :rootUri (path->uri dir)
                  :capabilities {:textDocument {:synchronization {:dynamicRegistration false}
                                                :hover {}
                                                :definition {}
@@ -251,7 +275,7 @@
 (defn- at-pos
   "Per-request document + position params, shared by hover/definition/completion."
   [path line char]
-  {:textDocument {:uri (str "file://" path)}
+  {:textDocument {:uri (path->uri path)}
    :position {:line line :character char}})
 
 (defn hover [root-id path line char cb]

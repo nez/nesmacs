@@ -324,7 +324,9 @@
           (swap! editor-atom reset-edit-counts saved))))))
 
 (defn save-buffer-named
-  "Save buffer `name` (a :bufs key). Pure except for the file write."
+  "Save buffer `name` (a :bufs key). Writes the file and records the saved
+   version in the edit journal, so a crash before the next session snapshot
+   can't replay edits the file already has."
   [s name]
   (let [b (cmd/buf s name)
         f (:file b)]
@@ -338,7 +340,8 @@
                  ;; it as LF — a destructive edit we didn't intend.
                  bytes (if (= :crlf (:line-ending b))
                          (str/replace raw "\n" "\r\n") raw)]
-             (persist/atomic-spit f bytes))
+             (persist/atomic-spit f bytes)
+             (session/note-saved! name (:version b)))
            (let [bak (auto-save-file f)]
              (when (.exists bak) (.delete bak)))
            (-> s (update-in [:bufs name] #(assoc % :modified false :edit-count 0))
@@ -452,7 +455,7 @@
      ;; outer prompt's `prev-buf` / `on-done` and leave the editor wedged.
      (msg s "Command attempted to use disabled command in minibuffer")
      (-> s
-         (assoc-in [:bufs mini-buf-name] (buf/make mini-buf-name))
+         (assoc-in [:bufs mini-buf-name] (assoc (buf/make mini-buf-name) :journal? false))
          (assoc :mini {:prompt prompt :on-done on-done :prev-buf (:buf s)
                        :history-idx -1 :completer completer})
          (assoc :buf mini-buf-name)))))
@@ -1165,15 +1168,20 @@
       (swap! editor assoc :msg (str "LSP: " (subs txt 0 (min 200 (count txt))))))))
 
 (defn- jump-to-definition
-  "Move point to an LSP Location / LocationLink."
+  "Move point to an LSP Location / LocationLink, exact line and column."
   [res]
   (let [loc   (if (vector? res) (first res) res)
         uri   (or (:uri loc) (:targetUri loc))
         range (or (:range loc) (:targetRange loc))]
     (when (and uri range)
-      (swap! editor
-             #(-> % (find-file (str/replace uri #"^file://" ""))
-                    (goto-line (str (inc (get-in range [:start :line])))))))))
+      (let [line (max 0 (get-in range [:start :line] 0))
+            ch   (max 0 (get-in range [:start :character] 0))]
+        (swap! editor
+               (fn [s]
+                 (let [s  (find-file s (lsp/uri->path uri))
+                       t  (:text (cur s))
+                       ln (min line (dec (gap/line-count t)))]
+                   (cmd/goto-char s (+ (gap/nth-line-start t ln) ch)))))))))
 
 (defn- lsp-at-point
   "Ask the project's server something at point and hand `cb` the result."
@@ -1200,7 +1208,7 @@
 
 (defn- cached-completion [path version line ch prefix]
   (let [{:keys [v pos]} (get @comp-cache path)]
-    (when (= v version)
+    (when (and (= v version) (contains? pos [line ch]))
       (->> (get pos [line ch])
            (filter #(str/starts-with? % prefix))
            vec))))
@@ -1783,6 +1791,10 @@
           (when (and (seq (:kill @editor))
                      (not= kill-before (peek (:kill @editor))))
             (t/set-clipboard! (peek (:kill @editor))))))
+      ;; Persist text edits since the last command, not just on the 5s
+      ;; snapshot: this is what makes kill -9 lose at most the command in
+      ;; flight. Runs outside swap! because it does IO.
+      (session/journal-tick! editor)
       ;; Suspend runs here, outside swap!, so no state lock is held while
       ;; stopped. The flag is cleared first so resume doesn't stop again.
       (when (:suspend-requested @editor)
@@ -1796,8 +1808,10 @@
       (session/save-tick! editor)
       (lsp/tick! editor)
       (when (:exit @editor)
-        ;; Clean exit: save session before leaving the loop
-        (session/save-session! @editor))
+        ;; Clean exit: the final snapshot includes every edit, so the journal
+        ;; is only deleted after that write succeeds.
+        (when (session/save-session! @editor)
+          (session/discard-journal!)))
       (when-not (:exit @editor) (recur)))))
 
 (defn- run-all
@@ -1900,9 +1914,12 @@
       ;; Load session before init.clj so user config can override
       (when-let [sess (session/load-session!)]
         (let [[restored ok] (session/restore-session @editor sess)]
-          (when ok (reset! editor restored))))
+          (when ok (reset! editor (session/recover-journal! restored)))))
       (load-init-files!)
       (swap! editor recover-ask (pending-recoveries))
+      ;; Baseline snapshot: the journal needs a version to replay from even if
+      ;; the editor dies before the first periodic save.
+      (session/save-session! @editor)
       (silence-stdio!)
       (let [services (start-services!)]
         (try (command-loop)
