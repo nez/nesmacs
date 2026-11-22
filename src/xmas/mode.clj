@@ -29,7 +29,8 @@
 
 (defn set-major-mode [s mode-name]
   (-> s
-      (cmd/update-cur #(assoc % :mode mode-name :font-lock []))
+      (cmd/update-cur #(assoc % :mode mode-name
+                              :font-lock [] :font-lock-window nil))
       (run-hooks (hook-name-for mode-name))))
 
 (defn toggle-minor-mode [s mode-name]

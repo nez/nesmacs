@@ -32,7 +32,8 @@
   ([name text file]
    (let [b {:name name :text (gap/of text) :point 0 :mark nil :file file
             :modified false :mode :fundamental :undo [] :redo []
-            :version 0 :journal? true :props [] :font-lock []}]
+            :version 0 :journal? true :props [] :font-lock []
+            :font-lock-window nil}]
      (assoc b :large-file (large-file? b)))))
 
 (defn set-point [b f]

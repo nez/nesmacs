@@ -56,13 +56,15 @@ A single [atom](src/xmas/ed.clj#L13) holds the entire editor state:
 ### [`xmas.api`](src/xmas/api.clj) / [`xmas.keymap`](src/xmas/keymap.clj) — Extension surface
 
 `xmas.api` is what configuration uses: `bind!`, `add-hook!`,
-`register-mode!`, and `add-prop!`/`remove-prop!` for text properties. Props are
-durable `[from to)` ranges with a face name and optional `:owner`/`:priority`;
-they follow edits and paint through the same path as search matches and
-diagnostics. It mutates the editor atom in the dynamic var `*state*` — the live
-editor normally, a private atom during `M-:` — so calls are safe inside the
-command loop's transaction. `xmas.keymap` parses Emacs key syntax (`"C-x C-f"`)
-and installs handlers, creating or replacing prefix maps as needed.
+`register-mode!`, and `add-prop!`/`set-prop!`/`remove-prop!` for text
+properties. Props are durable `[from to)` ranges with a face name and optional
+`:owner`/`:priority`; they follow edits and paint through the same path as
+search matches and diagnostics. `add-prop!` accumulates, `set-prop!` replaces
+one owner's range, and `remove-prop!` clears an owner. It mutates the editor
+atom in the dynamic var `*state*` — the live editor normally, a private atom
+during `M-:` — so calls are safe inside the command loop's transaction.
+`xmas.keymap` parses Emacs key syntax (`"C-x C-f"`) and installs handlers,
+creating or replacing prefix maps as needed.
 
 ## Configuration
 

@@ -53,6 +53,16 @@
       (api/remove-prop! :demo))
     (is (= [:lsp] (mapv :owner (get-in @a [:bufs "a" :props]))))))
 
+(deftest set-prop-replaces-the-owners-range
+  (let [a (atom (assoc-in (state) [:bufs "a" :text] "abcdef"))]
+    (binding [api/*state* a]
+      (api/set-prop! :hover 0 2 :match)
+      (api/set-prop! :hover 3 5 :builtin))
+    (let [ps (get-in @a [:bufs "a" :props])]
+      (is (= 1 (count ps)))
+      (is (= [3 5 :builtin :hover]
+             [(:from (first ps)) (:to (first ps)) (:face (first ps)) (:owner (first ps))])))))
+
 (deftest add-prop-clamps-range-to-buffer
   (let [a (atom (assoc-in (state) [:bufs "a" :text] "abc"))]
     (binding [api/*state* a]

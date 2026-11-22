@@ -62,10 +62,18 @@
   [argv]
   (apply! assoc :lsp-command (mapv str argv)))
 
+(defn- clamp-range
+  "Clamp [from to) to the buffer text, the way buf/edit does."
+  [b from to]
+  (let [n    (count (:text b))
+        from (-> (long from) (max 0) (min n))]
+    [from (-> (long to) (max from) (min n))]))
+
 (defn add-prop!
-  "Paint the current buffer range [from to) with `face`. `opts` may carry
-   :owner (so a later remove-prop! can drop it), :priority, and any extra
-   data. Props follow edits until the text they cover disappears.
+  "Paint the current buffer range [from to) with `face`, adding to whatever
+   is already there. `opts` may carry :owner (so a later remove-prop! can drop
+   it), :priority, and any extra data. Props follow edits until the text they
+   cover disappears.
 
    Absolute offsets are deliberate: hooks know the buffer, and there is no
    stable line identity in a plain text buffer. The range is clamped to the
@@ -74,11 +82,21 @@
   ([from to face opts]
    (apply! cmd/update-cur
            (fn [b]
-             (let [n    (count (:text b))
-                   from (-> (long from) (max 0) (min n))
-                   to   (-> (long to) (max from) (min n))]
+             (let [[from to] (clamp-range b from to)]
                (assoc b :props
                       (props/put (:props b) (props/make from to face opts))))))))
+
+(defn set-prop!
+  "Replace every prop owned by `owner` in the current buffer with one range.
+   Removes the old ranges first, so a moving match or hover target does not
+   leave stale paint behind."
+  ([owner from to face] (set-prop! owner from to face {}))
+  ([owner from to face opts]
+   (apply! cmd/update-cur
+           (fn [b]
+             (let [[from to] (clamp-range b from to)]
+               (assoc b :props
+                      (props/set-owner (:props b) owner from to face opts)))))))
 
 (defn remove-prop!
   "Remove every prop owned by `owner` from the current buffer."

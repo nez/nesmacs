@@ -4,9 +4,10 @@
    Props are durable annotations that outlive a render and follow edits:
    search matches, LSP diagnostics, diff faces, and the region (created at
    render time, never stored). Syntax highlighting is deliberately not stored
-   here — `face.clj` tokenizes the visible lines and the buffer keeps the
-   lexer state, because every edit would otherwise walk every token in the
-   file. Both layers are painted by the same span painter in `view.clj`.
+   here — `face.clj` tokenizes the visible lines and the buffer caches the
+   per-line spans and lexer states in `:font-lock`, because every edit would
+   otherwise walk every token in the file. Both layers are painted by the same
+   span painter in `view.clj`.
 
    A prop is {:from :to :face :priority ...extra}. Higher :priority paints
    later and wins visually; ties keep insertion order. Edits adjust ranges the
@@ -79,3 +80,11 @@
   "Add many props at once (e.g. a diagnostics batch)."
   [props new-props]
   (vec (sort-by by-position (into (vec props) new-props))))
+
+(defn set-owner
+  "Replace every prop owned by `owner` with one range. Use this for a single
+   logical annotation (current match, hover target); use `put`/`add-all` to
+   accumulate several ranges under one owner."
+  [props owner from to face opts]
+  (put (remove-owner props owner)
+       (make from to face (assoc opts :owner owner))))

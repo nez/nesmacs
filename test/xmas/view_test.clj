@@ -1,6 +1,8 @@
 (ns xmas.view-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [xmas.buf :as buf]
+            [xmas.gap :as gap]
             [xmas.props :as props]
             [xmas.term :as term]
             [xmas.view :as view]
@@ -101,6 +103,31 @@
         [spans state] (first (get-in font-lock-updates ["t" :font-lock]))]
     (is (seq spans))
     (is (= :normal state))))
+
+(deftest render-prunes-spans-outside-the-viewport
+  (let [text (str/join "\n" (repeat 60 "abcdef"))
+        b0 (buf/make "t" text nil)
+        start (gap/nth-line-start (:text b0) 50)
+        b (-> b0
+              (assoc :point (inc start)
+                     :mode :clojure-mode
+                     :font-lock-window [0 10]
+                     :font-lock (vec (map-indexed
+                                       (fn [i _] (if (< i 10)
+                                                   [[[0 6 :builtin]] :normal]
+                                                   [nil :normal]))
+                                       (range 60)))))
+        s {:buf "t" :bufs {"t" b}
+           :windows (win/leaf "t" start 0) :cur-window []
+           :rows 6 :cols 20}
+        {:keys [font-lock-updates]} (render-result s)
+        fl (get-in font-lock-updates ["t" :font-lock])
+        win (get-in font-lock-updates ["t" :font-lock-window])]
+    (is (every? (comp nil? first) (take 10 fl)) "old viewport spans are dropped")
+    ;; rows 6 - echo area - modeline = 4 body lines, so [50 54).
+    (is (every? (comp some? first) (subvec fl 50 54)) "new viewport is cached")
+    (is (= [50 54] win))
+    (is (= :normal (second (nth fl 0))) "lexer states survive pruning")))
 
 (deftest render-large-file-skips-font-lock
   (let [b (assoc (buf/make "t" "(defn foo [])" nil)

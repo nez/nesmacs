@@ -635,9 +635,7 @@
 (defn- set-prop
   "Replace every prop owned by `owner` in the current buffer with one range."
   [s owner face from to]
-  (cmd/update-cur s
-    #(assoc % :props (props/put (props/remove-owner (:props %) owner)
-                                (props/make from to face {:owner owner})))))
+  (cmd/update-cur s #(assoc % :props (props/set-owner (:props %) owner from to face {}))))
 
 (defn- clear-prop [s owner]
   (cmd/update-cur s #(assoc % :props (props/remove-owner (:props %) owner))))
@@ -1772,9 +1770,11 @@
           wp (cmd/cur-window-path snapshot)
           with-cache
           (reduce-kv
-            (fn [acc buf-name {:keys [version font-lock]}]
+            (fn [acc buf-name {:keys [version font-lock font-lock-window]}]
               (if (= version (get-in acc [:bufs buf-name :version]))
-                (assoc-in acc [:bufs buf-name :font-lock] font-lock)
+                (-> acc
+                    (assoc-in [:bufs buf-name :font-lock] font-lock)
+                    (assoc-in [:bufs buf-name :font-lock-window] font-lock-window))
                 acc))
             (assoc snapshot :render-sig sig)
             (or font-lock-updates {}))

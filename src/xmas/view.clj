@@ -154,9 +154,9 @@
    is [spans state-after-line-i]; spans is nil for lines tokenized only to
    carry the lexer state. Returns [font-lock state-before-target-line].
 
-   shortcut: spans are cached for every visited line, so a fully scrolled huge
-   file keeps them until the next edit; large-file mode skips this entirely.
-   Add pruning only if that shows up in memory."
+   Spans are cached only for the current viewport: prune-font-lock drops them
+   on scroll, while the cheap lexer states stay so scrolling never restarts
+   from line 0."
   [mode content font-lock ^long target-line]
   (if (zero? target-line)
     [font-lock :normal]
@@ -184,11 +184,34 @@
             entry' [spans nxt]]
         [spans nxt (if entry (assoc font-lock ln entry') (conj font-lock entry'))]))))
 
+(defn- prune-font-lock
+  "Drop cached spans for lines outside the new viewport [start end), keeping
+   their lexer states. Spans are the heavy part; states must stay so scrolling
+   can resume without re-tokenizing from line 0.
+
+   shortcut: one cache window per buffer, so two windows on the same buffer
+   at different scroll positions evict each other's spans and re-tokenize
+   their visible lines. Correct, just not cached; upgrade to a per-window
+   window if split-screen editing of one buffer becomes common."
+  [font-lock window start end]
+  (if-not window
+    font-lock
+    (let [[old-start old-end] window
+          n (count font-lock)
+          outside (concat (range old-start (min old-end start))
+                          (range (max old-start end) old-end))]
+      (reduce (fn [fl ln]
+                (if (and (< ln n) (some? (first (nth fl ln))))
+                  (assoc fl ln [nil (second (nth fl ln))])
+                  fl))
+              font-lock outside))))
+
 (defn- render-window-body
-  "Render visible lines and return the possibly-extended :font-lock cache.
-   If large-file? is true, skip fontification and buffer props for
-   performance; the region still paints because it is a render-time prop."
-  [rect content mode props region scroll hscroll font-lock large-file?]
+  "Render visible lines and return the possibly-extended :font-lock cache and
+   its viewport window. If large-file? is true, skip fontification and buffer
+   props for performance; the region still paints because it is a render-time
+   prop."
+  [rect content mode props region scroll hscroll font-lock window large-file?]
   (let [{:keys [row col rows cols]} rect
         body-rows (dec rows)
         start-line  (gap/line-of content scroll)
@@ -217,7 +240,11 @@
       (when (< r body-rows)
         (fill-row! (+ row r) col cols :default)
         (recur (inc r))))
-    (:font-lock result)))
+    (if large-file?
+      {:font-lock (:font-lock result) :font-lock-window nil}
+      {:font-lock (prune-font-lock (:font-lock result) window
+                                   start-line (min total-lines (+ start-line body-rows)))
+       :font-lock-window [start-line (min total-lines (+ start-line body-rows))]})))
 
 (defn- render-window-modeline
   [rect buf-name modified mode minor-modes point-line cursor-col current?]
@@ -242,7 +269,8 @@
    {:window <updated window with scroll/hscroll/point-line/cursor-col>
     :buf-name <buffer key>
     :version <buffer version at render time>
-    :font-lock <possibly-extended :font-lock cache>}."
+    :font-lock <possibly-extended :font-lock cache>
+    :font-lock-window <viewport whose spans are cached>}."
   [state window rect current?]
   (let [{:keys [rows cols]} rect
         body-rows (dec rows)
@@ -263,15 +291,17 @@
                  (props/make r-lo r-hi :region {:owner :region :priority 100}))
         props (:props buf)
         large-file? (:large-file buf)
-        font-lock (render-window-body rect content mode props region scroll hscroll
-                                      (:font-lock buf) large-file?)]
+        {:keys [font-lock font-lock-window]}
+        (render-window-body rect content mode props region scroll hscroll
+                            (:font-lock buf) (:font-lock-window buf) large-file?)]
     (render-window-modeline rect (:name buf) (:modified buf) mode (:minor-modes buf)
                             point-line cursor-col current?)
     {:window (assoc window :scroll scroll :hscroll hscroll
                            :point-line point-line :cursor-col cursor-col)
      :buf-name buf-name
      :version (:version buf)
-     :font-lock font-lock}))
+     :font-lock font-lock
+     :font-lock-window font-lock-window}))
 
 ;; --- Dividers ---
 
@@ -408,7 +438,7 @@
           (t/hide-cur)
           (doseq [[path rect] layouts]
             (let [w (get-in tree path)
-                  {:keys [window buf-name version font-lock]}
+                  {:keys [window buf-name version font-lock font-lock-window]}
                   (render-one-window state w rect (= path cur-path))]
               (vswap! rendered assoc path window)
               (vswap! cache-ups
@@ -416,7 +446,9 @@
                          (if (and ex (>= (count (:font-lock ex)) (count font-lock)))
                            %
                            (assoc % buf-name
-                                  {:version version :font-lock font-lock}))))))
+                                  {:version version
+                                   :font-lock font-lock
+                                   :font-lock-window font-lock-window}))))))
           (doseq [d divs] (paint-divider! d))
            (paint-candidates state)
           (render-echo-area state)
