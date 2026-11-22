@@ -191,7 +191,7 @@
                               (props/make (first offs) (second offs)
                                           (diag-face severity)
                                           {:owner :lsp :message message}))]
-                 (assoc b :props (into (props/remove-owner (:props b) :lsp) ranges))))))))
+                 (assoc b :props (props/add-all (props/remove-owner (:props b) :lsp) ranges))))))))
 
 (defn- on-notification [editor root-id {:keys [method params]}]
   (case method

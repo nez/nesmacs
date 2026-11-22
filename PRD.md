@@ -22,9 +22,9 @@ Packages are Clojure libraries on `deps.edn`.
 ## Current state
 
 Text editor with Emacs keybindings: gap buffer with line index, window tree,
-major/minor modes with keymaps and hooks, overlays, isearch, query-replace,
-keyboard macros, registers, bookmarks, recentf, dired, buflist, shell
-commands, auto-save, terminal and web frontends, nREPL on 7888.
+major/minor modes with keymaps and hooks, edit-tracking text properties,
+isearch, query-replace, keyboard macros, registers, bookmarks, recentf, dired,
+buflist, shell commands, auto-save, terminal and web frontends, nREPL on 7888.
 
 Configuration is `~/.xmas/init.clj` via `xmas.api` (`bind!`, `add-hook!`,
 `register-mode!`); `M-:` evaluates Clojure in the same context.

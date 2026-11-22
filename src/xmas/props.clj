@@ -1,18 +1,23 @@
 (ns xmas.props
   "Persistent face/property ranges on buffer text.
 
-   Props are annotations that outlive a render: search matches, diagnostics,
-   diff faces. Syntax highlighting is not stored here — `face.clj` computes it
-   per line during rendering, and both are merged by the same span painter.
+   Props are durable annotations that outlive a render and follow edits:
+   search matches, LSP diagnostics, diff faces, and the region (created at
+   render time, never stored). Syntax highlighting is deliberately not stored
+   here — `face.clj` tokenizes the visible lines and the buffer keeps the
+   lexer state, because every edit would otherwise walk every token in the
+   file. Both layers are painted by the same span painter in `view.clj`.
 
-   A prop is {:from :to :face :priority ...extra}. Edits adjust ranges the same
-   way markers do; zero-width props are preserved so caret-like uses survive.")
+   A prop is {:from :to :face :priority ...extra}. Higher :priority paints
+   later and wins visually; ties keep insertion order. Edits adjust ranges the
+   same way markers do; zero-width props are preserved so caret-like uses
+   survive.")
 
 (defn make
   ([from to] (make from to :default {}))
   ([from to face] (make from to face {}))
   ([from to face props]
-   (merge {:face face} props {:from from :to to})))
+   (merge {:face face :priority 0} props {:from from :to to})))
 
 (defn- adjust-range
   "Shift/shrink a single [from to] range to reflect an edit at [e-from e-to)
@@ -36,7 +41,8 @@
 (defn adjust
   "Update prop positions after an edit at [e-from e-to) replaced with
    `repl-len` characters. Props that collapsed as a result of this edit are
-   dropped; props created empty (caret markers) are kept."
+   dropped; props created empty (caret markers) are kept. Source order is
+   preserved: adjust-range is monotone in both endpoints."
   [props e-from e-to repl-len]
   (->> props
        (keep (fn [p]
@@ -47,11 +53,13 @@
        vec))
 
 (defn in-range
-  "Props that intersect the buffer range [from to)."
+  "Props that intersect the buffer range [from to). Expected to be sparse:
+   this filters the whole vector, which is fine for annotations and is why
+   fontification does not live here."
   [props from to]
-  (filter (fn [p]
-            (and (< (:from p) to) (> (:to p) from)))
-          props))
+  (filterv (fn [p]
+             (and (< (:from p) to) (> (:to p) from)))
+           props))
 
 (defn remove-owner
   "Drop every prop tagged with `owner` (e.g. :isearch), leaving other
@@ -59,4 +67,15 @@
   [props owner]
   (filterv #(not= owner (:owner %)) props))
 
-(defn put [props prop] (conj (vec props) prop))
+(defn- by-position [p] [(:from p) (:to p)])
+
+(defn put
+  "Add one prop, keeping the vector sorted by position so painting and tests
+   have a stable order independent of owner churn."
+  [props prop]
+  (vec (sort-by by-position (conj (vec props) prop))))
+
+(defn add-all
+  "Add many props at once (e.g. a diagnostics batch)."
+  [props new-props]
+  (vec (sort-by by-position (into (vec props) new-props))))

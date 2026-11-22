@@ -32,7 +32,7 @@
   ([name text file]
    (let [b {:name name :text (gap/of text) :point 0 :mark nil :file file
             :modified false :mode :fundamental :undo [] :redo []
-            :version 0 :journal? true}]
+            :version 0 :journal? true :props []}]
      (assoc b :large-file (large-file? b)))))
 
 (defn set-point [b f]
@@ -65,7 +65,9 @@
         (update :edit-count (fnil inc 0))
         (cond-> (not is-large?)
           (update :line-states truncate-states (gap/line-of new-text from)))
-        (cond-> (not is-large?) (update :props (fnil props/adjust []) from to repl-len))
+        ;; Props are annotations (few), not fontification, so keep them correct
+        ;; even in large-file mode where they are not painted.
+        (update :props (fnil props/adjust []) from to repl-len)
         (update :point shift-pos from to repl-len)
         (update :mark #(when % (shift-pos % from to repl-len)))
         ;; The editor loop drains this into ~/.xmas/journal.edn, so a kill -9

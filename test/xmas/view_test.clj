@@ -1,49 +1,78 @@
 (ns xmas.view-test
   (:require [clojure.test :refer [deftest is]]
             [xmas.buf :as buf]
+            [xmas.props :as props]
+            [xmas.term :as term]
             [xmas.view :as view]
             [xmas.window :as win]))
 
-;; --- merge-region: overlay [r-lo r-hi) onto pre-existing face spans ---
+;; --- apply-props: paint buffer props onto line-local spans ---
 
-(deftest merge-region-no-region
-  (is (= [[0 5 :default]] (view/merge-region [[0 5 :default]] nil nil))))
+(deftest apply-props-without-props
+  (is (= [[0 5 :default]] (view/apply-props [[0 5 :default]] [] 0 5))))
 
-(deftest merge-region-empty-region
-  (is (= [[0 5 :default]] (view/merge-region [[0 5 :default]] 3 3))))
+(deftest apply-props-clamps-to-the-line
+  ;; Prop [8 12) paints only its intersection with line [10 15).
+  (is (= [[0 2 :match] [2 5 :default]]
+         (view/apply-props [[0 5 :default]]
+                           [(props/make 8 12 :match)] 10 5))))
 
-(deftest merge-region-disjoint-before
-  (is (= [[0 5 :default]] (view/merge-region [[0 5 :default]] 10 15))))
+(deftest apply-props-sorts-by-priority-not-insertion
+  ;; The diagnostic is inserted first but has higher priority, so it paints
+  ;; last and wins on the overlap [2 5). The split at the match boundary is
+  ;; expected because apply-face-range doesn't merge adjacent same-face spans.
+  (let [ps [(props/make 2 5 :diag-error {:priority 10})
+            (props/make 0 3 :match)]
+        out (view/apply-props [[0 5 :default]] ps 0 5)]
+    (is (= :match (get (nth out 0) 2)))
+    (is (= :diag-error (get (nth out 1) 2)))
+    (is (= :diag-error (get (nth out 2) 2)))))
 
-(deftest merge-region-disjoint-after
-  ;; spans start at 10, region 0..5 → no overlap
-  (is (= [[10 15 :default]] (view/merge-region [[10 15 :default]] 0 5))))
-
-(deftest merge-region-fully-inside
-  (is (= [[0 2 :default] [2 5 :region] [5 10 :default]]
-         (view/merge-region [[0 10 :default]] 2 5))))
-
-(deftest merge-region-covers-span
-  (is (= [[2 8 :region]] (view/merge-region [[2 8 :default]] 0 10))))
-
-(deftest merge-region-splits-multiple-spans
-  ;; Two colored spans, region overlays both
-  (is (= [[0 2 :builtin] [2 5 :region] [5 7 :region] [7 10 :default]]
-         (view/merge-region [[0 5 :builtin] [5 10 :default]] 2 7))))
-
-(deftest merge-region-starts-mid-span
-  (is (= [[0 2 :default] [2 5 :region]]
-         (view/merge-region [[0 5 :default]] 2 10))))
-
-(deftest merge-region-ends-mid-span
-  (is (= [[0 3 :region] [3 5 :default]]
-         (view/merge-region [[0 5 :default]] 0 3))))
+(deftest apply-props-region-beats-diagnostics
+  (let [ps [(props/make 0 5 :region {:priority 100})
+            (props/make 0 5 :diag-error {:owner :lsp})]]
+    (is (= [[0 5 :region]] (view/apply-props [[0 5 :default]] ps 0 5)))))
 
 ;; --- apply-face-range directly ---
 
 (deftest apply-face-range-general-face
   (is (= [[0 2 :default] [2 5 :builtin] [5 10 :default]]
          (view/apply-face-range [[0 10 :default]] 2 5 :builtin))))
+
+;; --- region is painted through props ---
+
+(defn- render-str [s]
+  (let [out (StringBuilder.)]
+    (binding [term/*out-fn* #(.append out (str %))]
+      (view/render s))
+    (str out)))
+
+;; :region is bg 24 in view/faces → SGR "48;5;24".
+(def ^:private region-sgr "48;5;24")
+
+(deftest render-paints-region-through-props
+  (let [b (assoc (buf/make "t" "abcdef" nil) :mark 1 :point 4)
+        s {:buf "t" :bufs {"t" b}
+           :windows (win/leaf "t") :cur-window []
+           :rows 5 :cols 20}]
+    (is (.contains (render-str s) region-sgr))))
+
+(deftest render-paints-region-in-large-file-mode
+  ;; Large-file mode skips fontification and buffer props, but the region is a
+  ;; render-time prop and must still show.
+  (let [b (assoc (buf/make "t" "abcdef" nil)
+                 :mark 1 :point 4 :large-file true)
+        s {:buf "t" :bufs {"t" b}
+           :windows (win/leaf "t") :cur-window []
+           :rows 5 :cols 20}]
+    (is (.contains (render-str s) region-sgr))))
+
+(deftest render-does-not-paint-an-empty-region
+  (let [b (assoc (buf/make "t" "abcdef" nil) :mark 2 :point 2)
+        s {:buf "t" :bufs {"t" b}
+           :windows (win/leaf "t") :cur-window []
+           :rows 5 :cols 20}]
+    (is (not (.contains (render-str s) region-sgr)))))
 
 ;; --- render with a 0-body-row pane must not crash ---
 

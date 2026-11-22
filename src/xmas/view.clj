@@ -102,9 +102,9 @@
     (t/reset-sg)))
 
 (defn apply-face-range
-  "Split `spans` at [from, to), painting that slice with `overlay-face`.
+  "Split `spans` at [from, to), painting that slice with `paint-face`.
    Returns spans unchanged for nil or empty ranges."
-  [spans from to overlay-face]
+  [spans from to paint-face]
   (if (or (nil? from) (nil? to) (>= (long from) (long to)))
     spans
     (let [lo (long from) hi (long to)]
@@ -116,20 +116,15 @@
               (let [ma (max a lo) mb (min b hi)]
                 (cond-> acc
                   (< a ma)   (conj [a ma orig])
-                  (< ma mb)  (conj [ma mb overlay-face])
+                  (< ma mb)  (conj [ma mb paint-face])
                   (< mb b)   (conj [mb b orig]))))))
         []
         spans))))
 
-(defn merge-region
-  "Split spans at region boundaries, setting :region face for parts inside
-   [r-lo, r-hi). Bounds are line-relative char indices."
-  [spans r-lo r-hi]
-  (apply-face-range spans r-lo r-hi :region))
-
-(defn- apply-props
-  "Paint buffer-global props onto line-local spans. Props sort by :priority
-   ascending so higher-priority ones paint last and win visually."
+(defn apply-props
+  "Paint buffer-global props onto line-local spans. Props are clamped to the
+   line and sorted by :priority ascending, so higher-priority ones paint last
+   and win visually; ties keep insertion order."
   [spans props line-pos line-len]
   (reduce
     (fn [acc p]
@@ -167,8 +162,9 @@
 
 (defn- render-window-body
   "Render visible lines and return the possibly-extended :line-states cache.
-   If large-file? is true, skip fontification and property work for performance."
-  [rect content mode props scroll hscroll r-lo r-hi states large-file?]
+   If large-file? is true, skip fontification and buffer props for
+   performance; the region still paints because it is a render-time prop."
+  [rect content mode props region scroll hscroll states large-file?]
   (let [{:keys [row col rows cols]} rect
         body-rows (dec rows)
         start-line  (gap/line-of content scroll)
@@ -183,12 +179,12 @@
                   eol  (gap/nth-line-end content ln)
                   line (line-str content pos eol)
                   len  (count line)
-                  [toks nxt-state] (if large-file? [nil :normal] (face/tokenize mode line state))
-                  line-props (if large-file? [] (props/in-range props pos eol))
-                  spans0 (if large-file? [[0 len :default]] (apply-props toks line-props pos len))
-                  r-from (when r-lo (max 0 (min len (- (long r-lo) pos))))
-                  r-to   (when r-lo (max 0 (min len (- (long r-hi) pos))))
-                  spans  (merge-region spans0 r-from r-to)
+                  [toks nxt-state] (if large-file?
+                                     [[[0 len :default]] :normal]
+                                     (face/tokenize mode line state))
+                  line-props (cond-> (if large-file? [] (props/in-range props pos eol))
+                               region (conj region))
+                  spans  (apply-props toks line-props pos len)
                   states' (if large-file? states (if (> (count states) ln) states (conj states nxt-state)))]
               (write-spans! (+ row r) col cols line spans hscroll)
               (recur (inc ln) (inc r) nxt-state states'))
@@ -239,10 +235,12 @@
         cursor-col (text/display-width content (gap/nth-line-start content point-line) point)
         hscroll (if current? (ensure-hvisible hscroll-in cursor-col cols) hscroll-in)
         [r-lo r-hi] (when (and mark current?) (sort [(long mark) (long point)]))
+        region (when (and r-lo (< r-lo r-hi))
+                 (props/make r-lo r-hi :region {:owner :region :priority 100}))
         props (:props buf)
         large-file? (:large-file buf)
-        states (render-window-body rect content mode props scroll hscroll
-                                   r-lo r-hi (:line-states buf) large-file?)]
+        states (render-window-body rect content mode props region scroll hscroll
+                                   (:line-states buf) large-file?)]
     (render-window-modeline rect (:name buf) (:modified buf) mode (:minor-modes buf)
                             point-line cursor-col current?)
     {:window (assoc window :scroll scroll :hscroll hscroll

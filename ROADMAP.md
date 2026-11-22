@@ -43,9 +43,8 @@ frontends, nREPL, file watcher, `~/.xmas/init.clj` with `xmas.api`.
 Roughly 3.6k lines of `src`, 3k of `test`, 417 tests.
 
 Known gaps that the milestones below close: no clipboard or bracketed paste,
-undo is per keystroke, no crash recovery, no text properties (highlighting is a
-per-line tokenizer plus an unused overlay module), no async process model, no
-project model, no completion beyond the minibuffer, no git, no LSP.
+undo is per keystroke, no crash recovery, no async process model, no project
+model, no completion beyond the minibuffer, no git, no LSP.
 
 ---
 
@@ -74,31 +73,34 @@ reported without breaking startup.
 
 Size S–M. Risk low.
 
-## M1 — Text properties (replace the overlay module)
+## M1 — Text properties (shipped)
 
-**Goal:** one mechanism for "paint this range": highlighting, region, search
-matches, and later diagnostics and diffs.
+**Goal:** one mechanism for "paint this range": region, search matches,
+diagnostics and diffs.
 
-**Scope**
+**Built**
 
-- Buffer gains `:props`: sorted `[from to face props priority]`, adjusted on
-  every edit with property tests (insert/delete/overlap/collapse).
-- `view` paints props instead of the ad-hoc region range and the unused
-  `overlay.clj`. Delete the overlay module rather than keep two systems.
-- Fontification becomes a mode pass that writes props incrementally (changed
-  lines only), replacing the `line-states` tokenizer cache. Keep the current
-  regex tokenizer as the Clojure/elisp implementation; do not rewrite it.
-- Named face registry shared by terminal and web (one map, two renderers).
-- isearch, query-replace and region all move onto props.
+- `xmas.props` holds durable `{:from :to :face :priority :owner}` annotations
+  on the buffer and adjusts them on every edit; search, query-replace, LSP
+  diagnostics and diff faces all write props.
+- The region is a render-time prop (`:owner :region`, high priority), so it
+  goes through the same painter without being stored or adjusted. It still
+  paints in large-file mode, where buffer props are skipped.
+- `xmas.face` stays the derived fontification layer: it tokenizes visible
+  lines and the buffer caches only the multi-line lexer state. Storing every
+  token as a durable prop would make each keystroke walk the whole file, which
+  is the wrong trade for data that can be recomputed from the text.
+- `xmas.view/faces` is the single named face map; terminal and web share it.
 
 **Done when:** deleting text inside a highlighted range leaves correct props,
 search matches and the region use the same mechanism, and the overlay
-namespace is gone.
+namespace is gone. All three hold.
 
 **Not here:** tree-sitter, semantic highlighting, folds.
 
 Size M. Risk medium: property adjustment is the classic off-by-one graveyard;
-property tests are the exit criterion.
+property tests are the exit criterion. Covered by targeted boundary tests and
+`test.check` properties over random edits.
 
 ## M2 — Processes and jobs
 
@@ -274,8 +276,8 @@ processes, and project navigation. That alone is a usable editor.
 
 ## Open decisions
 
-1. **Props vs overlays** — unify on props and delete `overlay.clj` (recommended)
-   or keep overlays for identity-bearing ranges. Decide at the start of M1.
+1. **Props vs overlays** — resolved in M1: durable props for annotations,
+   derived per-line tokenization for syntax. No overlay module.
 2. **Completion UI** — minibuffer first (recommended); in-buffer popup only if
    the minibuffer proves insufficient.
 3. **Job writes** — every background mutation is a pure `swap!`; jobs never

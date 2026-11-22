@@ -3,6 +3,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.properties :as prop]
             [xmas.buf :as buf]
+            [xmas.props :as props]
             [xmas.spec :as spec]))
 
 ;; --- Properties ---
@@ -249,7 +250,26 @@
 
 (deftest edit-adjusts-props
   (let [b  (assoc (buf/make "t" "hello" nil)
-                  :props [(xmas.props/make 2 4 :match)])
+                  :props [(props/make 2 4 :match)])
+        b' (buf/edit b 0 0 "XX")]
+    (is (= [4 6] [(-> b' :props first :from) (-> b' :props first :to)]))))
+
+(deftest edit-keeps-props-in-position-order
+  (let [b  (assoc (buf/make "t" "hello world" nil)
+                  :props [(props/make 0 2 :a)
+                          (props/make 4 6 :b)
+                          (props/make 8 10 :c)])
+        b' (buf/edit b 1 1 "XY")]
+    ;; The first prop stretches; the rest shift by the insertion length.
+    (is (= [[0 4] [6 8] [10 12]]
+           (mapv (juxt :from :to) (:props b'))))))
+
+(deftest edit-adjusts-props-in-large-file-mode
+  ;; Large-file mode skips fontification, not annotations: diagnostics and
+  ;; search ranges must keep tracking edits.
+  (let [b  (assoc (buf/make "t" "hello" nil)
+                  :large-file true
+                  :props [(props/make 2 4 :match)])
         b' (buf/edit b 0 0 "XX")]
     (is (= [4 6] [(-> b' :props first :from) (-> b' :props first :to)]))))
 
