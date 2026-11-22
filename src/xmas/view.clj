@@ -140,60 +140,84 @@
 (defn- line-str [^CharSequence content ^long pos ^long eol]
   (.toString (.subSequence content (int pos) (int eol))))
 
-(defn- extend-states
-  "Ensure `states` has entries up through line (target-line - 1). Entry i is
-   the tokenizer state *after* line i (so it's the starting state for line
-   i+1). Returns [new-states state-before-target-line]."
-  [mode content states ^long target-line]
+(defn- tokenize-line
+  "Tokenize line `ln` using the state carried by the previous font-lock entry.
+   Returns [spans state-after-line]."
+  [mode content font-lock ^long ln]
+  (let [pos   (gap/nth-line-start content ln)
+        eol   (gap/nth-line-end content ln)
+        state (if (zero? ln) :normal (second (nth font-lock (dec ln))))]
+    (face/tokenize mode (line-str content pos eol) state)))
+
+(defn- extend-font-lock
+  "Ensure `font-lock` has entries up through line (target-line - 1). Entry i
+   is [spans state-after-line-i]; spans is nil for lines tokenized only to
+   carry the lexer state. Returns [font-lock state-before-target-line].
+
+   shortcut: spans are cached for every visited line, so a fully scrolled huge
+   file keeps them until the next edit; large-file mode skips this entirely.
+   Add pruning only if that shows up in memory."
+  [mode content font-lock ^long target-line]
   (if (zero? target-line)
-    [states :normal]
-    (let [n (count states)]
+    [font-lock :normal]
+    (let [n (count font-lock)]
       (if (>= n target-line)
-        [states (nth states (dec target-line))]
-        (loop [ln n
-               state (if (zero? n) :normal (nth states (dec n)))
-               out states]
+        [font-lock (second (nth font-lock (dec target-line)))]
+        (loop [ln n font-lock font-lock]
           (if (>= ln target-line)
-            [out state]
-            (let [pos (gap/nth-line-start content ln)
-                  eol (gap/nth-line-end content ln)
-                  [_ nxt] (face/tokenize mode (line-str content pos eol) state)]
-              (recur (inc ln) nxt (conj out nxt)))))))))
+            [font-lock (second (nth font-lock (dec target-line)))]
+            (let [[_ nxt] (tokenize-line mode content font-lock ln)]
+              (recur (inc ln) (conj font-lock [nil nxt])))))))))
+
+(defn- line-font-spans
+  "Fontification spans for visible line `ln`: reuse the cached entry or
+   tokenize the line and replace the entry. Returns [spans next-state cache']."
+  [mode content font-lock ln state]
+  (let [entry (when (< ln (count font-lock)) (nth font-lock ln))]
+    (if (and entry (some? (first entry)))
+      [(first entry) (second entry) font-lock]
+      (let [[spans nxt] (face/tokenize mode
+                                       (line-str content
+                                                 (gap/nth-line-start content ln)
+                                                 (gap/nth-line-end content ln))
+                                       state)
+            entry' [spans nxt]]
+        [spans nxt (if entry (assoc font-lock ln entry') (conj font-lock entry'))]))))
 
 (defn- render-window-body
-  "Render visible lines and return the possibly-extended :line-states cache.
+  "Render visible lines and return the possibly-extended :font-lock cache.
    If large-file? is true, skip fontification and buffer props for
    performance; the region still paints because it is a render-time prop."
-  [rect content mode props region scroll hscroll states large-file?]
+  [rect content mode props region scroll hscroll font-lock large-file?]
   (let [{:keys [row col rows cols]} rect
         body-rows (dec rows)
         start-line  (gap/line-of content scroll)
         total-lines (gap/line-count content)
-        [states0 init-state] (if large-file?
-                                [(or states []) :normal]
-                                (extend-states mode content (or states []) start-line))
+        [font-lock0 init-state] (if large-file?
+                                  [(or font-lock []) :normal]
+                                  (extend-font-lock mode content (or font-lock []) start-line))
         result
-        (loop [ln start-line r 0 state init-state states states0]
+        (loop [ln start-line r 0 state init-state font-lock font-lock0]
           (if (and (< r body-rows) (< ln total-lines))
             (let [pos  (gap/nth-line-start content ln)
                   eol  (gap/nth-line-end content ln)
                   line (line-str content pos eol)
                   len  (count line)
-                  [toks nxt-state] (if large-file?
-                                     [[[0 len :default]] :normal]
-                                     (face/tokenize mode line state))
+                  [toks nxt-state font-lock']
+                  (if large-file?
+                    [[[0 len :default]] :normal font-lock]
+                    (line-font-spans mode content font-lock ln state))
                   line-props (cond-> (if large-file? [] (props/in-range props pos eol))
                                region (conj region))
-                  spans  (apply-props toks line-props pos len)
-                  states' (if large-file? states (if (> (count states) ln) states (conj states nxt-state)))]
+                  spans  (apply-props toks line-props pos len)]
               (write-spans! (+ row r) col cols line spans hscroll)
-              (recur (inc ln) (inc r) nxt-state states'))
-            {:r r :states states}))]
+              (recur (inc ln) (inc r) nxt-state font-lock'))
+            {:r r :font-lock font-lock}))]
     (loop [r (:r result)]
       (when (< r body-rows)
         (fill-row! (+ row r) col cols :default)
         (recur (inc r))))
-    (:states result)))
+    (:font-lock result)))
 
 (defn- render-window-modeline
   [rect buf-name modified mode minor-modes point-line cursor-col current?]
@@ -218,7 +242,7 @@
    {:window <updated window with scroll/hscroll/point-line/cursor-col>
     :buf-name <buffer key>
     :version <buffer version at render time>
-    :states <possibly-extended :line-states cache>}."
+    :font-lock <possibly-extended :font-lock cache>}."
   [state window rect current?]
   (let [{:keys [rows cols]} rect
         body-rows (dec rows)
@@ -239,15 +263,15 @@
                  (props/make r-lo r-hi :region {:owner :region :priority 100}))
         props (:props buf)
         large-file? (:large-file buf)
-        states (render-window-body rect content mode props region scroll hscroll
-                                   (:line-states buf) large-file?)]
+        font-lock (render-window-body rect content mode props region scroll hscroll
+                                      (:font-lock buf) large-file?)]
     (render-window-modeline rect (:name buf) (:modified buf) mode (:minor-modes buf)
                             point-line cursor-col current?)
     {:window (assoc window :scroll scroll :hscroll hscroll
                            :point-line point-line :cursor-col cursor-col)
      :buf-name buf-name
      :version (:version buf)
-     :states states}))
+     :font-lock font-lock}))
 
 ;; --- Dividers ---
 
@@ -384,15 +408,15 @@
           (t/hide-cur)
           (doseq [[path rect] layouts]
             (let [w (get-in tree path)
-                  {:keys [window buf-name version states]}
+                  {:keys [window buf-name version font-lock]}
                   (render-one-window state w rect (= path cur-path))]
               (vswap! rendered assoc path window)
               (vswap! cache-ups
                       #(let [ex (get % buf-name)]
-                         (if (and ex (>= (count (:states ex)) (count states)))
+                         (if (and ex (>= (count (:font-lock ex)) (count font-lock)))
                            %
                            (assoc % buf-name
-                                  {:version version :states states}))))))
+                                  {:version version :font-lock font-lock}))))))
           (doseq [d divs] (paint-divider! d))
            (paint-candidates state)
           (render-echo-area state)
@@ -412,4 +436,4 @@
           {:sig sig
            :cur-scroll (:scroll cur-win)
            :cur-hscroll (:hscroll cur-win)
-           :line-state-updates @cache-ups})))))
+           :font-lock-updates @cache-ups})))))

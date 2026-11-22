@@ -37,5 +37,28 @@
       (api/configure-lsp! ["clangd" "--stdio"]))
     (is (= ["clangd" "--stdio"] (:lsp-command @a)))))
 
+(deftest add-prop-installs-on-current-buffer
+  (let [a (atom (assoc-in (state) [:bufs "a" :text] "abc"))]
+    (binding [api/*state* a]
+      (api/add-prop! 0 2 :match {:owner :demo :priority 5}))
+    (let [[p] (get-in @a [:bufs "a" :props])]
+      (is (= [0 2 :match 5 :demo]
+             [(:from p) (:to p) (:face p) (:priority p) (:owner p)])))))
+
+(deftest remove-prop-drops-only-that-owner
+  (let [a (atom (assoc-in (state) [:bufs "a" :text] "abcd"))]
+    (binding [api/*state* a]
+      (api/add-prop! 0 2 :match {:owner :demo})
+      (api/add-prop! 3 4 :diag-error {:owner :lsp})
+      (api/remove-prop! :demo))
+    (is (= [:lsp] (mapv :owner (get-in @a [:bufs "a" :props]))))))
+
+(deftest add-prop-clamps-range-to-buffer
+  (let [a (atom (assoc-in (state) [:bufs "a" :text] "abc"))]
+    (binding [api/*state* a]
+      (api/add-prop! -5 99 :match))
+    (let [[p] (get-in @a [:bufs "a" :props])]
+      (is (= [0 3] [(:from p) (:to p)])))))
+
 (deftest outside-config-context-throws
   (is (thrown? IllegalStateException (api/bind! "C-c x" identity))))

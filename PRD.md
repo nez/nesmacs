@@ -27,7 +27,8 @@ isearch, query-replace, keyboard macros, registers, bookmarks, recentf, dired,
 buflist, shell commands, auto-save, terminal and web frontends, nREPL on 7888.
 
 Configuration is `~/.xmas/init.clj` via `xmas.api` (`bind!`, `add-hook!`,
-`register-mode!`); `M-:` evaluates Clojure in the same context.
+`register-mode!`, `add-prop!`, `remove-prop!`); `M-:` evaluates Clojure in the
+same context.
 
 ## Roadmap
 

@@ -60,6 +60,19 @@
         ;; The buffer should be dropped since file doesn't exist
         (is (not (contains? (:bufs restored) "/nonexistent/path.txt")))))))
 
+(deftest session-persists-font-lock-states-without-spans
+  (let [state (-> (make-state)
+                  (assoc-in [:bufs "*test*" :modified] true)
+                  (assoc-in [:bufs "*test*" :font-lock]
+                            [[[[0 5 :builtin]] :normal]
+                             [[[0 2 :string]] :in-string]]))]
+    (session/save-session! state)
+    (when-let [sess (session/load-session!)]
+      (let [[restored ok] (session/restore-session state sess)]
+        (is ok)
+        (is (= [[nil :normal] [nil :in-string]]
+               (get-in restored [:bufs "*test*" :font-lock])))))))
+
 (deftest test-session-save-on-exit
   ;; Simulate clean exit by setting :exit true
   (let [state (-> (make-state)

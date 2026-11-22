@@ -82,19 +82,22 @@ diagnostics and diffs.
 
 - `xmas.props` holds durable `{:from :to :face :priority :owner}` annotations
   on the buffer and adjusts them on every edit; search, query-replace, LSP
-  diagnostics and diff faces all write props.
+  diagnostics and diff faces all write props. Extensions use
+  `xmas.api/add-prop!` and `remove-prop!`.
 - The region is a render-time prop (`:owner :region`, high priority), so it
   goes through the same painter without being stored or adjusted. It still
   paints in large-file mode, where buffer props are skipped.
-- `xmas.face` stays the derived fontification layer: it tokenizes visible
-  lines and the buffer caches only the multi-line lexer state. Storing every
-  token as a durable prop would make each keystroke walk the whole file, which
-  is the wrong trade for data that can be recomputed from the text.
+- Fontification is incremental too: `:font-lock` caches `[spans state]` per
+  line, edits drop it from the edited line down, and the renderer reuses the
+  cached spans instead of re-tokenizing visible lines every frame. Large-file
+  mode skips the cache entirely. This is the same span painter, not a second
+  overlay system.
 - `xmas.view/faces` is the single named face map; terminal and web share it.
 
 **Done when:** deleting text inside a highlighted range leaves correct props,
 search matches and the region use the same mechanism, and the overlay
-namespace is gone. All three hold.
+namespace is gone. All three hold, and `init.clj` can add and remove props
+through `xmas.api`.
 
 **Not here:** tree-sitter, semantic highlighting, folds.
 

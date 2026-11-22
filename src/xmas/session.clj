@@ -14,7 +14,11 @@
   "Serialize a buffer to EDN-safe data. Excludes undo/redo and runtime state.
    An unmodified file-backed buffer stores no text: the file is the source, and
    re-serializing a 10 MB buffer every few seconds is pure waste. Modified
-   buffers keep their text so `kill -9` still loses nothing."
+   buffers keep their text so `kill -9` still loses nothing.
+
+   Fontification spans are derived, so only the per-line lexer states are
+   persisted (as [nil state]); restoring them avoids re-tokenizing from line 0
+   on the first scroll while keeping the session file small."
   [b]
   (let [^String file (:file b)
         on-disk? (and file (not (:modified b))
@@ -28,7 +32,8 @@
      :mode (:mode b)
      :version (:version b)
      :edit-count (:edit-count b 0)
-     :line-states (:line-states b [])
+     :font-lock (when-not on-disk?
+                  (mapv (fn [entry] [nil (second entry)]) (:font-lock b)))
      :props (:props b [])
      :large-file (:large-file b)}))
 
@@ -48,7 +53,8 @@
         text (or saved (some-> file file-text))]
     (when (or text (nil? file))
       ;; Text reloaded from disk may have changed since the session was saved,
-      ;; so its cached token states and props no longer line up.
+      ;; so cached fontification and props no longer line up. Font-lock is
+      ;; derived and starts empty; props are durable and ride along.
       (-> (buf/make (:name d) (or text "") file)
           (assoc :point (:point d)
                  :mark (:mark d)
@@ -57,7 +63,7 @@
                  :version (:version d)
                  :edit-count (:edit-count d)
                  :journal-from-disk? (and (some? file) (nil? saved))
-                 :line-states (if saved (:line-states d) [])
+                 :font-lock (if saved (or (:font-lock d) []) [])
                  :props (if saved (:props d) [])
                  :large-file (:large-file d))))))
 

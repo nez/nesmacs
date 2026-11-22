@@ -74,6 +74,43 @@
            :rows 5 :cols 20}]
     (is (not (.contains (render-str s) region-sgr)))))
 
+;; --- font-lock cache: fontification props are computed once per line ---
+
+(defn- render-result [s]
+  (binding [term/*out-fn* (fn [_])]
+    (view/render s)))
+
+(deftest render-reuses-cached-font-lock-spans
+  ;; A sentinel :builtin span in the cache must survive: if the renderer
+  ;; re-tokenized "(abcdef" it would paint :default instead.
+  (let [b (-> (buf/make "t" "abcdef" nil)
+              (assoc :mode :clojure-mode
+                     :font-lock [[[[0 6 :builtin]] :normal]]))
+        s {:buf "t" :bufs {"t" b}
+           :windows (win/leaf "t") :cur-window []
+           :rows 5 :cols 20}]
+    ;; :builtin is fg 67 in view/faces.
+    (is (.contains (render-str s) "38;5;67"))))
+
+(deftest render-fills-font-lock-cache
+  (let [b (assoc (buf/make "t" "(defn foo [])" nil) :mode :clojure-mode)
+        s {:buf "t" :bufs {"t" b}
+           :windows (win/leaf "t") :cur-window []
+           :rows 5 :cols 20}
+        {:keys [font-lock-updates]} (render-result s)
+        [spans state] (first (get-in font-lock-updates ["t" :font-lock]))]
+    (is (seq spans))
+    (is (= :normal state))))
+
+(deftest render-large-file-skips-font-lock
+  (let [b (assoc (buf/make "t" "(defn foo [])" nil)
+                 :mode :clojure-mode :large-file true)
+        s {:buf "t" :bufs {"t" b}
+           :windows (win/leaf "t") :cur-window []
+           :rows 5 :cols 20}
+        {:keys [font-lock-updates]} (render-result s)]
+    (is (= [] (get-in font-lock-updates ["t" :font-lock])))))
+
 ;; --- render with a 0-body-row pane must not crash ---
 
 (deftest render-tiny-split-doesnt-crash

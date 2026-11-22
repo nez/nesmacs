@@ -1767,17 +1767,17 @@
     ;; CAS the scroll writeback against the rendered snapshot so a concurrent
     ;; mutation (nREPL/web) doesn't clobber the other thread's update.
     (let [snapshot @editor
-          {:keys [sig cur-scroll cur-hscroll line-state-updates]}
+          {:keys [sig cur-scroll cur-hscroll font-lock-updates]}
           (view/render snapshot)
           wp (cmd/cur-window-path snapshot)
           with-cache
           (reduce-kv
-            (fn [acc buf-name {:keys [version states]}]
+            (fn [acc buf-name {:keys [version font-lock]}]
               (if (= version (get-in acc [:bufs buf-name :version]))
-                (assoc-in acc [:bufs buf-name :line-states] states)
+                (assoc-in acc [:bufs buf-name :font-lock] font-lock)
                 acc))
             (assoc snapshot :render-sig sig)
-            (or line-state-updates {}))
+            (or font-lock-updates {}))
           updated (cond-> with-cache
                     (some? cur-scroll)  (assoc-in (conj wp :scroll) cur-scroll)
                     (some? cur-hscroll) (assoc-in (conj wp :hscroll) cur-hscroll))]

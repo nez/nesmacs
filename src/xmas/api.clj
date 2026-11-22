@@ -5,8 +5,10 @@
    atom under `-main` (so nREPL callers need no wrapping). `xmas.ed` binds it
    to a per-command atom during `M-:`, so the same calls are safe inside and
    outside the command loop's transaction."
-  (:require [xmas.keymap :as keymap]
-            [xmas.mode :as mode]))
+  (:require [xmas.cmd :as cmd]
+            [xmas.keymap :as keymap]
+            [xmas.mode :as mode]
+            [xmas.props :as props]))
 
 (def ^:dynamic *state* nil)
 
@@ -59,6 +61,29 @@
   "Set the argv used to start language servers from now on."
   [argv]
   (apply! assoc :lsp-command (mapv str argv)))
+
+(defn add-prop!
+  "Paint the current buffer range [from to) with `face`. `opts` may carry
+   :owner (so a later remove-prop! can drop it), :priority, and any extra
+   data. Props follow edits until the text they cover disappears.
+
+   Absolute offsets are deliberate: hooks know the buffer, and there is no
+   stable line identity in a plain text buffer. The range is clamped to the
+   buffer, like every other edit entry point."
+  ([from to face] (add-prop! from to face {}))
+  ([from to face opts]
+   (apply! cmd/update-cur
+           (fn [b]
+             (let [n    (count (:text b))
+                   from (-> (long from) (max 0) (min n))
+                   to   (-> (long to) (max from) (min n))]
+               (assoc b :props
+                      (props/put (:props b) (props/make from to face opts))))))))
+
+(defn remove-prop!
+  "Remove every prop owned by `owner` from the current buffer."
+  [owner]
+  (apply! cmd/update-cur #(assoc % :props (props/remove-owner (:props %) owner))))
 
 (defn register-mode!
   "Register a major or minor mode. `keymap` maps key strings to commands, e.g.

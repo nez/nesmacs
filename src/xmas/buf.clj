@@ -32,7 +32,7 @@
   ([name text file]
    (let [b {:name name :text (gap/of text) :point 0 :mark nil :file file
             :modified false :mode :fundamental :undo [] :redo []
-            :version 0 :journal? true :props []}]
+            :version 0 :journal? true :props [] :font-lock []}]
      (assoc b :large-file (large-file? b)))))
 
 (defn set-point [b f]
@@ -46,14 +46,15 @@
         (<= p to)  (+ from repl-len)
         :else      (+ p (- repl-len (- to from)))))
 
-(defn- truncate-states
-  "Drop tokenizer-state cache entries at or beyond the edit line. The entry
-   at index i is the state *after* line i — entries for lines ≥ from-line
-   could change once that line is modified."
-  [states from-line]
-  (let [n (count (or states []))
+(defn- truncate-font-lock
+  "Drop font-lock entries at or beyond the edit line. Entry i holds the spans
+   and lexer state *after* line i, so everything from the edited line down may
+   change. Copy the kept prefix: a subvec would keep the dropped spans
+   reachable, and these entries are much heavier than the old state cache."
+  [font-lock from-line]
+  (let [n (count (or font-lock []))
         keep (min n (max 0 from-line))]
-    (if (zero? keep) [] (subvec states 0 keep))))
+    (if (zero? keep) [] (into [] (subvec font-lock 0 keep)))))
 
 (defn- apply-change [b from to repl]
   (let [repl-len (count repl)
@@ -64,7 +65,7 @@
         (assoc :text new-text :modified true :version v)
         (update :edit-count (fnil inc 0))
         (cond-> (not is-large?)
-          (update :line-states truncate-states (gap/line-of new-text from)))
+          (update :font-lock truncate-font-lock (gap/line-of new-text from)))
         ;; Props are annotations (few), not fontification, so keep them correct
         ;; even in large-file mode where they are not painted.
         (update :props (fnil props/adjust []) from to repl-len)

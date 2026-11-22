@@ -202,28 +202,28 @@
                   (range 1100))]
     (is (= buf/undo-limit (count (:undo b))))))
 
-;; --- :line-states truncation on edit/undo/redo ---
+;; --- :font-lock truncation on edit/undo/redo ---
 
-(deftest line-states-truncates-at-edit-line
-  ;; Simulate a partially-filled state cache and confirm edit truncates to
-  ;; the line of the edit.
+(deftest font-lock-truncates-at-edit-line
+  ;; Simulate a partially-filled font-lock cache and confirm an edit truncates
+  ;; to the line of the edit.
   (let [b  (assoc (buf/make "t" "a\nb\nc\nd\ne" nil)
-                  :line-states [:s0 :s1 :s2 :s3])
+                  :font-lock [[[] :s0] [[] :s1] [[] :s2] [[] :s3]])
         b' (buf/edit b 4 4 "X")] ; pos 4 is first char of "c" (line 2)
-    (is (= [:s0 :s1] (:line-states b')))))
+    (is (= [[[] :s0] [[] :s1]] (:font-lock b')))))
 
-(deftest line-states-fully-truncates-on-line0-edit
+(deftest font-lock-fully-truncates-on-line0-edit
   (let [b  (assoc (buf/make "t" "abc\ndef" nil)
-                  :line-states [:s0])
+                  :font-lock [[[] :s0]])
         b' (buf/edit b 0 0 "X")]
-    (is (= [] (:line-states b')))))
+    (is (= [] (:font-lock b')))))
 
-(deftest line-states-truncates-on-undo
+(deftest font-lock-truncates-on-undo
   (let [b  (-> (buf/make "t" "abc\ndef\nghi" nil)
                (buf/edit 4 4 "X"))
-        b' (assoc b :line-states [:s0 :s1 :s2])
+        b' (assoc b :font-lock [[[] :s0] [[] :s1] [[] :s2]])
         u  (buf/undo b')]
-    (is (= [:s0] (:line-states u)))))
+    (is (= [[[] :s0]] (:font-lock u)))))
 
 (deftest version-bumps-on-edit-and-undo-redo
   (let [b (buf/make "t" "abc" nil)
