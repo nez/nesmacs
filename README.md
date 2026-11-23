@@ -1,44 +1,24 @@
 # xmas
 
-**A text editor with the Emacs paradigm, written in Clojure.**
+**Emacs' editing model, rebuilt in Clojure — and rewritable while it runs.**
 
-Buffers, windows, keymaps, modes, hooks and commands as pure `state -> state`
-functions — no Emacs Lisp runtime, no `~/.emacs.d`. Everything you extend is
-Clojure running in the same process as the editor.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Clojure](https://img.shields.io/badge/Clojure-native-63b132?logo=clojure&logoColor=white)
+![Status](https://img.shields.io/badge/status-pre--1.0-orange)
 
-```text
-(ns xmas.hello
-  (:require [xmas.api :as api]))
+Buffers, windows, key prefixes, mark, kill ring, modes and hooks — on a small
+Clojure core. No Elisp runtime and no plugin boundary: configuration, commands
+and fontification are Clojure in the same process as the editor, so the editor
+is something you can inspect, change and debug while it is running.
 
-(defn greet
-  "Say hello in the echo area."
-  [s]
-  (assoc s :msg "hello from init.clj"))
+<img src="docs/xmas.svg" alt="xmas editing a Clojure buffer, rendered by xmas.view" width="691">
 
-(api/bind! "C-c g" #'greet)
+<p align="center"><sub>Rendered by <code>xmas.view</code> from a real editor state — no mockup.</sub></p>
 
- -- src/xmas/hello.clj   L7 C22  (clojure-mode)
-```
+## Run it
 
-## Why another editor
-
-- **Your fingers already know it.** `C-f`, `C-x C-s`, `C-s`, `M-%`, `M-x`,
-  `C-x 2`, `C-x C-c`: prefix keys, numeric arguments, mark, region, kill ring.
-- **One language.** Configuration, modes, commands and fontification are
-  Clojure. `~/.xmas/init.clj` runs against the live editor, `M-:` evaluates in
-  it, and nREPL is already listening on `:7888`.
-- **State is a value.** One atom, commands that take a state and return the
-  next one. The web client on `:1234` drives that same command loop from a
-  browser — that is the point, not a gimmick.
-
-Status: pre-1.0 and used daily for the milestone loop in
-[ROADMAP.md](ROADMAP.md). It is not a drop-in Emacs replacement, and it does
-not try to be: no Elisp, no GUI frames, no packages.
-
-## Quick start
-
-Requires Java 11+, the [Clojure CLI](https://clojure.org/guides/install_clojure)
-and a POSIX terminal (`stty`). Developed on Linux.
+Needs Java 11+, the [Clojure CLI](https://clojure.org/guides/install_clojure)
+and a POSIX terminal.
 
 ```sh
 git clone https://github.com/nez/xmas.git
@@ -46,61 +26,83 @@ cd xmas
 make dev
 ```
 
-`make dev` runs from source. `make run` builds `target/xmas.jar` first;
-`./xmas` runs that jar directly. On Debian/Ubuntu, `./install.sh` installs the
-toolchain and runs the full check.
+That is the whole install. `C-x C-c` exits; it asks to save each modified
+buffer. First launch creates `~/.xmas/` for config, session and the crash
+journal. `make run` builds a jar, `./xmas` runs it.
 
-First launch creates `~/.xmas/` for configuration, session and journal. Quit
-with `C-x C-c`; it asks to save each modified buffer instead of dropping work.
+Your fingers already work: `C-f C-b C-n C-p C-a C-e`, `C-s`, `M-%`, `C-x C-f`,
+`C-x C-s`, `C-x 2`, `C-x o`, `M-x`, `M-:`. Beyond those: `C-x g` git status,
+`C-x p g` ripgrep the project, `M-.` definition, `C-c h` hover, `C-c i`
+complete symbol, `C-x r` registers and rectangles.
 
-Optional but recommended: `ripgrep` for project search, `clojure-lsp` for LSP,
-`git` for the git buffers, `clj-kondo` for lint, `python3` for the pty tests.
+## The part that is different
 
-## What's inside
+The editor is one atom. Every command is a pure function from that state to the
+next one. That is not an implementation detail — it is the feature:
 
-| Area | What works |
-| --- | --- |
-| Editing | Gap buffer with a line index, Unicode and wide-character aware cursor math, undo/redo with adjacent inserts coalesced into one step, bracketed paste as one edit, OSC 52 copy on kill |
-| Navigation | Incremental search, query-replace, occur, imenu, goto-line, window tree with splits, resizing and per-window scroll |
-| Files and projects | find-file, dired, buffer list, recentf, bookmarks, registers, rectangles, project find-file, ripgrep search streamed into a job buffer |
-| Programs | `M-!` and `M-|` as async jobs; a job owns a buffer, streams output, and can be killed (`C-c C-k`) or rerun (`g`) without freezing the editor |
-| Git | Status with stage/unstage, diff, log, commit. Diff and log buffers are ordinary buffers with faces and navigation |
-| LSP | Diagnostics as durable text properties, go-to-definition (`M-.`), hover (`C-c h`), symbol completion (`C-c i`); any server via `:lsp-command`, `clojure-lsp` by default |
-| Completion | Minibuffer prefix completion with history, `M-x` commands and symbol-at-point, all from the same primitive |
-| Durability | Session restore (buffers, windows, points, props), a per-command journal that survives `kill -9`, auto-save with a recovery prompt on startup, safe quit dialog |
-| Rendering | One named face map, durable props for anything that outlives a frame, per-line font-lock cached and pruned to the viewport, large-file mode above 1 MB or 100k lines |
-| Extensibility | `xmas.api`: `bind!`, `add-hook!`, `register-mode!`, `add-prop!`, `set-prop!`, `remove-prop!`, `configure-lsp!`. Reload `init.clj` with `M-x reload-config` |
+```clojure
+;; nREPL is on :7888. Connect from CIDER/Calva, or from another terminal:
+user=> (require '[xmas.ed :as ed] '[xmas.cmd :as cmd])
+user=> (str (:text (cmd/cur @ed/editor)))
+"(ns xmas.hello\n  (:require [xmas.api :as api]))\n..."
+user=> (swap! ed/editor cmd/edit 0 0 ";; live from the REPL\n")
+;; the buffer on screen is now different
+```
 
-Highlighting ships for Clojure/EDN and Emacs Lisp. There is no plugin
-ecosystem yet: packages are Clojure libraries on `deps.edn`.
+Or skip the socket and use `M-:`, which evaluates against the live editor:
 
-## Keys you will use
+```clojure
+M-: (api/bind! "C-c g" (fn [s] (assoc s :msg "hi")))
+```
 
-| Key | Command |
-| --- | --- |
-| `C-x C-f` | find file |
-| `C-x C-s` | save buffer |
-| `C-x C-c` | quit, asking per modified buffer (`y/n/!`) |
-| `C-x b` / `C-x C-b` | switch buffer / buffer list |
-| `C-x d` | dired |
-| `C-x g` | git status |
-| `C-x p f` / `C-x p g` | project file / ripgrep search |
-| `C-x 2` `C-x 3` `C-x o` `C-x 0` `C-x 1` | split, other window, delete window(s) |
-| `C-s` / `C-r` | incremental search forward/backward |
-| `M-%` | query-replace |
-| `M-s o` | occur |
-| `M-i` / `M-g` | imenu / goto line |
-| `M-.` / `C-c h` / `C-c i` | LSP definition / hover / complete symbol |
-| `C-x (` `C-x )` `C-x e` | record / stop / replay a keyboard macro |
-| `C-x r …` | registers, rectangles, bookmarks |
-| `M-!` / `M-\|` | async shell command / filter region through a command |
-| `M-x` / `M-:` | run a command / evaluate Clojure |
+Because the state is a value, the same command loop is rendered by a second
+client at <http://127.0.0.1:1234>. Same keys, same state, no second editor. The
+web client is a demo, not a promised frontend — but it is the proof that “state
+is a value” is not a slogan here.
 
-Full keymap: [`src/xmas/ed.clj`](src/xmas/ed.clj).
+The rest follows from the same decision:
+
+- **Crash-safe by construction.** Every edit appends a small journal record
+  before the next key is read. `kill -9` loses at most the command in flight;
+  restart replays the journal. There is a pty test that edits, kills the JVM,
+  restarts, and requires the text back.
+- **One painter.** The region, search matches, LSP diagnostics and diff faces
+  are all durable `[from to)` props with a face and a priority. They follow
+  edits until the text they cover disappears. Fontification is derived per
+  line, cached, and pruned to the viewport, so an edit only drops the lines it
+  can affect.
+- **No plugin API to learn first.** If the editor can do it, it is a function
+  you can call: `(swap! ed/editor ed/find-file "src/xmas/ed.clj")`.
+
+## What is in the box
+
+- **Editing** — gap buffer with a line index, Unicode and wide-character aware
+  cursor math, undo/redo with adjacent inserts coalesced, bracketed paste as
+  one edit, OSC 52 copy so kills reach the system clipboard (even over SSH).
+- **Finding** — incremental search, query-replace, occur, imenu, goto-line,
+  window tree with splits and resizing, project search via ripgrep streamed
+  into a buffer.
+- **Files and projects** — find-file, dired, buffer list, recentf, bookmarks,
+  registers, rectangles, project find-file.
+- **Programs** — `M-!` and `M-|` are jobs: output streams into a buffer while
+  typing stays responsive, `C-c C-k` kills, `g` reruns.
+- **Git** — `C-x g` status with stage/unstage, diff, log and commit. Diff and
+  log buffers are ordinary buffers with faces and navigation.
+- **LSP** — diagnostics as props, `M-.` definition, `C-c h` hover, `C-c i`
+  symbol completion. Any server through `:lsp-command` (`clojure-lsp` by
+  default).
+- **Durability** — session restore for buffers, windows, points and props;
+  per-command journal; auto-save with a recovery prompt; safe quit dialog.
+- **Rendering** — one named face map, durable props, incremental font-lock,
+  large-file mode above 1 MB or 100k lines (the region still paints there).
+
+Highlighting ships for Clojure/EDN and Emacs Lisp. Packages are Clojure
+libraries on `deps.edn`; there is no package manager yet.
 
 ## Configure it in Clojure
 
-`~/.xmas/init.clj` runs at startup, after the previous session is restored:
+`~/.xmas/init.clj` runs at startup, after the previous session is restored.
+`M-x reload-config` re-evaluates it without restarting.
 
 ```clojure
 (ns my.init
@@ -113,50 +115,18 @@ Full keymap: [`src/xmas/ed.clj`](src/xmas/ed.clj).
 (api/bind! "C-c g" #'greet)               ; named commands also appear in M-x
 
 (api/register-mode! :notes-mode :major
-  {"C-c C-c" (fn [s] (assoc s :msg "compiled"))})
+  {"C-c C-c" (fn [s] (assoc s :msg "noted"))})
 
 (api/add-hook! :clojure-mode-hook
   (fn [s] s))
 ```
 
 A failing `init.clj` reports in the echo area and the editor keeps running.
-`M-x reload-config` re-evaluates it without restarting.
+Text properties are public too: `(api/add-prop! 0 12 :match {:owner :demo})`,
+`(api/set-prop! :hover 20 30 :builtin)`, `(api/remove-prop! :demo)` — the same
+durable ranges search and diagnostics use.
 
-Text properties are part of the public surface — the same durable ranges that
-search matches, diagnostics and diffs use:
-
-```clojure
-;; From M-: or nREPL, where the live editor is in scope
-(api/add-prop! 0 12 :match {:owner :demo})   ; paint, accumulating
-(api/set-prop! :hover 20 30 :builtin)        ; replace one owner's range
-(api/remove-prop! :demo)                     ; clear an owner
-```
-
-Props follow edits until the text they cover disappears.
-
-## Live hacking
-
-The running editor is an atom you can inspect and rewrite. nREPL listens on
-`7888`; connect from CIDER, Calva, or the command line:
-
-```clojure
-(require '[xmas.ed :as ed] '[xmas.cmd :as cmd])
-
-(keys @ed/editor)                      ; the whole state
-(str (:text (cmd/cur @ed/editor)))     ; current buffer text
-(swap! ed/editor cmd/edit 0 0 "hello") ; inject an edit
-(swap! ed/editor ed/find-file "/tmp/x.clj")
-(swap! ed/editor ed/switch-buffer "*scratch*")
-
-(defn my-cmd "It works." [s] (ed/msg s "it works"))
-(xmas.api/bind! "M-z" #'my-cmd)        ; also visible to M-x
-```
-
-Changes appear on the next redisplay (any keypress). The dev watcher reloads
-changed namespaces from `src/`. The web demo at
-<http://127.0.0.1:1234> is the same loop rendered in a browser.
-
-## How it works
+## How it is built
 
 ```
 read-key -> handle-key(state, key) -> next state -> render(state) -> terminal
@@ -164,66 +134,56 @@ read-key -> handle-key(state, key) -> next state -> render(state) -> terminal
      '------------------------- command loop ------------------------'
 ```
 
-One atom holds the editor. Commands are pure functions of that state; side
-effects happen only at the boundary (`save-buffer`, processes, terminal I/O).
-That is what makes the state testable, replayable from a journal, and
-renderable by a second frontend.
-
-- **Buffers** are immutable maps over a gap buffer with a line index. Every
-  mutation bottoms out in `buf/edit`, which adjusts point, undo, props,
-  font-lock and the crash journal in one place.
-- **Windows** are a tree; layout, splits and scroll positions are derived from
-  it, never stored twice.
-- **Painting** has one path: `xmas.props` holds durable ranges, `xmas.face`
-  tokenizes a line, `xmas.view` applies props over spans, and the region is
-  just a high-priority prop created at render time. Font-lock is derived per
-  line and pruned to the viewport, so edits drop only what they can affect.
-- **Extensions** reach the editor through `xmas.api` and the dynamic
-  `*state*`, so configuration runs inside the command loop's transaction.
+One atom, pure commands, side effects only at the boundary. The state can be
+tested, replayed from a journal, and rendered by another process.
 
 | Module | Role |
 | --- | --- |
-| `xmas.ed` | editor core: commands, built-in keymap, modes glue, main loop |
+| `xmas.ed` | editor core: commands, built-in keymap, modes, main loop |
 | `xmas.buf`, `xmas.gap`, `xmas.text` | buffer type, gap buffer + line index, text primitives |
-| `xmas.window` | window tree, layout, splits |
-| `xmas.props`, `xmas.face`, `xmas.view` | text properties, tokenizer, screen painting |
-| `xmas.term` | raw terminal input/output, clipboard, resize signals |
-| `xmas.mode`, `xmas.api`, `xmas.keymap` | modes, hooks and the extension surface |
-| `xmas.proc`, `xmas.job` | processes and streaming job buffers |
-| `xmas.project`, `xmas.nav`, `xmas.complete`, `xmas.dired`, `xmas.buflist` | project search, occur/imenu, completion, file and buffer navigation |
-| `xmas.git*`, `xmas.lsp` | git status/diff/log/commit, language server client |
-| `xmas.session`, `xmas.persist` | session snapshots, crash journal, auto-save |
-| `xmas.web`, `xmas.dev`, `xmas.log` | browser demo, source watcher, debug log |
+| `xmas.window`, `xmas.view` | window tree and layout; the only screen painter |
+| `xmas.props`, `xmas.face` | durable text properties, tokenizer |
+| `xmas.api`, `xmas.keymap`, `xmas.mode` | extension surface, key parsing, modes and hooks |
+| `xmas.proc`, `xmas.job`, `xmas.lsp` | processes, streaming job buffers, language server |
+| `xmas.git*`, `xmas.project`, `xmas.dired`, `xmas.buflist`, `xmas.nav`, `xmas.complete` | git app, project search, file and buffer navigation, completion |
+| `xmas.session`, `xmas.persist`, `xmas.term` | session and journal, persistence, raw terminal I/O |
+
+Design rules live in [PRD.md](PRD.md): commands stay pure, one atom, one
+rendering pipeline, one keymap mechanism, no second process model. A shortcut
+with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ## Development
 
 ```sh
 make dev     # run from source
-make jar     # build target/xmas.jar
 make test    # 512 tests / 6,095 assertions
-make check   # lint + test + pty smoke + kill -9 recovery + require
-make bench   # timing gates (excluded from test so a loaded box can't fail CI)
+make check   # lint + tests + pty smoke + kill -9 recovery + require
+make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # integration tests against a real clojure-lsp
 ```
 
-The pty scripts start the editor in a real terminal, drive it with keystrokes,
-and check the rendered frame; the crash test edits, kills the JVM, restarts and
-requires the journal to restore the edit. `make bench` asserts under 50 ms per
-keystroke on a 100k-line file and under 2 s to open 10 MB (measured ~20 ms and
-~28 ms on a 16-core Linux machine).
+The pty scripts start the editor in a real terminal, drive it with keys and
+check the rendered frame. The benchmark asserts under 50 ms per keystroke on a
+100k-line file and under 2 s to open 10 MB; measured roughly 20 ms and 30 ms on
+a 16-core Linux machine. Everything is testable from `clojure.test`, including
+generative tests for buffers, props and text.
 
-Design rules the code follows, in [PRD.md](PRD.md): commands stay pure, one
-atom, one rendering pipeline, one keymap mechanism, no second process model. A
-shortcut with a known limit carries a `shortcut:` comment naming when to
-upgrade it.
+## Status, and when not to use it
 
-## Roadmap
+Pre-1.0. Solid editing and text properties are done; async jobs, project
+navigation, git, LSP and completion have working slices. [ROADMAP.md](ROADMAP.md)
+tracks the rest and defines 1.0: a full week as the primary editor without
+falling back to another tool.
 
-Solid editing (M0) and text properties (M1) are in. Later milestones have
-working slices — async jobs, project navigation, git, LSP, completion — and
-what remains is tracked in [ROADMAP.md](ROADMAP.md), including the definition
-of 1.0: a full week of primary-editor work without falling back to another
-tool.
+If you need org-mode, Magit, a GUI, or your existing `~/.emacs.d` today, use
+Emacs — it is 40 years of work and this is not. xmas is for the opposite itch:
+an editor small enough to read, where extending it means writing a function and
+the running editor is debuggable from the REPL. No Elisp, no GUI frames, no
+native modules.
+
+Contributions are welcome. Read the milestone in [ROADMAP.md](ROADMAP.md), keep
+commands pure and reach new behavior through `xmas.api`; data structures need
+tests, terminal behavior needs a pty script.
 
 ## License
 
