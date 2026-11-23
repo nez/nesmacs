@@ -227,5 +227,4 @@ tool.
 
 ## License
 
-No license has been chosen yet, so the code is all rights reserved for now.
-Open an issue if you need a specific license to use it.
+MIT — see [LICENSE](LICENSE).
