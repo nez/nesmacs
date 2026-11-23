@@ -76,7 +76,8 @@ The rest follows from the same decision:
 
 ## What is in the box
 
-- **Editing** — gap buffer with a line index, Unicode and wide-character aware
+- **Editing** — persistent char-array text with a line index, Unicode and
+  wide-character aware
   cursor math, undo/redo with adjacent inserts coalesced, bracketed paste as
   one edit, OSC 52 copy so kills reach the system clipboard (even over SSH).
 - **Finding** — incremental search, query-replace, occur, imenu, goto-line,
@@ -140,7 +141,7 @@ tested, replayed from a journal, and rendered by another process.
 | Module | Role |
 | --- | --- |
 | `xmas.ed` | editor core: commands, built-in keymap, modes, main loop |
-| `xmas.buf`, `xmas.gap`, `xmas.text` | buffer type, gap buffer + line index, text primitives |
+| `xmas.buf`, `xmas.gap`, `xmas.text` | buffer type, text storage + line index, text primitives |
 | `xmas.window`, `xmas.view` | window tree and layout; the only screen painter |
 | `xmas.props`, `xmas.face` | durable text properties, tokenizer |
 | `xmas.api`, `xmas.keymap`, `xmas.mode` | extension surface, key parsing, modes and hooks |

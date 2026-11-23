@@ -25,8 +25,7 @@
     (is (= \e (.charAt g 4)))))
 
 (deftest char-at-after-edit
-  ;; After insert at pos 2, gap is at pos 4 (2 + len("XY"))
-  ;; Content: "abXYcde"
+  ;; After insert at pos 2, content is "abXYcde"
   (let [g (gap/edit (gap/of "abcde") 2 2 "XY")]
     (is (= \a (.charAt g 0)))
     (is (= \b (.charAt g 1)))
@@ -37,22 +36,19 @@
 
 ;; --- subSequence ---
 
-(deftest sub-sequence-before-gap
-  ;; gap/of puts gap at end, so all content is before gap
+(deftest sub-sequence-basic
   (let [g (gap/of "hello world")]
     (is (= "hello" (.subSequence g 0 5)))
     (is (= "world" (.subSequence g 6 11)))))
 
-(deftest sub-sequence-after-gap
-  ;; After insert at 0, gap is at pos 3 ("XXX" inserted)
-  ;; Content: "XXXhello", gap at [3, 3+GAP)
-  ;; Positions 3+ are after the gap
+(deftest sub-sequence-after-edit
+  ;; After insert at 0 the content is "XXXhello".
   (let [g (gap/edit (gap/of "hello") 0 0 "XXX")]
     (is (= "hello" (.subSequence g 3 8)))))
 
-(deftest sub-sequence-spanning-gap
-  ;; Insert at pos 3 of "abcdefgh" → "abcXYdefgh", gap at [5, 5+GAP)
-  ;; subSequence(2, 7) = "cXYde" — spans before-gap and after-gap
+(deftest sub-sequence-spanning-edit
+  ;; Insert at pos 3 of "abcdefgh" → "abcXYdefgh".
+  ;; subSequence(2, 7) = "cXYde" — spans both sides of the edit.
   (let [g (gap/edit (gap/of "abcdefgh") 3 3 "XY")]
     (is (= "abcXYdefgh" (str g)))
     (is (= "cXYde" (.subSequence g 2 7)))))
@@ -99,7 +95,7 @@
 (deftest substr-empty-range
   (is (= "" (gap/substr (gap/of "hello") 2 2))))
 
-(deftest substr-spanning-gap
+(deftest substr-spanning-edit
   (let [g (gap/edit (gap/of "abcdefgh") 3 3 "XY")]
     (is (= "cXYde" (gap/substr g 2 7)))))
 
@@ -112,7 +108,7 @@
   (is (not (.equals (gap/of "hello") (gap/of "world")))))
 
 (deftest equals-with-string
-  ;; GapBuffer.equals(String) compares content
+  ;; Text.equals(String) compares content
   (is (.equals (gap/of "hello") "hello")))
 
 (deftest equals-different-length
@@ -217,7 +213,7 @@
     (is (= 0 (gap/line-of g 3)))))
 
 (deftest incremental-lidx-matches-rescan
-  ;; The incremental splice inside gap/edit must produce the same newline
+  ;; The incremental splice inside edit must produce the same newline
   ;; index as building a fresh buffer from the resulting string.
   (letfn [(nls [g] (vec (for [i (range (count g))
                               :when (= \newline (.charAt g (int i)))] i)))]
