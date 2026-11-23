@@ -69,6 +69,15 @@
         from (-> (long from) (max 0) (min n))]
     [from (-> (long to) (max from) (min n))]))
 
+(defn- update-props!
+  "Clamp the range to the current buffer, then replace :props with
+   `(f props from to)`."
+  [f from to]
+  (apply! cmd/update-cur
+          (fn [b]
+            (let [[from to] (clamp-range b from to)]
+              (assoc b :props (f (:props b) from to))))))
+
 (defn add-prop!
   "Paint the current buffer range [from to) with `face`, adding to whatever
    is already there. `opts` may carry :owner (so a later remove-prop! can drop
@@ -80,11 +89,9 @@
    buffer, like every other edit entry point."
   ([from to face] (add-prop! from to face {}))
   ([from to face opts]
-   (apply! cmd/update-cur
-           (fn [b]
-             (let [[from to] (clamp-range b from to)]
-               (assoc b :props
-                      (props/put (:props b) (props/make from to face opts))))))))
+   (update-props! (fn [ps from to]
+                    (props/put ps (props/make from to face opts)))
+                  from to)))
 
 (defn set-prop!
   "Replace every prop owned by `owner` in the current buffer with one range.
@@ -92,11 +99,9 @@
    leave stale paint behind."
   ([owner from to face] (set-prop! owner from to face {}))
   ([owner from to face opts]
-   (apply! cmd/update-cur
-           (fn [b]
-             (let [[from to] (clamp-range b from to)]
-               (assoc b :props
-                      (props/set-owner (:props b) owner from to face opts)))))))
+   (update-props! (fn [ps from to]
+                    (props/set-owner ps owner from to face opts))
+                  from to)))
 
 (defn remove-prop!
   "Remove every prop owned by `owner` from the current buffer."

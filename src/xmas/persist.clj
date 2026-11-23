@@ -19,6 +19,10 @@
 (defn- file ^java.io.File [^String name]
   (io/file (xmas-dir) (str name ".edn")))
 
+(defn- ensure-dir! [^java.io.File d]
+  (when (and d (not (.exists d)))
+    (.mkdirs d)))
+
 (defn atomic-spit
   "Write `s` to `path` via a sibling temp file and rename, so a crash mid-write
    can't truncate the target. Preserves POSIX permissions; removes the temp on
@@ -61,8 +65,7 @@
   "Write `value` to name as EDN atomically. Creates the directory if missing.
    Errors propagate, which is fine — callers that want silence wrap in try."
   [name value]
-  (let [d (xmas-dir)]
-    (when-not (.exists d) (.mkdirs d)))
+  (ensure-dir! (xmas-dir))
   (atomic-spit (str (file name)) (pr-str value)))
 
 (defn save-quiet!
@@ -79,7 +82,7 @@
   [name values]
   (let [f (file name)]
     (try
-      (when-let [d (.getParentFile f)] (when-not (.exists d) (.mkdirs d)))
+      (ensure-dir! (.getParentFile f))
       ;; create through atomic-spit so a fresh journal gets the same
       ;; owner-only permissions as the other persisted files
       (when-not (.exists f) (atomic-spit (.getPath f) ""))
@@ -94,9 +97,8 @@
   "Atomically replace `name` with `values`, one EDN value per line."
   [name values]
   (try
-    (let [f (file name)
-          d (.getParentFile f)]
-      (when d (when-not (.exists d) (.mkdirs d)))
+    (let [f (file name)]
+      (ensure-dir! (.getParentFile f))
       (atomic-spit (.getPath f) (apply str (map #(str (pr-str %) "\n") values))))
     (catch Exception e
       (log/log "persistence write failed:" name (.getMessage e))
