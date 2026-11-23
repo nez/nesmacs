@@ -18,7 +18,7 @@ is something you can inspect, change and debug while it is running.
 ## Run it
 
 Needs Java 11+, the [Clojure CLI](https://clojure.org/guides/install_clojure)
-and a POSIX terminal.
+and a POSIX terminal. Terminals inside the editor need `tmux` 3.0+ on `PATH`.
 
 ```sh
 git clone https://github.com/nez/xmas.git
@@ -33,7 +33,13 @@ journal. `make run` builds a jar, `./xmas` runs it.
 Your fingers already work: `C-f C-b C-n C-p C-a C-e`, `C-s`, `M-%`, `C-x C-f`,
 `C-x C-s`, `C-x 2`, `C-x o`, `M-x`, `M-:`. Beyond those: `C-x g` git status,
 `C-x p g` ripgrep the project, `M-.` definition, `C-c h` hover, `C-c i`
-complete symbol, `C-x r` registers and rectangles.
+complete symbol, `C-x r` registers and rectangles, `C-c t` a terminal.
+
+Real terminals are core: `C-c t` runs `$SHELL` in a tmux session, so the shell
+(outside the editor) survives an editor exit or crash and reattaches next start.
+`C-c C-c` interrupts, `C-c C-k` kills the buffer and session, `C-c C-r`
+restarts, `C-c M-x` reaches `M-x`, and `C-c C-x` opens the normal `C-x` map
+from inside a terminal.
 
 ## The part that is different
 
@@ -146,6 +152,7 @@ tested, replayed from a journal, and rendered by another process.
 | `xmas.props`, `xmas.face` | durable text properties, tokenizer |
 | `xmas.api`, `xmas.keymap`, `xmas.mode` | extension surface, key parsing, modes and hooks |
 | `xmas.proc`, `xmas.job`, `xmas.lsp` | processes, streaming job buffers, language server |
+| `xmas.terminal`, `xmas.terminal.tmux` | terminal buffers behind a backend protocol; the tmux control-mode backend |
 | `xmas.git*`, `xmas.project`, `xmas.dired`, `xmas.buflist`, `xmas.nav`, `xmas.complete` | git app, project search, file and buffer navigation, completion |
 | `xmas.session`, `xmas.persist`, `xmas.term` | session and journal, persistence, raw terminal I/O |
 
@@ -157,14 +164,17 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 514 tests / 6,101 assertions
+make test    # 533 tests / 6,172 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # integration tests against a real clojure-lsp
+make term    # terminal session test against a real tmux
 ```
 
 The pty scripts start the editor in a real terminal, drive it with keys and
-check the rendered frame. The benchmark asserts under 50 ms per keystroke on a
+check the rendered frame. Terminal buffers are exercised end-to-end against
+real tmux by `make term`, which is excluded from `make test` like `make lsp`.
+The benchmark asserts under 50 ms per keystroke on a
 100k-line file and under 2 s to open 10 MB; measured roughly 20 ms and 30 ms on
 a 16-core Linux machine. Everything is testable from `clojure.test`, including
 generative tests for buffers, props and text.
@@ -172,9 +182,9 @@ generative tests for buffers, props and text.
 ## Status, and when not to use it
 
 Pre-1.0. Solid editing and text properties are done; async jobs, project
-navigation, git, LSP and completion have working slices. [ROADMAP.md](ROADMAP.md)
-tracks the rest and defines 1.0: a full week as the primary editor without
-falling back to another tool.
+navigation, git, LSP, completion and tmux-backed terminals have working slices.
+[ROADMAP.md](ROADMAP.md) tracks the rest and defines 1.0: a full week as the
+primary editor without falling back to another tool.
 
 If you need org-mode, Magit, a GUI, or your existing `~/.emacs.d` today, use
 Emacs — it is 40 years of work and this is not. xmas is for the opposite itch:

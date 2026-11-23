@@ -43,7 +43,9 @@ and the remaining decisions.
 The plan started from an editor with the Emacs editing primitives already in
 place. The gaps it set out to close — clipboard and bracketed paste, undo
 grouping, crash recovery, async jobs, project navigation, completion, git and
-LSP — are now closed.
+LSP — are now closed. tmux-backed terminals ship as core infrastructure: the
+editor paints snapshots from a backend protocol, so a polling or pty4j backend
+could replace tmux without touching the editor side.
 
 ---
 
@@ -272,8 +274,10 @@ processes, and project navigation. That alone is a usable editor.
 ## Permanent non-goals
 
 - Emacs Lisp, GNU `lisp/*.el`, `~/.emacs.d`, `package.el`, magit/org parity.
-- GUI frames, a terminal emulator inside the editor, email/IRC/feed clients
-  (except as the single M8 experiment).
+- GUI frames, email/IRC/feed clients (except as the single M8 experiment).
+- A VT emulator of our own: terminals run under tmux and the editor paints
+  captures. A different backend must still fit the `xmas.terminal/Backend`
+  protocol.
 - Collaborative editing, multi-user sessions, Windows terminal support.
 - Plugin sandboxing: configuration is the user's own code, trusted like any
   `init` file.
