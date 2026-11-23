@@ -38,17 +38,15 @@
     [(parse-key-token token)]
     (vec token)))
 
-(def ^:private legacy-key-token-re #"\\C-(.)|\\M-(.)|\\(.)|(.)")
-
+;; Old configs wrote "\C-x\C-s"; reject that loudly instead of binding a
+;; literal backslash path.
 (defn parse-key-string
-  "Parse standard Emacs key syntax such as \"C-x C-s\" into a key path.
-   The legacy \"\\C-x\\C-s\" spelling remains accepted."
+  "Parse standard key syntax such as \"C-x C-s\" into a key path.
+   Escaped Emacs-style strings such as \"\\C-x\\C-s\" are rejected."
   [^String s]
   (if (.contains s "\\")
-    (mapv (fn [[_ c m lit plain]]
-            (let [ch (.charAt ^String (or c m lit plain) 0)]
-              (cond c [:ctrl ch], m [:meta ch], :else ch)))
-          (re-seq legacy-key-token-re s))
+    (err (str "Escaped key syntax is no longer supported; write \"C-x C-s\" instead of "
+              (pr-str s)))
     (let [s (str/trim s)]
       (if (empty? s) [] (vec (mapcat parse-standard-token (str/split s #"\s+")))))))
 

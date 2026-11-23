@@ -2,11 +2,9 @@
   (:require [clojure.test :refer [deftest is]]
             [xmas.keymap :as keymap]))
 
-(deftest parses-legacy-syntax
-  (is (= [[:ctrl \c]] (keymap/parse-key-string "\\C-c")))
-  (is (= [[:meta \x]] (keymap/parse-key-string "\\M-x")))
-  (is (= [[:ctrl \c] \d] (keymap/parse-key-string "\\C-cd")))
-  (is (= [[:ctrl \x] [:ctrl \s]] (keymap/parse-key-string "\\C-x\\C-s"))))
+(deftest escaped-syntax-is-rejected
+  (is (thrown? clojure.lang.ExceptionInfo (keymap/parse-key-string "\\C-c")))
+  (is (thrown? clojure.lang.ExceptionInfo (keymap/parse-key-string "\\C-x\\C-s"))))
 
 (deftest parses-standard-syntax
   (is (= [[:ctrl \x] [:ctrl \f]] (keymap/parse-key-string "C-x C-f")))
