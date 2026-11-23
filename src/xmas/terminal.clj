@@ -234,7 +234,7 @@
 
 ;; --- Editor-loop driver ---
 
-(def ^:private capture-idle-ms 900)
+(def ^:private capture-idle-ms 500)
 (def ^:private max-keys-per-tick 128)
 
 (defn- rect-for [s layout name]
