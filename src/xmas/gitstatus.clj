@@ -42,21 +42,18 @@
       (-> s (assoc-in [:bufs gitstatus-name] (listbuf/make (spec dir)))
           (cmd/msg "Not a git repository")))))
 
-(defn stage [s]
+(defn- alter-index
+  "Run `git-fn` on the entry at point, then refresh and report `label`."
+  [s git-fn label]
   (if-let [e (listbuf/entry-at-point s)]
     (let [dir (cur-repo-root s)]
       (when dir
-        (git/add dir (:path e))
-        (-> s refresh (cmd/msg (str "Staged " (:path e))))))
+        (git-fn dir (:path e))
+        (-> s refresh (cmd/msg (str label " " (:path e))))))
     s))
 
-(defn unstage [s]
-  (if-let [e (listbuf/entry-at-point s)]
-    (let [dir (cur-repo-root s)]
-      (when dir
-        (git/reset dir (:path e))
-        (-> s refresh (cmd/msg (str "Unstaged " (:path e))))))
-    s))
+(defn stage   [s] (alter-index s git/add   "Staged"))
+(defn unstage [s] (alter-index s git/reset "Unstaged"))
 
 (defn diff-at-point [s]
   (if-let [e (listbuf/entry-at-point s)]

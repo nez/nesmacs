@@ -290,6 +290,22 @@
   []
   (persist/delete! journal-file))
 
+(defn sanitize-bookmarks
+  "Keep bookmark entries whose key is a name and whose value has a buffer
+   name and a position. Used for both session and standalone bookmark files."
+  [m]
+  (if (map? m)
+    (into {}
+          (filter (fn [[name v]]
+                    (and (string? name) (string? (:buf v)) (nat-int? (:pos v)))))
+          m)
+    {}))
+
+(defn sanitize-strings
+  "Keep only the strings from a persisted sequence."
+  [xs]
+  (if (sequential? xs) (filterv string? xs) []))
+
 (defn- sanitize-session
   "Validate and clean loaded session data."
   [data]
@@ -297,26 +313,13 @@
              (= session-version (:version data)))
     (let [bufs (:bufs data)
           windows (:windows data)
-          cur-window (:cur-window data)
-          recentf (if (sequential? (:recentf data))
-                    (vec (filter string? (:recentf data)))
-                    [])
-          bookmarks (if (map? (:bookmarks data))
-                      (into {}
-                            (filter (fn [[_ v]]
-                                      (and (string? (:buf v))
-                                           (nat-int? (:pos v)))))
-                            (:bookmarks data))
-                      {})
-          mini-history (if (sequential? (:mini-history data))
-                         (filterv string? (:mini-history data))
-                         [])]
+          cur-window (:cur-window data)]
       {:bufs bufs
        :windows windows
        :cur-window cur-window
-       :recentf recentf
-       :bookmarks bookmarks
-       :mini-history mini-history})))
+       :recentf (sanitize-strings (:recentf data))
+       :bookmarks (sanitize-bookmarks (:bookmarks data))
+       :mini-history (sanitize-strings (:mini-history data))})))
 
 (defn load-session!
   "Load session from ~/.xmas/session.edn. Returns nil if no valid session."

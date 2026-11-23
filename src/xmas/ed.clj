@@ -97,7 +97,8 @@
 (defn- repeat-cmd
   "Apply `f` to `s` `n` times (non-negative)."
   [f s n]
-  (nth (iterate f s) (max 0 (long n))))
+  (loop [s s i (max 0 (long n))]
+    (if (zero? i) s (recur (f s) (dec i)))))
 
 (defn- prefix-repeat
   "Wrap a (state)→state command so it honors :prefix-arg by running n times."
@@ -545,14 +546,17 @@
               (mini-set c)))
       s)))
 
-(defn- mini-next-candidate [s]
-  (let [i (get-in s [:mini :sel] -1)
-        n (count (get-in s [:mini :candidates]))]
-    (mini-select-candidate s (min (inc i) (dec n)))))
+(defn- mini-move-candidate
+  "Move candidate selection by `delta`, clamped to the list. No selection
+   starts at -1 (next) or n (prev)."
+  [s delta]
+  (let [n (count (get-in s [:mini :candidates]))
+        i (get-in s [:mini :sel] (if (neg? delta) n -1))
+        j (if (neg? delta) (max (dec i) 0) (min (inc i) (dec n)))]
+    (mini-select-candidate s j)))
 
-(defn- mini-prev-candidate [s]
-  (let [i (get-in s [:mini :sel] (count (get-in s [:mini :candidates])))]
-    (mini-select-candidate s (max (dec i) 0))))
+(defn- mini-next-candidate [s] (mini-move-candidate s 1))
+(defn- mini-prev-candidate [s] (mini-move-candidate s -1))
 
 (defn- mini-history-move
   "Move minibuffer history selection. dir=+1 goes back (older), -1 forward (newer).
@@ -691,10 +695,15 @@
           (set-point (fn [_ _] origin))
           (msg "Quit"))))
 
-(defn- isearch-append [s ch]
+(defn- isearch-edit
+  "Update the pattern via `f`, then re-search from the current match."
+  [s f]
   (-> s (update :isearch assoc :extend? true)
-        (update-in [:isearch :pattern] str ch)
+        (update-in [:isearch :pattern] f)
         isearch-do))
+
+(defn- isearch-append [s ch]
+  (isearch-edit s #(str % ch)))
 
 (defn- isearch-next [s direction]
   (-> s (update :isearch assoc :direction direction :extend? false)
@@ -707,12 +716,9 @@
    [:ctrl \g]  isearch-cancel})
 
 (defn- isearch-backspace [s]
-  (let [pat (get-in s [:isearch :pattern])]
-    (if (seq pat)
-      (-> s (update :isearch assoc :extend? true)
-            (assoc-in [:isearch :pattern] (subs pat 0 (dec (count pat))))
-            isearch-do)
-      (isearch-cancel s))))
+  (if (seq (get-in s [:isearch :pattern]))
+    (isearch-edit s #(subs % 0 (dec (count %))))
+    (isearch-cancel s)))
 
 (defn- handle-isearch
   "Handle a key during incremental search. Returns updated state."
@@ -1859,17 +1865,9 @@
       register-builtin-commands))
 
 (defn- sanitize-persisted [bookmarks recentf history]
-  {:bookmarks (if (map? bookmarks)
-                (into {}
-                      (filter (fn [[name {:keys [buf pos]}]]
-                                (and (string? name) (string? buf)
-                                     (nat-int? pos))))
-                      bookmarks)
-                {})
-   :recentf (if (sequential? recentf)
-              (vec (take recentf-limit (filter string? recentf)))
-              [])
-   :mini-history (if (sequential? history) (filterv string? history) [])})
+  {:bookmarks (session/sanitize-bookmarks bookmarks)
+   :recentf (vec (take recentf-limit (session/sanitize-strings recentf)))
+   :mini-history (session/sanitize-strings history)})
 
 (defn- load-persisted-state!
   "Restore bookmarks, recentf, and mini-history from ~/.xmas/. Missing or
