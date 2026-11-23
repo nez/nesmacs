@@ -76,11 +76,17 @@
           (tmux/close! tmux/backend (get (tmux/handles tmux/backend) id))
           (is (session-exists? socket id) "closing the client keeps the session")
 
-          ;; `new-session -A` reattaches rather than starting over, so the same
-          ;; shell answers after the client was closed.
-          (swap! editor term/restart)
-          (is (pump! editor (fn [_] (some? (get (tmux/handles tmux/backend) id))) 8000)
-              "restart reattaches the client")
+          ;; Restoring a saved session must attach only, never create: if the tmux
+          ;; session is gone the buffer is marked dead instead of showing a
+          ;; fresh shell that would look like restored state.
+          (swap! editor update-in [:bufs "*terminal*" :terminal]
+                 #(assoc % :status :detached :create? false))
+          (is (pump! editor (fn [s]
+                              (and (some? (get (tmux/handles tmux/backend) id))
+                                   (= :running
+                                      (get-in s [:bufs "*terminal*" :terminal :status]))))
+                     8000)
+              "restore attaches to the surviving session")
           (doseq [k ["echo reattached" :return]]
             (swap! editor term/input k))
           (is (pump! editor #(str/includes? (text %) "reattached") 8000)
