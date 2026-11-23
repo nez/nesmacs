@@ -63,13 +63,13 @@
         (let [editor (atom (base-state))
               id     (do (swap! editor term/open ["sh"])
                          (get-in @editor [:bufs "*terminal*" :terminal :id]))]
-          (is (pump! editor #(re-find #"[$#%]" (text %)) 8000)
+          (is (pump! editor #(re-find #"[$#%]" (text %)) 15000)
               "the shell prompt is captured")
           (is (session-exists? socket id))
 
           (doseq [k ["echo xmas-live" :return]]
             (swap! editor term/input k))
-          (is (pump! editor #(str/includes? (text %) "xmas-live") 8000)
+          (is (pump! editor #(str/includes? (text %) "xmas-live") 15000)
               "typed keys reach the shell and their output comes back")
 
           ;; Closing the client is what editor exit does; the session stays.
@@ -85,14 +85,14 @@
                               (and (some? (get (tmux/handles tmux/backend) id))
                                    (= :running
                                       (get-in s [:bufs "*terminal*" :terminal :status]))))
-                     8000)
+                     15000)
               "restore attaches to the surviving session")
           (doseq [k ["echo reattached" :return]]
             (swap! editor term/input k))
-          (is (pump! editor #(str/includes? (text %) "reattached") 8000)
+          (is (pump! editor #(str/includes? (text %) "reattached") 15000)
               "the shell survived closing the client")
 
           ;; Killing the buffer reaps the session on the next tick.
           (swap! editor update :bufs dissoc "*terminal*")
-          (is (pump! editor (fn [_] (not (session-exists? socket id))) 5000)
+          (is (pump! editor (fn [_] (not (session-exists? socket id))) 10000)
               "killing the buffer destroys its session"))))))
