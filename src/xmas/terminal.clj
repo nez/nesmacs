@@ -190,7 +190,7 @@
   (let [layout (:layout (win/geometry (:windows s)
                                       (max 1 (dec (:rows s 24)))
                                       (max 1 (:cols s 80))))
-        rect   (get layout (cmd/cur-window-path s) {:rows 24 :cols 80})]
+        rect   (get layout (:cur-window s) {:rows 24 :cols 80})]
     [(max 1 (long (:cols rect))) (max 1 (dec (long (:rows rect))))]))
 
 (defn open

@@ -114,6 +114,9 @@
     (is (true? (get-in s [:bufs "*terminal*" :read-only])))
     (is (str/starts-with? (get-in s [:bufs "*terminal*" :terminal :id]) "xmas-"))
     (is (= :starting (get-in s [:bufs "*terminal*" :terminal :status])))
+    (is (= {:cols 40 :rows 10}
+           (select-keys (get-in s [:bufs "*terminal*" :terminal]) [:cols :rows]))
+        "the new terminal takes the current window's body size")
     (is (= "*terminal-2*" (:buf (term/open s ["sh"]))))))
 
 (deftest terminal-input-is-a-pure-queue
