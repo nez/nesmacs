@@ -38,7 +38,7 @@
               (assoc :mode (or mode :job-mode) :read-only true :journal? false
                      :job-command (vec argv) :job-dir dir :job-status :running))]
     (try
-      (let [h (proc/start {:argv argv :dir dir})]
+      (let [h (proc/start {:argv argv :dir dir :kind :job})]
         (-> s
             (update :bufs assoc buf-name (assoc b :job-proc (:id h)))
             (cmd/set-cur-buffer buf-name)))
@@ -56,7 +56,7 @@
   "Drain live job output into their buffers and reap finished processes.
    Call from the editor loop only: it is the single writer for job text."
   [s]
-  (proc/kill-orphans! (set (keep :job-proc (vals (:bufs s)))))
+  (proc/kill-orphans! :job (set (keep :job-proc (vals (:bufs s)))))
   (reduce-kv
     (fn [s nm b]
       (if-let [h (some-> (:job-proc b) proc/by-id)]

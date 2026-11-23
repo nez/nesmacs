@@ -44,6 +44,15 @@
       (is (= "" @out))
       (term/set-clipboard! "hi")
       (is (= (term/clipboard-seq "hi") @out)))))
+(deftest sg-supports-palette-and-truecolor
+  (let [out (atom "")]
+    (binding [term/*out-fn* #(swap! out str %)]
+      (term/sg {:fg 1})
+      (is (= "\u001b[0;38;5;1m" @out))
+      (reset! out "")
+      (term/sg {:fg [1 2 3] :bold true})
+      (is (= "\u001b[0;1;38;2;1;2;3m" @out)))))
+
 (deftest resize-is-applied-once
   (term/note-resize!)
   (is (= [24 80] (term/apply-pending-resize! (fn [] [24 80]))))

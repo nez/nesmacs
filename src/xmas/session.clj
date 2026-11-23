@@ -2,6 +2,7 @@
   "Session persistence: save/restore buffers, windows, and editor state.
    Undo history is explicitly NOT persisted (per roadmap)."
   (:require [xmas.buf :as buf]
+            [xmas.gap :as gap]
             [xmas.log :as log]
             [xmas.persist :as persist]
             [xmas.window :as win]))
@@ -24,20 +25,26 @@
   [b]
   (let [^String file (:file b)
         on-disk? (and file (not (:modified b))
-                      (.canRead (java.io.File. file)))]
-    {:name (:name b)
-     :text (when-not on-disk? (str (:text b)))
-     :point (:point b)
-     :mark (:mark b)
-     :file file
-     :modified (:modified b)
-     :mode (:mode b)
-     :version (:version b)
-     :edit-count (:edit-count b 0)
-     :font-lock (when-not on-disk?
-                  (mapv (fn [entry] [nil (second entry)]) (:font-lock b)))
-     :props (:props b [])
-     :large-file (:large-file b)}))
+                      (.canRead (java.io.File. file)))
+        term (:terminal b)]
+    (cond->
+      {:name (:name b)
+       :text (when-not on-disk? (str (:text b)))
+       :point (:point b)
+       :mark (:mark b)
+       :file file
+       :modified (:modified b)
+       :mode (:mode b)
+       :version (:version b)
+       :edit-count (:edit-count b 0)
+       :font-lock (when-not on-disk?
+                    (mapv (fn [entry] [nil (second entry)]) (:font-lock b)))
+       :props (:props b [])
+       :large-file (:large-file b)}
+      ;; The screen is a cache: reattaching captures it again. Persist only the
+      ;; session identity and geometry, never the (large, changing) snapshot.
+      term (assoc :text nil :font-lock [] :props []
+                  :terminal (select-keys term [:id :argv :dir :cols :rows])))))
 
 (defn- file-text
   "Re-read a buffer's file for restore. nil when it can no longer be read, so
@@ -46,12 +53,24 @@
   (try (buf/normalize-eol (slurp path :encoding "UTF-8"))
        (catch Exception _ nil)))
 
+(defn- sanitize-terminal [t]
+  (when (and (map? t)
+             (string? (:id t))
+             (sequential? (:argv t))
+             (every? string? (:argv t)))
+    {:id (:id t)
+     :argv (vec (:argv t))
+     :dir (when (string? (:dir t)) (:dir t))
+     :cols (max 1 (long (if (int? (:cols t)) (:cols t) 80)))
+     :rows (max 1 (long (if (int? (:rows t)) (:rows t) 24)))}))
+
 (defn- data->buffer
   "Deserialize a buffer from session data. Returns nil if its file-backed text
    is missing from the session and can no longer be read from disk."
   [d]
   (let [file (:file d)
         saved (:text d)
+        term (sanitize-terminal (:terminal d))
         text (or saved (some-> file file-text))]
     (when (or text (nil? file))
       ;; Text reloaded from disk may have changed since the session was saved,
@@ -68,10 +87,19 @@
                          :font-lock (if saved (or (:font-lock d) []) [])
                          :props (if saved (:props d) [])
                          :large-file (:large-file d)))]
-        ;; A file reloaded from disk may have shrunk, so the saved offsets can
-        ;; point past the end.
-        (cond-> (assoc b :point (buf/clamp-pos b (:point d)))
-          (some? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d))))))))
+        ;; A terminal's text is a capture, not a document: start empty and let
+        ;; the backend reattach and paint it.
+        (if term
+          (-> b
+              (assoc :text (gap/of "") :point 0 :mark nil :props []
+                     :font-lock [] :font-lock-window nil :large-file false
+                     :read-only true :journal? false :mode :terminal-mode
+                     :terminal (assoc term :status :detached :create? false
+                                      :in [] :dirty? true :last-capture 0)))
+          ;; A file reloaded from disk may have shrunk, so the saved offsets can
+          ;; point past the end.
+          (cond-> (assoc b :point (buf/clamp-pos b (:point d)))
+            (some? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d)))))))))
 
 (defn- window-tree->data
   "Serialize window tree, replacing buffer refs with names."

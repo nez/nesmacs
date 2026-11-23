@@ -23,6 +23,8 @@
             [xmas.rect :as rect]
             [xmas.session :as session]
             [xmas.term :as t]
+            [xmas.terminal :as terminal]
+            [xmas.terminal.tmux :as tmux]
             [xmas.text :as text]
             [xmas.view :as view]
             [xmas.window :as win]
@@ -254,6 +256,13 @@
     (job/start s {:argv ["sh" "-c" cmd]
                   :buf-name "*Shell Command*"
                   :dir (some-> (:file (cur s)) (java.io.File.) (.getParent))})))
+
+;; --- Terminals (tmux backend) ---
+
+(defn terminal-open
+  "M-x terminal: a terminal buffer running $SHELL in the current directory."
+  [s]
+  (terminal/open s))
 
 (defn- auto-save-due
   "Pure: return [[buf-name file text version] ...] for every buffer at or above the
@@ -1336,7 +1345,8 @@
 
 (def ^:private cx-c-map
   {\i complete-symbol-at-point
-   \h lsp-hover})
+   \h lsp-hover
+   \t terminal-open})
 
 (def ^:private nav-keys {:return nav-jump})
 
@@ -1468,6 +1478,7 @@
    "occur"                       (cmd-entry occur-cmd "List lines matching a regex in the current buffer.")
    "imenu"                       (cmd-entry imenu "List definitions in the current buffer.")
    "reload-config"               (cmd-entry reload-config "Re-run ~/.xmas/init.clj.")
+   "terminal"                    (cmd-entry terminal-open "Open a terminal buffer running $SHELL.")
    "complete-symbol-at-point"    (cmd-entry complete-symbol-at-point "Complete the symbol at point.")
    "git-status"                  (cmd-entry git-status "Show git status for the current project.")
    "git-commit"                  (cmd-entry gitcommit/commit-at-point "Commit staged changes.")
@@ -1686,6 +1697,17 @@
                \)         end-kbd-macro
                \e         call-last-kbd-macro}})
 
+(def ^:private terminal-prefix
+  "C-c is the only key the editor keeps inside a terminal. C-c C-c interrupts
+   the process; C-c C-x opens the normal C-x map so the editor stays reachable."
+  {[:ctrl \c] #(terminal/input % [:ctrl \c])
+   [:ctrl \x] (get bindings [:ctrl \x])
+   [:meta \x] (prompt "M-x " execute-extended-command command-completer)
+   [:ctrl \b] buflist/open
+   [:ctrl \k] #(kill-buffer % nil)
+   [:ctrl \q] confirm-quit
+   [:ctrl \r] terminal/restart})
+
 (def ^:private mini-keys
   {:return   mini-accept
    [:meta \p] mini-history-prev
@@ -1701,9 +1723,12 @@
   (let [s (assoc s :msg nil)
         s (cond-> s (:macro-recording s) (update :macro-recording conj key))
         s' (cond
-             ;; Bracketed paste is one insert, hence one undo entry.
+             ;; Bracketed paste is one insert, hence one undo entry. In a
+             ;; terminal it belongs to the process, not to the read-only buffer.
              (and (vector? key) (= :paste (first key)))
-             (cmd/insert-at-point s (buf/normalize-eol (second key)))
+             (if (= :terminal-mode (:mode (cur s)))
+               (terminal/input s key)
+               (cmd/insert-at-point s (buf/normalize-eol (second key))))
 
              ;; capture-next: consume the key as data, don't dispatch
              (= :describe-key (:capture-next s))
@@ -1732,6 +1757,14 @@
 
              ;; minibuffer-scoped keys
              (and (:mini s) (mini-keys key)) ((mini-keys key) s)
+
+             ;; Terminal char mode: every key goes to the process except C-c,
+             ;; the editor prefix. C-c C-x opens the normal C-x map so quitting,
+             ;; visiting files and the buffer list stay reachable.
+             (and (= :terminal-mode (:mode (cur s))) (not (:mini s)))
+             (if (= [:ctrl \c] key)
+               (assoc s :pending terminal-prefix)
+               (terminal/input s key))
 
              :else
              (let [pa (:prefix-arg s)
@@ -1818,6 +1851,7 @@
       ;; Pump on every tick, including idle, so jobs stream while nothing is
       ;; being typed — and only from this thread.
       (swap! editor job/pump!)
+      (terminal/tick! editor tmux/backend)
       (complete/tick! editor)
       (auto-save-tick! editor)
       (session/save-tick! editor)
@@ -1846,6 +1880,7 @@
       (mode/register :dired-mode :major :keymap dired-keymap)
       (mode/register :buflist-mode :major :keymap buflist-keymap)
       (mode/register :job-mode :major :keymap job-keymap)
+      (mode/register :terminal-mode :major)
       (mode/register :nav-mode :major :keymap nav-keys)
       (mode/register :rg-mode :major :keymap rg-keys)
       (mode/register :gitstatus-mode :major :keymap gitstatus-keymap)
@@ -1903,7 +1938,8 @@
     srv))
 
 (defn- stop-services! [{:keys [nrepl web dev]}]
-  (run-all [#(dev/stop-watcher! dev)
+  (run-all [#(terminal/shutdown-all! tmux/backend)
+            #(dev/stop-watcher! dev)
             #(web/stop! web editor)
             #(nrepl/stop-server nrepl)]))
 

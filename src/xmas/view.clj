@@ -60,7 +60,8 @@
 
 (defn- pad-spaces [n] (.repeat " " (max 0 (long n))))
 
-(defn- set-face! [face] (t/sg (get faces face (:default faces))))
+(defn- set-face! [face]
+  (t/sg (if (map? face) face (get faces face (:default faces)))))
 
 (defn- safe-text [^String s]
   (str/replace s #"[\x00-\x1f\x7f]" "�"))
@@ -297,7 +298,7 @@
         {:keys [font-lock font-lock-window]}
         (render-window-body rect content mode props region scroll hscroll
                             (:font-lock buf) (:font-lock-window buf) large-file?)]
-    (render-window-modeline rect (:name buf) (:modified buf) mode (:minor-modes buf)
+    (render-window-modeline rect (or (:title buf) (:name buf)) (:modified buf) mode (:minor-modes buf)
                             point-line cursor-col current?)
     {:window (assoc window :scroll scroll :hscroll hscroll
                            :point-line point-line :cursor-col cursor-col)
@@ -393,7 +394,7 @@
 (defn- window-sig [state window current?]
   (let [buf (get (:bufs state) (:buffer window))]
     [(:buffer window) (:version buf) (:point buf) (:mark buf)
-     (:mode buf) (:minor-modes buf) (:modified buf) (:name buf)
+     (:mode buf) (:minor-modes buf) (:modified buf) (:name buf) (:title buf)
      (:props buf) (:scroll window) (:hscroll window) current?]))
 
 (defn- echo-sig [state]

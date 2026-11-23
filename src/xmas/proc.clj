@@ -60,8 +60,11 @@
    long-lived servers (LSP) that read requests from stdin.
 
    stderr defaults to :merge so job buffers show compiler/test errors; LSP
-   passes :log to keep the JSON-RPC stream clean."
-  [{:keys [argv ^String dir env keep-stdin? stderr]
+   passes :log to keep the JSON-RPC stream clean.
+
+   `kind` scopes orphan reaping: only a caller that owns a kind reaps it, so
+   job cleanup cannot kill LSP servers or terminal clients."
+  [{:keys [argv ^String dir env keep-stdin? stderr kind]
     :or {stderr :merge}}]
   (let [pb (ProcessBuilder. (into-array String argv))
         _  (when dir (.directory pb (java.io.File. dir)))
@@ -84,7 +87,7 @@
              (.setDaemon true)
              (.setName (str "xmas-proc-" id "-err"))
              (.start))
-        h {:id id :process p :queue q :exit exit :done done
+        h {:id id :process p :queue q :exit exit :done done :kind kind
            :thread t :err-thread et}]
     (swap! procs assoc id h)
     h))
@@ -131,11 +134,12 @@
   (when h (swap! procs dissoc (:id h))))
 
 (defn kill-orphans!
-  "Kill processes no buffer refers to any more (e.g. its buffer was killed
-   through the buffer list instead of C-c C-k)."
-  [live-ids]
+  "Kill `kind` processes whose ids are not in `live-ids` (e.g. a job buffer
+   killed through the buffer list instead of C-c C-k)."
+  [kind live-ids]
   (doseq [[id h] @procs]
-    (when-not (contains? live-ids id) (kill! h))))
+    (when (and (= kind (:kind h)) (not (contains? live-ids id)))
+      (kill! h))))
 
 (defn kill-all! []
   (doseq [[_ h] @procs] (kill! h))

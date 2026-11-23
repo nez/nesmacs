@@ -1,6 +1,6 @@
 JAR := target/xmas.jar
 
-.PHONY: dev run jar repl test bench lsp pty crash lint check clean setup
+.PHONY: dev run jar repl test bench lsp term pty crash lint check clean setup
 
 setup:
 	./install.sh
@@ -22,7 +22,11 @@ test:
 
 # End-to-end against the real clojure-lsp binary; needs it on PATH.
 lsp:
-	clojure -M:test -i :integration
+	clojure -M:test -n xmas.lsp-live-test
+
+# End-to-end terminal session against the real tmux binary; needs tmux on PATH.
+term:
+	clojure -M:test -n xmas.terminal-live-test
 
 # Timing assertions only; excluded from `test` so a loaded box can't fail CI.
 bench:
