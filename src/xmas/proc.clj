@@ -16,40 +16,40 @@
 (defonce ^:private next-id (atom 0))
 (def ^:private queue-depth 256)
 
+(defn- pump
+  "Read chunks from `r` and hand each decoded string to `consume` until EOF."
+  [^InputStreamReader r consume]
+  (let [buf (char-array 8192)]
+    (loop []
+      (let [n (.read r buf)]
+        (when-not (neg? n)
+          (consume (String. buf 0 n))
+          (recur))))))
+
 (defn- reader-loop
   [^InputStreamReader r ^LinkedBlockingQueue q ^Process p on-exit ^CountDownLatch done]
-  (let [buf (char-array 8192)]
-    (try
-      (loop []
-        (let [n (.read r buf)]
-          (if (neg? n)
-            (on-exit (.waitFor p))
-            (do (.put q (String. buf 0 n))
-                (recur)))))
-      (catch InterruptedException _ (on-exit -1))
-      (catch Exception e
-        (log/log "proc reader:" (.getMessage e))
-        (on-exit -1))
-      (finally (.countDown done)))))
+  (try
+    (pump r #(.put q %))
+    (on-exit (.waitFor p))
+    (catch InterruptedException _ (on-exit -1))
+    (catch Exception e
+      (log/log "proc reader:" (.getMessage e))
+      (on-exit -1))
+    (finally (.countDown done))))
 
 (defn- stderr-loop
   "Drain stderr so a chatty process can't fill the pipe and deadlock.
    :merge appends it to the job queue; :log keeps protocol pipes clean (LSP)."
   [^InputStreamReader r ^LinkedBlockingQueue q mode ^CountDownLatch done]
-  (let [buf (char-array 8192)]
-    (try
-      (loop []
-        (let [n (.read r buf)]
-          (when-not (neg? n)
-            (let [s (String. buf 0 n)]
+  (try
+    (pump r (fn [s]
               (if (= mode :merge)
                 (.put q s)
-                (log/log "proc stderr:" (str/trim-newline s))))
-            (recur))))
-      (catch InterruptedException _)
-      (catch Exception e
-        (log/log "proc stderr reader:" (.getMessage e)))
-      (finally (.countDown done)))))
+                (log/log "proc stderr:" (str/trim-newline s)))))
+    (catch InterruptedException _)
+    (catch Exception e
+      (log/log "proc stderr reader:" (.getMessage e)))
+    (finally (.countDown done))))
 
 (defn start
   "Start `argv` in `dir` (nil = JVM cwd), with optional `env` overrides.

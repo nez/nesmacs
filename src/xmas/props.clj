@@ -70,16 +70,16 @@
 
 (defn- by-position [p] [(:from p) (:to p)])
 
-(defn put
-  "Add one prop, keeping the vector sorted by position so painting and tests
-   have a stable order independent of owner churn."
-  [props prop]
-  (vec (sort-by by-position (conj (vec props) prop))))
-
 (defn add-all
   "Add many props at once (e.g. a diagnostics batch)."
   [props new-props]
   (vec (sort-by by-position (into (vec props) new-props))))
+
+(defn put
+  "Add one prop, keeping the vector sorted by position so painting and tests
+   have a stable order independent of owner churn."
+  [props prop]
+  (add-all props [prop]))
 
 (defn set-owner
   "Replace every prop owned by `owner` with one range. Use this for a single

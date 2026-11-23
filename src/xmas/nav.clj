@@ -27,14 +27,20 @@
               le (gap/nth-line-end text ln)]
           (recur (conj acc {:line (inc ln) :text (gap/substr text ls le)})))))))
 
-(defn occur-buffer [name source pattern entries]
+(defn- nav-buffer
+  "Build a read-only *nav* list buffer whose entries point back at `source`."
+  [name source header entries format-entry]
   (listbuf/make
     {:name         name
      :mode         :nav-mode
-     :header       (str (count entries) " matches for " pattern)
+     :header       header
      :entries      (mapv #(assoc % :buf source) entries)
-     :format-entry (fn [{:keys [line text]}] (format "%6d: %s" line text))
+     :format-entry format-entry
      :extras       {:occur-source source}}))
+
+(defn occur-buffer [name source pattern entries]
+  (nav-buffer name source (str (count entries) " matches for " pattern) entries
+              (fn [{:keys [line text]}] (format "%6d: %s" line text))))
 
 ;; --- Imenu ---
 
@@ -79,14 +85,8 @@
        vec))
 
 (defn imenu-buffer [name source symbols]
-  (listbuf/make
-    {:name         name
-     :mode         :nav-mode
-     :header       (str (count symbols) " symbols")
-     :entries      (mapv #(assoc % :buf source) symbols)
-     :format-entry (fn [{:keys [name line]}]
-                     (format "%5d  %s" line name))
-     :extras       {:occur-source source}}))
+  (nav-buffer name source (str (count symbols) " symbols") symbols
+              (fn [{:keys [name line]}] (format "%5d  %s" line name))))
 
 ;; --- Ripgrep output ---
 

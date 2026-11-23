@@ -18,16 +18,18 @@
       (when (= 1 (count token)) (.charAt ^String token 0))
       (err (str "Unknown key: " token))))
 
+(defn- parse-modifier
+  "Parse the key after a C-/M- prefix, tagging it with `mod`."
+  [token prefix mod]
+  (let [key (key-name (subs token 2))]
+    (if (char? key)
+      [mod key]
+      (err (str "Invalid " prefix " key: " token)))))
+
 (defn- parse-key-token [token]
   (cond
-    (.startsWith ^String token "C-")
-    (let [key (key-name (subs token 2))]
-      (if (char? key) [:ctrl key] (err (str "Invalid control key: " token))))
-
-    (.startsWith ^String token "M-")
-    (let [key (key-name (subs token 2))]
-      (if (char? key) [:meta key] (err (str "Invalid meta key: " token))))
-
+    (.startsWith ^String token "C-") (parse-modifier token "control" :ctrl)
+    (.startsWith ^String token "M-") (parse-modifier token "meta" :meta)
     :else (key-name token)))
 
 (defn- parse-standard-token [token]

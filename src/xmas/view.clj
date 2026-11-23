@@ -140,14 +140,21 @@
 (defn- line-str [^CharSequence content ^long pos ^long eol]
   (.toString (.subSequence content (int pos) (int eol))))
 
+(defn- tokenize-at
+  "Tokenize line `ln`, starting from lexer `state`."
+  [mode content ^long ln state]
+  (face/tokenize mode
+                 (line-str content
+                           (gap/nth-line-start content ln)
+                           (gap/nth-line-end content ln))
+                 state))
+
 (defn- tokenize-line
   "Tokenize line `ln` using the state carried by the previous font-lock entry.
    Returns [spans state-after-line]."
   [mode content font-lock ^long ln]
-  (let [pos   (gap/nth-line-start content ln)
-        eol   (gap/nth-line-end content ln)
-        state (if (zero? ln) :normal (second (nth font-lock (dec ln))))]
-    (face/tokenize mode (line-str content pos eol) state)))
+  (let [state (if (zero? ln) :normal (second (nth font-lock (dec ln))))]
+    (tokenize-at mode content ln state)))
 
 (defn- extend-font-lock
   "Ensure `font-lock` has entries up through line (target-line - 1). Entry i
@@ -176,11 +183,7 @@
   (let [entry (when (< ln (count font-lock)) (nth font-lock ln))]
     (if (and entry (some? (first entry)))
       [(first entry) (second entry) font-lock]
-      (let [[spans nxt] (face/tokenize mode
-                                       (line-str content
-                                                 (gap/nth-line-start content ln)
-                                                 (gap/nth-line-end content ln))
-                                       state)
+      (let [[spans nxt] (tokenize-at mode content ln state)
             entry' [spans nxt]]
         [spans nxt (if entry (assoc font-lock ln entry') (conj font-lock entry'))]))))
 
