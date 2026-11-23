@@ -17,8 +17,10 @@
    buffers keep their text so `kill -9` still loses nothing.
 
    Fontification spans are derived, so only the per-line lexer states are
-   persisted (as [nil state]); restoring them avoids re-tokenizing from line 0
-   on the first scroll while keeping the session file small."
+   persisted (as [nil state]); when they are saved alongside the text, a
+   restart resumes from them instead of re-tokenizing from line 0. Buffers
+   whose text is not persisted (unmodified files) save no states either, so
+   the session file stays small and a changed file is reconciled from disk."
   [b]
   (let [^String file (:file b)
         on-disk? (and file (not (:modified b))
@@ -53,8 +55,10 @@
         text (or saved (some-> file file-text))]
     (when (or text (nil? file))
       ;; Text reloaded from disk may have changed since the session was saved,
-      ;; so cached fontification and props no longer line up. Font-lock is
-      ;; derived and starts empty; props are durable and ride along.
+      ;; so cached fontification and props no longer line up. Fontification is
+      ;; derived: it is reused only when the text came from the session, and
+      ;; starts empty when the text is reloaded from disk. Props ride along
+      ;; only with session text, since their offsets would otherwise be stale.
       (-> (buf/make (:name d) (or text "") file)
           (assoc :point (:point d)
                  :mark (:mark d)

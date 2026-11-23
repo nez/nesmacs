@@ -1010,6 +1010,34 @@
         (doseq [x (.listFiles dir)] (.delete x))
         (.delete dir)))))
 
+(deftest recover-file-drops-state-derived-from-the-old-text
+  ;; The backup replaces the text, so cached spans, props and undo steps that
+  ;; describe the on-disk version must not survive.
+  (let [dir (.toFile (java.nio.file.Files/createTempDirectory
+                       "xmas-rec"
+                       (into-array java.nio.file.attribute.FileAttribute [])))
+        f   (java.io.File. dir "notes.txt")]
+    (try
+      (spit f "saved")
+      (let [path (.getCanonicalPath f)
+            bak  (java.io.File. (#'xmas.ed/auto-save-path path))]
+        (spit bak "unsaved")
+        (let [s  (-> (ed/find-file (make-state "" 0) path)
+                     (update-in [:bufs path]
+                                #(assoc % :font-lock [[[[0 5 :builtin]] :normal]]
+                                          :font-lock-window [0 1]
+                                          :props [{:from 0 :to 5 :face :match}]
+                                          :undo [{:from 0 :old "" :new "x"}])))
+              v  (get-in s [:bufs path :version])
+              b  (get-in (#'xmas.ed/recover-file s path) [:bufs path])]
+          (is (= "unsaved" (str (:text b))))
+          (is (< (long v) (long (:version b))) "version bumps so render caches invalidate")
+          (is (= [] (:font-lock b) (:props b) (:undo b)))
+          (is (nil? (:font-lock-window b)))))
+      (finally
+        (doseq [x (.listFiles dir)] (.delete x))
+        (.delete dir)))))
+
 ;; --- Minibuffer history ---
 
 (deftest mini-history-prev-next

@@ -504,7 +504,13 @@
       (let [text (slurp backup :encoding "UTF-8")
             s    (find-file s f)]
         (-> (cmd/update-cur s #(assoc % :text (gap/of text) :point 0
-                                        :modified true))
+                                        :modified true
+                                        ;; The backup is different text: cached
+                                        ;; spans, props and undo offsets from the
+                                        ;; file no longer describe it.
+                                        :version (inc (or (:version %) 0))
+                                        :props [] :font-lock [] :font-lock-window nil
+                                        :undo [] :redo [] :journal []))
             (msg (str "Recovered " f " from auto-save — C-x C-s to keep"))))
       (msg s (str "No auto-save for " f)))))
 
