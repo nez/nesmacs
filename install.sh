@@ -56,6 +56,14 @@ else
   exit 1
 fi
 
+# --- python3 (pty tests) ---
+if command -v python3 >/dev/null 2>&1; then
+  echo "[ok] $(python3 --version 2>&1)"
+else
+  echo "Installing python3..."
+  sudo apt-get install -y -qq python3
+fi
+
 # --- Fetch deps ---
 echo ""
 echo "Fetching dependencies..."
