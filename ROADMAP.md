@@ -32,23 +32,22 @@ claim this project is testing.
 - The web client is a demo of "state is a value", not a supported frontend. It
   never gates a milestone.
 
-## Starting point (already built)
+## Status
 
-Gap buffer with line index, immutable buffer + undo/redo, window tree, major and
-minor modes with hooks, minibuffer with prefix completion and history,
-isearch, query-replace, keyboard macros, registers, bookmarks, recentf,
-dired, buffer list, auto-save, blocking shell commands, terminal and web
-frontends, nREPL, file watcher, `~/.xmas/init.clj` with `xmas.api`.
+Milestones M0-M7 are implemented to the scope described below. v1.0 is not
+declared yet because it requires a full week as the primary editor (see
+[Definition of v1.0](#definition-of-v10)). Current features, test counts and
+benchmarks live in [README.md](README.md); this file keeps the milestone record
+and the remaining decisions.
 
-Roughly 3.6k lines of `src`, 3k of `test`, 417 tests.
-
-Known gaps that the milestones below close: no clipboard or bracketed paste,
-undo is per keystroke, no crash recovery, no async process model, no project
-model, no completion beyond the minibuffer, no git, no LSP.
+The plan started from an editor with the Emacs editing primitives already in
+place. The gaps it set out to close — clipboard and bracketed paste, undo
+grouping, crash recovery, async jobs, project navigation, completion, git and
+LSP — are now closed.
 
 ---
 
-## M0 — Solid editing
+## M0 — Solid editing (shipped)
 
 **Goal:** never lose or corrupt the user's text.
 
@@ -106,7 +105,7 @@ Size M. Risk medium: property adjustment is the classic off-by-one graveyard;
 property tests are the exit criterion. Covered by targeted boundary tests and
 `test.check` properties over random edits.
 
-## M2 — Processes and jobs
+## M2 — Processes and jobs (shipped)
 
 **Goal:** stop freezing the editor on anything that takes time.
 
@@ -129,7 +128,7 @@ responsive, and quitting kills its children.
 Size M. Risk medium: concurrency is where the "one atom, pure commands"
 invariant pays off or breaks.
 
-## M3 — Projects and navigation
+## M3 — Projects and navigation (shipped)
 
 **Goal:** work inside a repository without leaving the editor.
 
@@ -150,7 +149,7 @@ regex across the project, jump to a symbol in the current file, reload config.
 
 Size S–M. Risk low.
 
-## M4 — Completion
+## M4 — Completion (shipped)
 
 **Goal:** completion that does not block and can be fed by more than one
 source.
@@ -172,7 +171,7 @@ popups.
 
 Size M. Risk low–medium.
 
-## M5 — Git (the first app)
+## M5 — Git, the first app (shipped)
 
 **Goal:** the daily commit loop, and proof that an "app" is cheap here.
 
@@ -191,7 +190,7 @@ blame, forge/PR integration.
 
 Size M. Risk low.
 
-## M6 — LSP
+## M6 — LSP (shipped, scoped)
 
 **Goal:** diagnostics, completion, hover and definition for real projects.
 
@@ -205,7 +204,8 @@ Size M. Risk low.
 - `make lsp` runs the end-to-end check against the real `clojure-lsp` binary
   (diagnostics, hover, completion, definition, crash restart); it is excluded
   from `make test` because it needs the server and its indexing time.
-- Evaluate `lsp4clj` before hand-rolling the protocol layer.
+- The protocol layer is hand-rolled on `xmas.proc`; there is no LSP library
+  dependency.
 
 **Done when:** clojure-lsp shows squiggles and completions, `M-.` jumps,
 killing the server restarts it, and a slow server never blocks typing.
@@ -219,7 +219,7 @@ slip; it is the largest risk in the roadmap.
 
 Size L. Risk high.
 
-## M7 — Durability, performance, packaging
+## M7 — Durability, performance, packaging (shipped)
 
 **Goal:** use it all day, every day, without thinking about it.
 
@@ -236,7 +236,6 @@ Size L. Risk high.
   render lazily. Targets: open 10 MB < 2 s; keystroke on 100k lines < 50 ms.
 - Terminal robustness: resize during render, suspend/resume (`C-z`), a command
   that throws never leaves the terminal in raw mode or the screen corrupt.
-- `make native` verified for the current feature set, or dropped from the docs.
 - Benchmarks as tests where stable; pty smoke and a `kill -9` recovery test in
   `make check`.
 
@@ -254,14 +253,14 @@ Only after v1.0, and only with a concrete use:
 - One non-editor app beyond git (HTTP client or feed reader — `http-kit` is
   already a dependency), to test the platform claim.
 - Themes, mouse support, tabs, multiple cursors, tree-sitter, folding.
-- Native packaging for other platforms.
 
 Nothing in this milestone is promised.
 
 ---
 
-## Order and cut line
+## Order and cut line (historical)
 
+This is the original sequencing; all milestones through M7 are implemented.
 Dependencies: M1 ← nothing; M2 ← nothing; M3 ← M2; M4 ← M3; M5 ← M2 (+M1 for
 diff faces); M6 ← M1, M2, M4; M7 ← all; M8 ← v1.0.
 
@@ -280,16 +279,11 @@ processes, and project navigation. That alone is a usable editor.
 
 ## Open decisions
 
-1. **Props vs overlays** — resolved in M1: durable props for annotations,
-   derived per-line tokenization for syntax. No overlay module.
-2. **Completion UI** — minibuffer first (recommended); in-buffer popup only if
-   the minibuffer proves insufficient.
-3. **Job writes** — every background mutation is a pure `swap!`; jobs never
-   call commands that assume they are on the command-loop thread.
-4. **LSP implementation** — `lsp4clj` versus a ~300-line hand-rolled client.
-   Spike both for one day at the start of M6.
-5. **Java/Clojure floor** — pin the minimum version in `deps.edn` and in
-   `install.sh` before M7 packaging.
+The props/overlay, completion-UI, job-write and LSP-implementation questions
+are settled in their milestones. One decision remains:
+
+1. **Clojure floor** — Java 11+ is enforced in `install.sh`; `deps.edn` does
+   not pin a Clojure version. Pin the minimum before packaging.
 
 ## Measurement
 

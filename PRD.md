@@ -21,10 +21,11 @@ Packages are Clojure libraries on `deps.edn`.
 
 ## Current state
 
-Text editor with Emacs keybindings: gap buffer with line index, window tree,
-major/minor modes with keymaps and hooks, edit-tracking text properties,
-isearch, query-replace, keyboard macros, registers, bookmarks, recentf, dired,
-buflist, shell commands, auto-save, terminal and web frontends, nREPL on 7888.
+The editor implements the M0-M7 scope in [ROADMAP.md](ROADMAP.md): Emacs-style
+editing, durable text properties, async jobs, project navigation, completion,
+git, LSP and crash-safe sessions. [README.md](README.md) has the current feature
+list, test counts and benchmarks. v1.0 is still pending a full week of
+primary-editor use.
 
 Configuration is `~/.xmas/init.clj` via `xmas.api` (`bind!`, `add-hook!`,
 `register-mode!`, `add-prop!`, `set-prop!`, `remove-prop!`); `M-:` evaluates
@@ -32,9 +33,8 @@ Clojure in the same context.
 
 ## Roadmap
 
-Milestones, scope, cut line and open decisions live in [ROADMAP.md](ROADMAP.md).
-The short version: solid editing → text properties → async processes →
-projects → completion → git → LSP → durability.
+Milestones, scope and the remaining decision live in [ROADMAP.md](ROADMAP.md).
+M0-M7 are implemented; v1.0 is pending a full week of primary-editor use.
 
 ## Principles
 
