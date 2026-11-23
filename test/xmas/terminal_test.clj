@@ -175,6 +175,17 @@
     (term/tick! ed backend)
     (is (zero? @captures) "an invisible terminal gets no capture requests")))
 
+(deftest a-visible-unfocused-terminal-is-captured
+  (let [{:keys [backend captures]} (fake-backend)
+        [tree _] (win/split (win/leaf "*term*") [] :stacked)
+        tree (assoc-in tree [:b :buffer] "*other*")
+        ed (atom (-> (make-state "")
+                     (assoc-in [:bufs "*other*"] (buf/make "*other*" "" nil))
+                     (assoc :buf "*other*" :windows tree :cur-window [:b])))]
+    (term/tick! ed backend)
+    (term/tick! ed backend)
+    (is (= 1 @captures) "an unfocused visible terminal still refreshes")))
+
 (deftest killing-the-buffer-kills-its-session
   (let [{:keys [backend killed attached?]} (fake-backend)
         ed (atom (make-state ""))]

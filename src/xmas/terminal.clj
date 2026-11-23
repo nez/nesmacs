@@ -240,8 +240,10 @@
 (defn- rect-for [s layout name]
   (if (and (= name (:buf s)) (contains? layout (:cur-window s)))
     (get layout (:cur-window s))
+    ;; `win/leaves` yields paths inside the window tree, not the editor state.
     (some (fn [path]
-            (when (= name (get-in s (conj path :buffer))) (get layout path)))
+            (when (= name (get-in (:windows s) (conj path :buffer)))
+              (get layout path)))
           (win/leaves (:windows s)))))
 
 (defn- swap-buffer!
