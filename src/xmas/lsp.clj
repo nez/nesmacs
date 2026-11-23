@@ -135,21 +135,26 @@
             :contentChanges [{:text text}]})
   (note-version! root-id path version))
 
-(defn- language-id [^String path]
-  (if (str/ends-with? path ".el") "emacs-lisp" "clojure"))
+(defn supports?
+  "True when this client can declare `path` to the configured server.
+   The client is wired for Clojure and EDN files only."
+  [path]
+  (boolean (and path (re-find #"\.(clj|cljc|cljs|edn)$" (str path)))))
+
+(def ^:private language-id "clojure")
 
 (defn- sync-docs! [root-id state]
   (let [s (srv root-id)]
     (when (:initialized? s)
       (doseq [[_ b] (:bufs state)]
         (when-let [path (:file b)]
-          (when (or (= path (:root s))
-                    (str/starts-with? path (str (:root s) java.io.File/separator)))
+          (when (and (supports? path)
+                     (or (= path (:root s))
+                         (str/starts-with? path (str (:root s) java.io.File/separator))))
             (let [v (or (:version b) 0)
                   seen (get-in s [:docs path])]
               (cond
-                (nil? seen)      (did-open! root-id path (str (:text b)) v
-                                            (language-id path))
+                (nil? seen)      (did-open! root-id path (str (:text b)) v language-id)
                 (not= seen v)    (did-change! root-id path (str (:text b)) v)))))))))
 
 (defn close-doc!

@@ -2,7 +2,7 @@
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing]]
             [xmas.buf :as buf]
-            [xmas.ed]
+            [xmas.ed :as ed]
             [xmas.gap :as gap]
             [xmas.lsp :as lsp]))
 
@@ -65,6 +65,22 @@
     (is (= path (lsp/uri->path (#'xmas.lsp/path->uri path)))))
   (testing "a server URI with file:/// is decoded too"
     (is (= "/tmp/x.clj" (lsp/uri->path "file:///tmp/x.clj")))))
+
+(deftest only-clojure-and-edn-files-are-synced
+  (is (lsp/supports? "src/foo.clj"))
+  (is (lsp/supports? "foo.cljc"))
+  (is (lsp/supports? "foo.cljs"))
+  (is (lsp/supports? "deps.edn"))
+  (is (not (lsp/supports? "init.el")))
+  (is (not (lsp/supports? "README.md")))
+  (is (not (lsp/supports? nil))))
+
+(deftest lsp-commands-refuse-non-clojure-buffers
+  (let [s {:buf "*test*"
+           :bufs {"*test*" (assoc (buf/make "*test*" "x" nil)
+                                  :file "/tmp/init.el")}
+           :msg nil}]
+    (is (= "LSP is only wired for Clojure/EDN files" (:msg (ed/lsp-hover s))))))
 
 (deftest diagnostic-ranges-clamp-at-end-and-drop-stale
   (let [offs (deref #'xmas.lsp/lsp-range->offsets)

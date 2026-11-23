@@ -200,7 +200,8 @@ Size M. Risk low.
   lifecycle (start on project open, restart on crash, shutdown on exit).
 - Diagnostics as M1 props; hover in the echo area; `M-.` definition;
   completion as an M4 source.
-- Start with `clojure-lsp`; keep the client language-agnostic.
+- Start with `clojure-lsp`; the protocol layer is generic, but document sync is
+  limited to Clojure/EDN files.
 - `make lsp` runs the end-to-end check against the real `clojure-lsp` binary
   (diagnostics, hover, completion, definition, crash restart); it is excluded
   from `make test` because it needs the server and its indexing time.

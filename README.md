@@ -89,8 +89,8 @@ The rest follows from the same decision:
 - **Git** — `C-x g` status with stage/unstage, diff, log and commit. Diff and
   log buffers are ordinary buffers with faces and navigation.
 - **LSP** — diagnostics as props, `M-.` definition, `C-c h` hover, `C-c i`
-  symbol completion. Any server through `:lsp-command` (`clojure-lsp` by
-  default).
+  symbol completion for Clojure/EDN files through `:lsp-command`
+  (`clojure-lsp` by default).
 - **Durability** — session restore for buffers, windows, points and props;
   per-command journal; auto-save with a recovery prompt; safe quit dialog.
 - **Rendering** — one named face map, durable props, incremental font-lock,
@@ -156,7 +156,7 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 512 tests / 6,095 assertions
+make test    # 514 tests / 6,101 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # integration tests against a real clojure-lsp

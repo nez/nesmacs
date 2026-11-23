@@ -1190,13 +1190,16 @@
 (defn- lsp-at-point
   "Ask the project's server something at point and hand `cb` the result."
   [s request cb]
-  (if-not (:file (cur s))
-    (msg s "Buffer has no file")
-    (lsp-when-ready
-      s
-      (fn [state root-id]
-        (request root-id (:file (cur state)) (cmd/line-idx state) (char-col state) cb)
-        state))))
+  (let [path (:file (cur s))]
+    (cond
+      (nil? path)                (msg s "Buffer has no file")
+      (not (lsp/supports? path)) (msg s "LSP is only wired for Clojure/EDN files")
+      :else
+      (lsp-when-ready
+        s
+        (fn [state root-id]
+          (request root-id (:file (cur state)) (cmd/line-idx state) (char-col state) cb)
+          state)))))
 
 (defn lsp-hover [s]      (lsp-at-point s lsp/hover show-hover))
 (defn lsp-definition [s] (lsp-at-point s lsp/definition jump-to-definition))
@@ -1236,7 +1239,7 @@
   (let [state (:state ctx)
         b     (cmd/cur state)
         root  (when (:file b) (project-root state))]
-    (when root
+    (when (and root (:file b) (lsp/supports? (:file b)))
       (let [root-id  (str root)
             path     (:file b)
             version  (or (:version b) 0)
