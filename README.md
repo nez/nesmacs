@@ -165,7 +165,7 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 533 tests / 6,172 assertions
+make test    # 534 tests / 6,173 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # integration tests against a real clojure-lsp
