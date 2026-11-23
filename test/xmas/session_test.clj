@@ -34,8 +34,8 @@
 
 (deftest test-session-save-load
   (let [state (-> (make-state)
-                  (assoc-in [:bufs "*test*" :point] 42)
-                  (assoc-in [:bufs "*test*" :mark] 10)
+                  (assoc-in [:bufs "*test*" :point] 7)
+                  (assoc-in [:bufs "*test*" :mark] 3)
                   (assoc-in [:bufs "*test*" :modified] true)
                   (ed/split-window-below)
                   (assoc-in [:windows :ratio] 0.3))]
@@ -43,8 +43,8 @@
     (when-let [sess (session/load-session!)]
       (let [[restored ok] (session/restore-session state sess)]
         (is ok)
-        (is (= 42 (get-in restored [:bufs "*test*" :point])))
-        (is (= 10 (get-in restored [:bufs "*test*" :mark])))
+        (is (= 7 (get-in restored [:bufs "*test*" :point])))
+        (is (= 3 (get-in restored [:bufs "*test*" :mark])))
         (is (true? (get-in restored [:bufs "*test*" :modified])))
         (is (= :split (:type (:windows restored))))
         (is (= 0.3 (:ratio (:windows restored))))))))
@@ -73,17 +73,39 @@
         (is (= [[nil :normal] [nil :in-string]]
                (get-in restored [:bufs "*test*" :font-lock])))))))
 
+(deftest restore-clamps-offsets-when-the-file-shrank
+  ;; Offsets saved for a file that got shorter must not survive restore, or the
+  ;; first render sees a point past the end.
+  (let [f (java.io.File/createTempFile "xmas-shrink" ".txt")]
+    (try
+      (spit f "tiny\n")
+      (let [path (.getCanonicalPath f)
+            sess {:version 1
+                  :bufs {path {:name path :text nil :point 2000 :mark 1500
+                               :file path :modified false
+                               :mode :fundamental :version 7}}
+                  :windows {:type :leaf :buffer path :scroll 150 :hscroll 0}
+                  :cur-window []
+                  :recentf [] :bookmarks {} :mini-history []}
+            [restored ok] (session/restore-session (make-state) sess)
+            b (get-in restored [:bufs path])]
+        (is ok)
+        (is (= 5 (:point b)))
+        (is (= 5 (:mark b)))
+        (is (= 5 (get-in restored [:windows :scroll]))))
+      (finally (.delete f)))))
+
 (deftest test-session-save-on-exit
   ;; Simulate clean exit by setting :exit true
   (let [state (-> (make-state)
-                  (assoc-in [:bufs "*test*" :point] 100)
+                  (assoc-in [:bufs "*test*" :point] 8)
                   (assoc :exit true))]
     (when (:exit state)
       (session/save-session! state))
     (when-let [sess (session/load-session!)]
       (let [[restored ok] (session/restore-session state sess)]
         (is ok)
-        (is (= 100 (get-in restored [:bufs "*test*" :point])))))))
+        (is (= 8 (get-in restored [:bufs "*test*" :point])))))))
 
 (deftest session-omits-text-for-unmodified-file-buffers
   (let [f (java.io.File/createTempFile "xmas-session" ".txt")]

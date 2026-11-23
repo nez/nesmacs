@@ -36,6 +36,12 @@
             :font-lock-window nil}]
      (assoc b :large-file (large-file? b)))))
 
+(defn clamp-pos
+  "Clamp a text offset into the buffer [0, len]. Session restore uses it, since
+   the file may have shrunk while the editor was closed."
+  [b p]
+  (-> (long (or p 0)) (max 0) (min (count (:text b)))))
+
 (defn set-point [b f]
   (assoc b :point (-> (f (:text b) (:point b))
                       (max 0) (min (count (:text b))))))

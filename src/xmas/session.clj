@@ -59,17 +59,19 @@
       ;; derived: it is reused only when the text came from the session, and
       ;; starts empty when the text is reloaded from disk. Props ride along
       ;; only with session text, since their offsets would otherwise be stale.
-      (-> (buf/make (:name d) (or text "") file)
-          (assoc :point (:point d)
-                 :mark (:mark d)
-                 :modified (:modified d)
-                 :mode (:mode d)
-                 :version (:version d)
-                 :edit-count (:edit-count d)
-                 :journal-from-disk? (and (some? file) (nil? saved))
-                 :font-lock (if saved (or (:font-lock d) []) [])
-                 :props (if saved (:props d) [])
-                 :large-file (:large-file d))))))
+      (let [b (-> (buf/make (:name d) (or text "") file)
+                  (assoc :modified (:modified d)
+                         :mode (:mode d)
+                         :version (:version d)
+                         :edit-count (:edit-count d)
+                         :journal-from-disk? (and (some? file) (nil? saved))
+                         :font-lock (if saved (or (:font-lock d) []) [])
+                         :props (if saved (:props d) [])
+                         :large-file (:large-file d)))]
+        ;; A file reloaded from disk may have shrunk, so the saved offsets can
+        ;; point past the end.
+        (cond-> (assoc b :point (buf/clamp-pos b (:point d)))
+          (some? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d))))))))
 
 (defn- window-tree->data
   "Serialize window tree, replacing buffer refs with names."
@@ -358,11 +360,15 @@
                                     (if (win/leaf? node)
                                       (let [buf-name (:buffer node)]
                                         (if (contains? valid-bufs buf-name)
-                                          (assoc (win/leaf buf-name
-                                                           (:scroll node 0)
-                                                           (:hscroll node 0))
-                                                 :point (:point node)
-                                                 :mark (:mark node))
+                                          (let [b (get valid-bufs buf-name)
+                                                w (win/leaf buf-name
+                                                            (buf/clamp-pos b (:scroll node 0))
+                                                            (max 0 (long (or (:hscroll node) 0))))]
+                                            (cond-> w
+                                              (some? (:point node))
+                                              (assoc :point (buf/clamp-pos b (:point node)))
+                                              (some? (:mark node))
+                                              (assoc :mark (buf/clamp-pos b (:mark node)))))
                                           (win/leaf "*scratch*")))
                                       (assoc (win/split-node (:dir node)
                                                              (walk (:a node))
