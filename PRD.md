@@ -12,8 +12,8 @@ same idea; share the primitive instead of duplicating it.
 
 ## Non-goals
 
-- Running Emacs Lisp or `~/.emacs.d`. The elisp runtime was removed; it is
-  recoverable at tag `elisp-runtime-v0` but is not maintained.
+- Running Emacs Lisp or `~/.emacs.d`. The elisp runtime was removed; the last
+  version is reachable from `main` at commit `276dd47` but is not maintained.
 - GNU `lisp/*.el`, `package.el`, quelpa, or Emacs third-party packages.
 - Bytecode, native modules, GUI frames.
 
