@@ -2334,7 +2334,7 @@
       (session/save-tick! editor)
       (lsp/tick! editor)
       (testres/tick! editor)
-      (deferred/tick! editor)
+      (deferred/tick! editor comp-cache)
       (when (:exit @editor)
         ;; Clean exit: the final snapshot includes every edit, so the journal
         ;; is only deleted after that write succeeds.
