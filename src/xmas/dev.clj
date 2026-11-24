@@ -1,6 +1,7 @@
 (ns xmas.dev
-  (:require [xmas.log :as log])
-  (:import [java.nio.file FileSystems StandardWatchEventKinds Path]))
+  (:require [clojure.string :as str]
+            [xmas.log :as log])
+  (:import [java.nio.file FileSystems Path StandardWatchEventKinds]))
 
 (defn ns-for-file
   "Convert src/xmas/foo.clj -> xmas.foo"
@@ -14,6 +15,16 @@
         (.replace ".clj" "")
         symbol)))
 
+(defn ns-for-change
+  "Namespace for a changed file `full` inside the watched `src` root.
+   Both paths must be absolute: a relative watchable used to yield
+   `src/xmas/foo.clj`, i.e. the namespace `src.xmas.foo`, which is not on the
+   classpath — every hot reload failed. nil for files outside the root."
+  [^Path root ^Path full]
+  (let [rel (try (.relativize root (.normalize full)) (catch Exception _ nil))]
+    (when (and rel (not (str/starts-with? (str rel) "..")))
+      (ns-for-file (str "src/" rel)))))
+
 (defn reload! [ns-sym]
   (try
     (require ns-sym :reload)
@@ -25,10 +36,11 @@
   "Watch src/ for .clj changes, auto-reload namespaces. Returns {:future f :running a}."
   []
   (let [watcher (.newWatchService (FileSystems/getDefault))
-        src-path (.toPath (java.io.File. "src"))
+        src (.toAbsolutePath (.toPath (.getAbsoluteFile (java.io.File. "src"))))
         running (atom true)]
-    ;; register all dirs recursively
-    (doseq [dir (file-seq (java.io.File. "src"))
+    ;; Register absolute directories: the watchable is handed back to the
+    ;; event handler, and only an absolute one can be relativized reliably.
+    (doseq [dir (file-seq (.toFile src))
             :when (.isDirectory dir)]
       (.register (.toPath dir) watcher
                  (into-array [StandardWatchEventKinds/ENTRY_MODIFY])))
@@ -38,11 +50,9 @@
                (while @running
                  (when-let [key (.poll watcher 500 java.util.concurrent.TimeUnit/MILLISECONDS)]
                    (doseq [event (.pollEvents key)]
-                     (let [changed (str (.context event))
-                           dir (.watchable key)
-                           full (str (.resolve ^Path dir changed))
-                           rel (.replace full (str (.toAbsolutePath src-path) "/") "")]
-                       (when-let [ns-sym (ns-for-file (str "src/" rel))]
+                     (let [dir (.watchable key)
+                           full (.toAbsolutePath (.resolve ^Path dir (str (.context event))))]
+                       (when-let [ns-sym (ns-for-change src full)]
                          (reload! ns-sym))))
                    (.reset key)))
                (.close watcher)
