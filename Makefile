@@ -1,6 +1,6 @@
 JAR := target/xmas.jar
 
-.PHONY: dev run jar repl test bench lsp term dap pty crash lint check clean setup
+.PHONY: dev run jar repl test bench lsp term dap grammars pty crash lint check clean setup
 
 setup:
 	./install.sh
@@ -26,13 +26,21 @@ jar:
 test:
 	clojure -M:test -e :benchmark -e :integration
 
-# End-to-end against the real clojure-lsp binary; needs it on PATH.
+# End-to-end against every configured language server (clojure-lsp, pyright,
+# typescript-language-server); a missing one is a skip. XMAS_CLOJURE_LSP,
+# XMAS_PYRIGHT and XMAS_TSSERVER point at installs outside PATH.
 lsp:
 	clojure -M:test -n xmas.lsp-live-test
 
-# End-to-end against the real debugpy adapter; needs Python + `pip install debugpy`.
+# End-to-end against debugpy and vscode-js-debug. Needs `pip install debugpy`
+# (XMAS_DEBUGPY points at that Python) and JS_DEBUG_DAP=.../dapDebugServer.js.
 dap:
 	clojure -M:test -n xmas.dap-live-test
+
+# Resolve every pinned Tree-sitter grammar from an empty local Maven repo, so a
+# warm ~/.m2 cannot hide a missing artifact or native library.
+grammars:
+	clojure -Sdeps '{:mvn/local-repo ".cpcache/m2-check"}' -M:test -n xmas.grammar-live-test
 
 # End-to-end terminal session against the real tmux binary; needs tmux on PATH.
 term:
@@ -44,6 +52,7 @@ bench:
 
 pty:
 	python3 test/pty/smoke.py
+	python3 test/pty/lists.py
 
 # kill -9 mid-edit, restart, require the journal to restore the edit.
 crash:

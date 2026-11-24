@@ -120,7 +120,7 @@ The rest follows from the same decision:
   vscode-js-debug; Clojure keeps nREPL). `C-c d b` toggles a gutter
   breakpoint, `c`/`n`/`i`/`o` resume and step, `s`/`v` show frames and locals,
   `e` evaluates in the stopped frame, `q` disconnects. Adapters are data in
-  `xmas.lang`; `make dap` runs the live debugpy test.
+  `xmas.lang`; `make dap` runs the live debugpy and vscode-js-debug tests.
 - **Tests** — `M-x run-tests` runs the project's command as a job and parses
   JUnit XML or TAP into `*Test Results*`; RET jumps to a failure. Runners with
   their own format still yield jumpable entries from `file:line` lines.
@@ -195,17 +195,22 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 666 tests / 6,547 assertions
+make test    # 668 tests / 6,547 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
-make lsp     # integration tests against a real clojure-lsp
+make lsp     # live tests against clojure-lsp, pyright and typescript-language-server
 make term    # terminal session test against a real tmux
-make dap     # debugger test against a real debugpy adapter
+make dap     # live debugger tests against debugpy and vscode-js-debug
+make grammars # resolve every Tree-sitter grammar into an empty Maven repo
 ```
 
 The pty scripts start the editor in a real terminal, drive it with keys and
-check the rendered frame. Terminal buffers are exercised end-to-end against
-real tmux by `make term`, which is excluded from `make test` like `make lsp`.
+check the rendered frame, including blame/hunk/test-report/forge list flows.
+Terminal buffers are exercised end-to-end against real tmux by `make term`,
+which is excluded from `make test` like the live `lsp`, `dap` and `grammars`
+targets. A live target skips a server or adapter it cannot find; point
+`XMAS_CLOJURE_LSP`, `XMAS_PYRIGHT`, `XMAS_TSSERVER`, `XMAS_DEBUGPY` or
+`JS_DEBUG_DAP` at an install outside `PATH`.
 The benchmark asserts under 50 ms per keystroke on a
 100k-line file and under 2 s to open 10 MB; measured roughly 20 ms and 30 ms on
 a 16-core Linux machine. Everything is testable from `clojure.test`, including

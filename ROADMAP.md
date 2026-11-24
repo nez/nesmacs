@@ -369,7 +369,10 @@ daily need the LSP surface cannot cover. Clojure keeps nREPL/CIDER.
    Adapter configuration is data in `xmas.lang` (`:dap`: `:transport`, `:argv`,
    `:launch`) with `{port}` and `{env:NAME}` expansion, so no adapter path is
    hard-coded. Shipped configs: debugpy (stdio) and vscode-js-debug (TCP, server
-   path from `$JS_DEBUG_DAP`). `make dap` is the live adapter test.
+   path from `$JS_DEBUG_DAP`). `make dap` is the live adapter test. js-debug
+   asks for a child target with `startDebugging`; the client answers it and
+   opens a second DAP connection, keeping breakpoints and configuration on the
+   normal child `initialized` flow.
 2. Breakpoints, stack, locals and adapter output reuse existing primitives: the
    buffer's gutter is `{:width n :marks {line mark}}` painted by the renderer,
    frames/locals/output are read-only list buffers, and evaluate uses the
@@ -450,10 +453,11 @@ not architecture.
 
 - Tests: `make check` stays green at every commit; new data structures get
   property tests.
-- Interactive: scripted pty smoke for startup, config errors, clean exit and
-  language highlighting.
-- Languages: `make lsp` covers each supported server; a missing grammar or
-  server is a tested fallback path.
+- Interactive: scripted pty smoke for startup, config errors, clean exit,
+  language highlighting and the M9 list round-trip (blame, hunks, tests, forge).
+- Languages: `make lsp` covers each supported server; `make dap` covers both
+  adapters; `make grammars` resolves every pinned grammar into an empty Maven
+  repo. A missing grammar or server is a tested fallback path.
 - Performance: the M7 targets, measured on the user's machine, not synthetic
   hardware.
 - Product: the seven-day v1.0 loop, with zero data-loss incidents.
