@@ -1,85 +1,139 @@
 #!/bin/sh
-set -e
+# nesmacs installer: puts the AOT jar and a launcher under $PREFIX (default
+# ~/.local). No sudo, no Clojure CLI, no build tools.
+#
+#   curl -fsSL https://raw.githubusercontent.com/nez/nesmacs/main/install.sh | sh
+#   ./install.sh --prefix ~/.local --version v1.0.0-rc1
+#   ./install.sh --uninstall
+#
+# Run from a checkout it uses (or builds) target/nesmacs.jar instead of
+# downloading a release. There is no checksum step: the jar comes over TLS from
+# the release it was published to.
+set -eu
 
-XMAS_DIR="$(cd "$(dirname "$0")" && pwd)"
-MIN_JAVA=17
+REPO="${NESMACS_REPO:-nez/nesmacs}"
+VERSION="${NESMACS_VERSION:-latest}"
+PREFIX="${NESMACS_PREFIX:-$HOME/.local}"
+UNINSTALL=0
 
-echo "=== xmas setup ==="
+usage() {
+  cat <<'EOF'
+Usage: install.sh [--prefix DIR] [--version TAG] [--uninstall]
 
-# --- Java ---
+  --prefix DIR   install under DIR (default: ~/.local)
+  --version TAG  release to download (default: latest)
+  --uninstall    remove the jar and launcher
+
+Env: NESMACS_PREFIX, NESMACS_VERSION, NESMACS_REPO
+Requires: Java 17+, tmux, git, ripgrep.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prefix) PREFIX="$2"; shift 2 ;;
+    --version) VERSION="$2"; shift 2 ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+SHARE="$PREFIX/share/nesmacs"
+BIN="$PREFIX/bin"
+JAR="$SHARE/nesmacs.jar"
+LAUNCHER="$BIN/nesmacs"
+
+# The script's own directory, when it has one (piped to `sh`, $0 is not a path).
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || echo "")
+CHECKOUT=0
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/deps.edn" ] && [ -d "$SELF_DIR/src/nesmacs" ]; then
+  CHECKOUT=1
+fi
+
+if [ "$UNINSTALL" = 1 ]; then
+  rm -f "$LAUNCHER" "$JAR"
+  rmdir "$SHARE" 2>/dev/null || true
+  echo "Removed $LAUNCHER and $JAR (your ~/.nesmacs data is untouched)."
+  exit 0
+fi
+
+# --- Prerequisites ---
+fail=0
 if command -v java >/dev/null 2>&1; then
-  ver=$(java -version 2>&1 | head -1 | sed 's/.*"\([0-9]*\)\..*/\1/')
-  if [ "$ver" -ge "$MIN_JAVA" ] 2>/dev/null; then
-    echo "[ok] Java $ver"
+  major=$(java -version 2>&1 | awk -F'"' '/version/ {print $2}' \
+          | awk -F. '{ if ($1 == "1") print $2; else print $1 }')
+  if [ -n "$major" ] && [ "$major" -ge 17 ] 2>/dev/null; then
+    echo "[ok] Java $major"
   else
-    echo "[!!] Java $ver found but need >= $MIN_JAVA"
-    exit 1
+    echo "[!!] need Java 17+, found ${major:-unknown}" >&2
+    fail=1
   fi
 else
-  echo "Installing OpenJDK 21..."
-  sudo apt-get update -qq && sudo apt-get install -y -qq openjdk-21-jdk
+  echo "[!!] java not found — install JDK 17+ (apt install openjdk-21-jdk / brew install openjdk)" >&2
+  fail=1
 fi
 
-# --- Clojure CLI ---
-if command -v clojure >/dev/null 2>&1; then
-  echo "[ok] $(clojure --version 2>&1)"
+for tool in tmux git rg; do
+  if command -v "$tool" >/dev/null 2>&1; then
+    echo "[ok] $tool"
+  else
+    echo "[!!] $tool not found — install it (apt install $tool / brew install $tool)" >&2
+    fail=1
+  fi
+done
+[ "$fail" = 0 ] || { echo "Install the missing tools and re-run." >&2; exit 1; }
+
+# --- Get the jar ---
+tmp=""
+if [ "$CHECKOUT" = 1 ] && [ -f "$SELF_DIR/target/nesmacs.jar" ]; then
+  jar_src="$SELF_DIR/target/nesmacs.jar"
+  echo "[ok] using $jar_src"
+elif [ "$CHECKOUT" = 1 ] && command -v clojure >/dev/null 2>&1; then
+  echo "Building target/nesmacs.jar..."
+  ( cd "$SELF_DIR" && make jar )
+  jar_src="$SELF_DIR/target/nesmacs.jar"
 else
-  echo "Installing Clojure CLI..."
-  installer=$(mktemp)
-  trap 'rm -f "$installer"' EXIT HUP INT TERM
-  curl -fsSL https://github.com/clojure/brew-install/releases/latest/download/linux-install.sh -o "$installer"
-  chmod +x "$installer"
-  sudo "$installer"
+  if [ "$VERSION" = latest ]; then
+    url="https://github.com/$REPO/releases/latest/download/nesmacs.jar"
+  else
+    url="https://github.com/$REPO/releases/download/$VERSION/nesmacs.jar"
+  fi
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
+  echo "Downloading $url ..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --progress-bar "$url" -o "$tmp"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --show-progress "$url" -O "$tmp"
+  else
+    echo "[!!] curl or wget is required to download the release" >&2
+    exit 1
+  fi
+  jar_src="$tmp"
 fi
 
-# --- clj-kondo (linter) ---
-if command -v clj-kondo >/dev/null 2>&1; then
-  echo "[ok] clj-kondo $(clj-kondo --version 2>&1)"
-else
-  echo "Installing clj-kondo..."
-  curl -sL https://raw.githubusercontent.com/clj-kondo/clj-kondo/master/script/install-clj-kondo | sudo bash
+mkdir -p "$SHARE" "$BIN"
+cp "$jar_src" "$JAR"
+
+cat > "$LAUNCHER" <<EOF
+#!/bin/sh
+exec java -jar "$JAR" "\$@"
+EOF
+chmod +x "$LAUNCHER"
+
+# --- Migrate a pre-rebrand config dir ---
+if [ -d "$HOME/.xmas" ] && [ ! -e "$HOME/.nesmacs" ]; then
+  mv "$HOME/.xmas" "$HOME/.nesmacs"
+  echo "[ok] moved ~/.xmas to ~/.nesmacs"
 fi
-
-# --- rlwrap (for clj REPL) ---
-if command -v rlwrap >/dev/null 2>&1; then
-  echo "[ok] rlwrap"
-else
-  echo "Installing rlwrap..."
-  sudo apt-get install -y -qq rlwrap 2>/dev/null || echo "[skip] rlwrap — use 'clojure' instead of 'clj'"
-fi
-
-# --- stty (required) ---
-if command -v stty >/dev/null 2>&1; then
-  echo "[ok] stty"
-else
-  echo "[!!] stty not found — xmas needs it for terminal control"
-  exit 1
-fi
-
-# --- python3 (pty tests) ---
-if command -v python3 >/dev/null 2>&1; then
-  echo "[ok] $(python3 --version 2>&1)"
-else
-  echo "Installing python3..."
-  sudo apt-get install -y -qq python3
-fi
-
-# --- Fetch deps ---
-echo ""
-echo "Fetching dependencies..."
-cd "$XMAS_DIR"
-clojure -P 2>/dev/null
-
-# --- Create user dir ---
-mkdir -p "$HOME/.xmas"
-
-# --- Verify ---
-echo "Verifying..."
-make check
+mkdir -p "$HOME/.nesmacs"
 
 echo ""
-echo "=== Ready ==="
-echo "  make dev     — run from source"
-echo "  make run     — build + run uberjar"
-echo "  make lint    — run clj-kondo"
-echo "  make test    — run tests"
+echo "=== Installed ==="
+echo "  $LAUNCHER"
+case ":$PATH:" in
+  *":$BIN:"*) ;;
+  *) echo "  Add it to PATH:  export PATH=\"$BIN:\$PATH\"" ;;
+esac
+echo "  Config and session live in ~/.nesmacs/"
