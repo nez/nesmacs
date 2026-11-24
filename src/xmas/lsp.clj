@@ -151,6 +151,20 @@
 (defn language-id-for [path]
   (:id (lang/language-for-file path)))
 
+(defn on-path?
+  "True when the first element of a server `argv` is an executable on PATH."
+  [argv]
+  (when-let [^String bin (first argv)]
+    (let [f (java.io.File. bin)]
+      (boolean
+       (if (or (.isAbsolute f) (str/includes? bin java.io.File/separator))
+         (.canExecute f)
+         (some (fn [dir]
+                 (let [c (java.io.File. ^String (str dir) bin)]
+                   (and (.isFile c) (.canExecute c))))
+               (str/split (or (System/getenv "PATH") "")
+                          (re-pattern java.io.File/pathSeparator))))))))
+
 (defn- sync-docs! [root-id state]
   (let [s (srv root-id)]
     (when (:initialized? s)
@@ -158,6 +172,7 @@
         (when-let [path (:file b)]
           (let [l (lang/language-for-file path)]
             (when (and l
+                       (not (:large-file b))
                        (= (:id l) (:language-id s))
                        (or (= path (:root s))
                            (str/starts-with? path (str (:root s) java.io.File/separator))))
@@ -205,7 +220,8 @@
                                   :when offs]
                               (props/make (first offs) (second offs)
                                           (diag-face severity)
-                                          {:owner :lsp :message message}))]
+                                          {:owner :lsp :message message
+                                           :severity severity}))]
                  (assoc b :props (props/add-all (props/remove-owner (:props b) :lsp) ranges))))))))
 
 (defn- on-notification [editor root-id {:keys [method params]}]
@@ -359,7 +375,10 @@
    absolute char offsets, sorted descending so applying them in order is safe.
    `text-for` returns the current text of a path (nil if unavailable).
    File create/rename/delete operations are ignored: xmas does not edit the
-   filesystem behind the user's back."
+   filesystem behind the user's back.
+   DEBT: edits for unopened files are applied to a newly created in-memory
+   buffer (not the disk file); the user must save it explicitly. This is
+   deliberate — automatic filesystem writes are a privilege escalation."
   [edit text-for]
   (when (map? edit)
     (let [pairs (concat (for [[uri edits] (:changes edit)] [uri edits])

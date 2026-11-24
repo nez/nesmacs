@@ -41,6 +41,7 @@
        :font-lock (when-not on-disk?
                     (mapv (fn [entry] [nil (second entry)]) (:font-lock b)))
        :props (:props b [])
+       :collapsed (:collapsed b)
        :large-file (:large-file b)}
       ;; The screen is a cache: reattaching captures it again. Persist only the
       ;; session identity and geometry, never the (large, changing) snapshot.
@@ -101,6 +102,11 @@
           ;; point past the end.
           (cond-> (assoc b :point (buf/clamp-pos b (:point d)))
             (some? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d)))
+            (seq (:collapsed d))
+            (assoc :collapsed
+                   (into #{} (filter #(and (integer? %)
+                                           (< -1 (long %) (gap/line-count (:text b)))))
+                         (:collapsed d)))
             ;; Language data is derived from the extension, not persisted, so
             ;; restored buffers keep highlighting and comment syntax.
             (lang/language-for-file file)

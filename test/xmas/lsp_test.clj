@@ -130,3 +130,11 @@
     (with-redefs [lsp/server-exists? (constantly true)
                   lsp/ready?         (constantly false)]
       (is (= [] (xmas.ed/lsp-completion-source "" {:state state}))))))
+
+(deftest on-path-detects-installed-commands
+  (is (lsp/on-path? ["sh"]))
+  (is (false? (lsp/on-path? ["xmas-no-such-server-binary"])))
+  ;; An explicit absolute path is checked directly, so a configured server
+  ;; outside PATH still counts.
+  (is (lsp/on-path? [(str (System/getProperty "java.home") "/bin/java")]))
+  (is (not (lsp/on-path? []))))

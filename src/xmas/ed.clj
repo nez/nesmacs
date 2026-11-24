@@ -5,6 +5,7 @@
             [xmas.buflist :as buflist]
             [xmas.cmd :as cmd]
             [xmas.complete :as complete]
+            [xmas.deferred :as deferred]
             [xmas.dired :as dired]
             [xmas.fold :as fold]
             [xmas.forge :as forge]
@@ -1235,11 +1236,13 @@
   [s]
   (let [b (cur s) p (:point b)
         path (:file b) version (:version b)
-        prefix (symbol-prefix (str (:text b)) p)]
+        prefix (symbol-prefix (str (:text b)) p)
+        line (gap/line-of (:text b) p)
+        ch   (- p (gap/nth-line-start (:text b) line))]
     (mini-start s "Complete: "
       (fn [s chosen]
         (let [b (cur s)
-              item (when path (completion-item-for path version chosen))]
+              item (when path (completion-item-for path version line ch chosen))]
           (if (and (= prefix (gap/substr (:text b) (- p (count prefix)) p))
                    (<= (+ p (count chosen)) (count (:text b))))
             (if item
@@ -1268,12 +1271,15 @@
       (:lsp l)))
 
 (defn- lsp-session
-  "Resolve {:root :root-id :argv :language} for the current buffer, or nil."
+  "Resolve {:root :root-id :argv :language} for the current buffer, or nil.
+   Outside a project the file's own directory is the root, so a lone script
+   still gets hover and completion."
   [s]
-  (let [b (cur s)
-        l (:language b)]
-    (when (and (:file b) l (:lsp l))
-      (when-let [root (project-root s)]
+  (let [b (:file (cur s))
+        l (get (cur s) :language)]
+    (when (and b l (:lsp l))
+      (when-let [root (or (project-root s)
+                          (some-> ^String b java.io.File. .getParent))]
         {:root root
          :root-id (lsp/server-id root (:id l))
          :argv (lsp-argv s l)
@@ -1296,13 +1302,16 @@
   (let [path (:file (cur s))]
     (cond
       (nil? path)                (msg s "Buffer has no file")
+      (:large-file (cur s))      (msg s "LSP is disabled in large-file buffers")
       (not (lsp/supports? path)) (msg s "No language server for this file")
       :else
       (if-let [sess (lsp-session s)]
-        (do (lsp/ensure! (:root-id sess) (:argv sess) (:root sess)
-                         (:id (:language sess))
-                         (fn [_] (swap! editor f sess)))
-            s)
+        (if (lsp/on-path? (:argv sess))
+          (do (lsp/ensure! (:root-id sess) (:argv sess) (:root sess)
+                           (:id (:language sess))
+                           (fn [_] (swap! editor f sess)))
+              s)
+          (msg s (str "Language server not on PATH: " (first (:argv sess)))))
         (msg s "Not in a project")))))
 
 (defn- show-hover
@@ -1417,6 +1426,20 @@
       (lsp/execute-command (:root-id sess) (:command cmd) (:arguments cmd)
                            (fn [r] (when (map? r) (apply-workspace-edit! r)))))))
 
+(defn- diags-in-range
+  "LSP diagnostics from the buffer's LSP props overlapping [lo hi), with
+   positions as {:line :character} maps built by `pos`."
+  [buf lo hi pos]
+  (->> (:props buf)
+       (filter (fn [p] (and (= :lsp (:owner p))
+                            (<= (long (:from p)) (long hi))
+                            (>= (long (:to p)) (long lo)))))
+       (mapv (fn [p]
+               {:range {:start (pos (:from p)) :end (pos (:to p))}
+                :severity (:severity p)
+                :message (str (:message p))
+                :source "lsp"}))))
+
 (defn lsp-code-action [s]
   (lsp-request-at-point s
     (fn [state sess]
@@ -1426,8 +1449,9 @@
                         [(gap/nth-line-start t ln) (gap/nth-line-end t ln)])
             pos (fn [i] (let [l (gap/line-of t i)]
                           {:line l :character (- i (gap/nth-line-start t l))}))
-            range {:start (pos lo) :end (pos hi)}]
-        (lsp/code-action (:root-id sess) (:file (cur state)) range []
+            range {:start (pos lo) :end (pos hi)}
+            diags (diags-in-range (cur state) lo hi pos)]
+        (lsp/code-action (:root-id sess) (:file (cur state)) range diags
           (fn [res]
             (let [actions (vec (filter :title res))]
               (cond
@@ -1570,12 +1594,14 @@
            vec))))
 
 (defn completion-item-for
-  "The raw LSP completion item for `label` at this document version, if any.
-   Used on accept to honour insertText/textEdit/snippets."
-  [path version label]
+  "The raw LSP completion item for `label` at this document version and
+   position, if any. Used on accept to honour insertText/textEdit/snippets;
+   looking it up by position avoids picking a same-named item from another
+   completion request."
+  [path version line ch label]
   (let [{:keys [v pos]} (get @comp-cache path)]
     (when (= v version)
-      (some (fn [[_ items]] (get items label)) (vals pos)))))
+      (get-in pos [[line ch] label]))))
 
 (defn- remember-completion! [path version line ch items]
   (let [by-label (into {} (keep (fn [i] (when-let [l (:label i)] [l i])) items))]
@@ -1651,20 +1677,25 @@
         ln (cmd/line-idx s)]
     (gap/substr t (gap/nth-line-start t ln) (gap/nth-line-end t ln))))
 
+(defn- nav-file
+  "Resolve an entry's :file against the listing's :nav-root."
+  [root f]
+  (if (.isAbsolute (java.io.File. ^String f)) f (str root "/" f)))
+
 (defn nav-jump
   "RET in an occur, imenu or rg buffer: go to that location."
   [s]
   (if-let [e (listbuf/entry-at-point s)]
     (cond
-      (:file e) (-> s (find-file (str (:nav-root (cur s)) "/" (:file e)))
-                    (goto-line (str (:line e))))
+      (:file e) (cond-> (find-file s (nav-file (:nav-root (cur s)) (:file e)))
+                  (:line e) (goto-line (str (:line e))))
       (:buf e)  (if (contains? (:bufs s) (:buf e))
                   (-> s (cmd/set-cur-buffer (:buf e)) (goto-line (str (:line e))))
                   (msg s "Source buffer is gone"))
       :else s)
     ;; rg buffers are plain text, not listbufs: parse the line under point.
     (if-let [{:keys [file line]} (nav/rg-line (line-text s))]
-      (-> s (find-file (str (:nav-root (cur s)) "/" file))
+      (-> s (find-file (nav-file (:nav-root (cur s)) file))
             (goto-line (str line)))
       s)))
 
@@ -1760,20 +1791,24 @@
     (-> s (assoc :format-on-save on)
           (msg (str "Format on save " (if on "on" "off"))))))
 
+(defn- cli-format [s]
+  (let [b (cur s)
+        out (format/format-text (:language b) (str (:text b)) (:file b)
+                                (some-> ^String (:file b) java.io.File. .getParent))]
+    (cond
+      (nil? (:language b)) (msg s "No formatter for this buffer")
+      out (-> s (update-cur #(buf/edit % 0 (count (:text %)) out))
+                (msg "Formatted"))
+      :else (msg s "No formatter available or nothing changed"))))
+
 (defn format-buffer
-  "C-c f: format with the language server when there is one, else the
+  "C-c f: format with the language server when it is installed, else with the
    language's CLI formatter."
   [s]
-  (if (lsp-session s)
-    (lsp-format s)
-    (let [b (cur s)
-          out (format/format-text (:language b) (str (:text b)) (:file b)
-                                  (some-> ^String (:file b) java.io.File. .getParent))]
-      (cond
-        (nil? (:language b)) (msg s "No formatter for this buffer")
-        out (-> s (update-cur #(buf/edit % 0 (count (:text %)) out))
-                  (msg "Formatted"))
-        :else (msg s "No formatter available or nothing changed")))))
+  (let [sess (lsp-session s)]
+    (if (and sess (not (:large-file (cur s))) (lsp/on-path? (:argv sess)))
+      (lsp-format s)
+      (cli-format s))))
 
 ;; --- Config reload ---
 
@@ -2299,6 +2334,7 @@
       (session/save-tick! editor)
       (lsp/tick! editor)
       (testres/tick! editor)
+      (deferred/tick! editor)
       (when (:exit @editor)
         ;; Clean exit: the final snapshot includes every edit, so the journal
         ;; is only deleted after that write succeeds.

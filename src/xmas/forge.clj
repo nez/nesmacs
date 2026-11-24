@@ -1,12 +1,15 @@
 (ns xmas.forge
   "Forge actions through the installed CLI (`gh` for GitHub, `glab` for GitLab).
-   xmas reads their JSON output; it never talks to the API itself."
+   xmas reads their JSON output; it never talks to the API itself. Listing is a
+   job, so a slow network call never blocks the editor."
   (:require [clojure.data.json :as json]
-            [clojure.java.shell :as shell]
             [clojure.string :as str]
             [xmas.cmd :as cmd]
+            [xmas.deferred :as deferred]
             [xmas.git :as git]
             [xmas.listbuf :as listbuf]))
+
+(def ^:private prs-buf "*Pull Requests*")
 
 (defn forge
   "Which CLI to use for `dir`: :github, :gitlab or nil."
@@ -42,16 +45,14 @@
          vec)
     (catch Exception _ nil)))
 
-(defn prs [dir]
-  (case (forge dir)
-    :github (let [{:keys [exit out]} (shell/sh "gh" "pr" "list" "--json"
-                                               "number,title,state,headRefName,url"
-                                               "--limit" "50" :dir dir)]
-              (when (zero? (long exit)) (parse-gh out)))
-    :gitlab (let [{:keys [exit out]} (shell/sh "glab" "mr" "list" "--output" "json"
-                                               "--per-page" "50" :dir dir)]
-              (when (zero? (long exit)) (parse-glab out)))
-    nil))
+(defn- prs-argv [kind]
+  (case kind
+    :github ["gh" "pr" "list" "--json" "number,title,state,headRefName,url"
+             "--limit" "50"]
+    :gitlab ["glab" "mr" "list" "--output" "json" "--per-page" "50"]))
+
+(defn parse-prs [kind s]
+  (case kind :github (parse-gh s) :gitlab (parse-glab s) nil))
 
 (defn open-url [url]
   (try
@@ -62,22 +63,32 @@
 (defn- fmt [{:keys [number state branch title]}]
   (format "#%-5s %-8s %-24s %s" number state (or branch "") title))
 
-(def ^:private prs-buf "*Pull Requests*")
-
-(defn- spec [dir]
+(defn- spec [kind dir entries]
   {:name prs-buf
    :mode :forge-mode
-   :header (str "Forge: " (clojure.core/name (or (forge dir) :unknown))
+   :header (str "Forge: " (name kind)
                 "   RET=open in browser g=refresh")
-   :entries (vec (prs dir))
+   :entries entries
    :format-entry fmt
-   :extras {:git-dir dir}})
+   :extras {:git-dir dir :forge-kind kind}})
+
+(defn- open-deferred [s kind dir root]
+  (deferred/start s
+                  {:argv (prs-argv kind)
+                   :dir root
+                   :job-name "*forge*"
+                   :build (fn [out]
+                            (if-let [entries (parse-prs kind out)]
+                              [prs-buf (spec kind dir entries)]
+                              (str (name kind) " CLI failed or not installed")))}))
 
 (defn open [s]
   (let [dir (git/current-dir (cmd/cur s))]
     (cond
       (nil? (forge dir)) (cmd/msg s "No GitHub/GitLab forge for this repository")
-      :else (listbuf/open s prs-buf (spec dir)))))
+      :else (if-let [root (git/repo-root dir)]
+              (open-deferred s (forge root) dir root)
+              (cmd/msg s "Not a git repository")))))
 
 (defn open-at-point [s]
   (if-let [e (listbuf/entry-at-point s)]
@@ -87,8 +98,12 @@
     s))
 
 (defn refresh [s]
-  (let [b (cmd/cur s)]
-    (listbuf/refresh s prs-buf (spec (:git-dir b)))))
+  (let [b (cmd/cur s)
+        kind (:forge-kind b)
+        dir (:git-dir b)]
+    (if (and kind dir)
+      (open-deferred s kind dir (git/repo-root dir))
+      s)))
 
 (def forge-keymap
   {:return open-at-point

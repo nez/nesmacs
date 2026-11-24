@@ -15,7 +15,7 @@
   (let [diff (str "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
                   "@@ -1,2 +1,2 @@\n-a\n+b\n"
                   "@@ -9 +9 @@\n-c\n+d\n")
-        hunks (#'xmas.git/split-hunks diff)]
+        hunks (git/parse-hunks diff)]
     (is (= 2 (count hunks)))
     (is (= "@@ -1,2 +1,2 @@" (:label (first hunks))))
     (is (clojure.string/includes? (:patch (second hunks)) "diff --git a/x b/x"))
@@ -37,7 +37,7 @@
       (git "init" "-q")
       (git "-c" "user.name=Tester" "-c" "user.email=t@example.com" "add" "f.txt")
       (git "-c" "user.name=Tester" "-c" "user.email=t@example.com" "commit" "-qm" "one")
-      (let [rows (git/blame (.getAbsolutePath dir) "f.txt")]
+      (let [rows (git/parse-blame (git "blame" "--line-porcelain" "--" "f.txt"))]
         (is (= 2 (count rows)))
         (is (= {:line 1 :author "Tester" :text "alpha"}
                (select-keys (first rows) [:line :author :text])))

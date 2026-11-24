@@ -37,9 +37,11 @@
   "Candidate fold ranges for `buf`, sorted and de-duplicated."
   [buf-key buf text version]
   (let [l (:language buf)
-        ts (when l (treesit/folds buf-key l text version))
-        rs (or ts (when (#{:clojure-mode :emacs-lisp-mode} (:mode buf))
-                    (lisp-ranges text)))]
+        lisp? (#{:clojure-mode :emacs-lisp-mode} (:mode buf))
+        ts (when l (if (= "clojure" (:id l))
+                      (treesit/lit-folds buf-key l text version)
+                      (treesit/folds buf-key l text version)))
+        rs (or ts (when lisp? (lisp-ranges text)))]
     (->> (or rs [])
          (filter (fn [[s e]] (> (long e) (long s))))
          (sort-by first)

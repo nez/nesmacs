@@ -187,6 +187,28 @@
           (->> (persistent! acc) distinct vec)))
       (finally (.close cursor)))))
 
+(def ^:private leaf-lit
+  #{"sym_lit" "kwd_lit" "num_lit" "str_lit" "char_lit" "regex_lit"
+    "sym_name" "kwd_name" "str_content" "comment"})
+
+(defn- form-lit? [^String t]
+  (and (.endsWith t "_lit") (not (contains? leaf-lit t))))
+
+(defn- collect-lit-folds
+  "Every nested Clojure form (`list_lit`, `vec_lit`, ...) spanning more than
+   one line. The vendored folds query only captures top-level forms; folding
+   the form at point needs the inner ones too."
+  [^TSNode node acc]
+  (let [acc (loop [i 0 acc acc]
+              (if (< i (.getNamedChildCount node))
+                (recur (inc i) (collect-lit-folds (.getNamedChild node i) acc))
+                acc))
+        [sl el ec] (node-lines node)
+        end (if (zero? (long ec)) (dec (long el)) (long el))]
+    (if (and (form-lit? (.getType node)) (> (long end) (long sl)))
+      (conj acc [(long sl) end])
+      acc)))
+
 ;; --- Per-buffer state ---
 
 (defn- parse-state [key]
@@ -233,7 +255,11 @@
         (swap! grammars assoc (:grammar l) ::failed)
         (swap! states dissoc key)
         nil))
-    nil))
+    nil)
+  ; DEBT: parsing runs on the editor thread between keystrokes. For files with
+  ; tens of thousands of lines this adds measurable latency; move to a worker
+  ; with incremental parsing (or a sidecar process) before v2.)
+)
 
 (defn state-for
   "Parsed state for `key` at `version`, parsing only when the version moved."
@@ -254,6 +280,15 @@
   [key l text version]
   (when-let [st (state-for key l text version)]
     (:folds st)))
+
+(defn lit-folds
+  "Nested form ranges from the parsed tree, for languages whose fold query is
+   top-level only (Clojure). Nil when there is no parse."
+  [key l text version]
+  (when-let [st (state-for key l text version)]
+    (when-let [tree (:tree st)]
+      (->> (collect-lit-folds (.getRootNode tree) []) distinct vec))))
+
 
 (defn line-spans
   "Spans that overlap [from, to), using the sorted-by-from vector."

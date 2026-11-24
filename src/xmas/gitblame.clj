@@ -1,22 +1,21 @@
 (ns xmas.gitblame
   "Read-only blame listing for one file. RET jumps to the line in the
-   source buffer."
+   source buffer. The `git blame` run is a job, so opening the listing never
+   blocks the editor."
   (:require [xmas.cmd :as cmd]
-            [xmas.git :as git]
-            [xmas.listbuf :as listbuf]))
+            [xmas.deferred :as deferred]
+            [xmas.git :as git]))
 
 (defn- fmt [{:keys [hash author date text]}]
   (format "%s %s %-12s %s" hash date (or author "") text))
 
-(defn- spec [buf dir path]
-  (let [entries (mapv #(assoc % :buf (:name buf) :path path)
-                      (git/blame dir path))]
-    {:name (str "*Blame " (:name buf) "*")
-     :mode :nav-mode
-     :header (str "Blame " path " (" (count entries) " lines)")
-     :entries entries
-     :format-entry fmt
-     :extras {:nav-root nil}}))
+(defn- spec [buf-name path entries]
+  {:name (str "*Blame " buf-name "*")
+   :mode :nav-mode
+   :header (str "Blame " path " (" (count entries) " lines)")
+   :entries entries
+   :format-entry fmt
+   :extras {:nav-root nil}})
 
 (defn open [s]
   (let [b (cmd/cur s)
@@ -24,10 +23,19 @@
         dir (git/current-dir b)]
     (cond
       (nil? path) (cmd/msg s "Buffer has no file")
-      (not (git/is-repo? dir)) (cmd/msg s "Not a git repository")
+
       :else
-      (let [sp (spec b dir path)]
-        (if (empty? (:entries sp))
-          (cmd/msg s "No blame (untracked or empty file)")
-          (-> s (assoc-in [:bufs (:name sp)] (listbuf/make sp))
-                (cmd/set-cur-buffer (:name sp))))))))
+      (if-let [root (git/repo-root dir)]
+        (let [name (str "*Blame " (:name b) "*")]
+          (deferred/start s
+                          {:argv ["git" "blame" "--line-porcelain" "--"
+                                  (git/path-arg root path)]
+                           :dir root
+                           :job-name "*git-blame*"
+                           :build (fn [out]
+                                    (let [entries (mapv #(assoc % :buf (:name b) :path path)
+                                                        (git/parse-blame out))]
+                                      (if (empty? entries)
+                                        "No blame (untracked or empty file)"
+                                        [name (spec (:name b) path entries)])))}))
+        (cmd/msg s "Not a git repository")))))

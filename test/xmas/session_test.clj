@@ -232,3 +232,15 @@
              :mode :python-mode :version 1})]
     (is (= "python" (:id (:language b))))
     (is (= "# " (:comment-start b)))))
+
+(deftest collapsed-folds-survive-restore
+  ;; Closed folds are editing state like point, so they belong in the session;
+  ;; JSON round-trips a set as a vector, and stale line numbers are dropped.
+  (let [snap (#'xmas.session/buffer->data
+               (assoc (buf/make "t.clj" "a\nb\nc\nd\n" nil)
+                      :mode :clojure-mode :collapsed #{0 3}))
+        back (#'xmas.session/data->buffer snap)]
+    (is (= #{0 3} (:collapsed back)))
+    (let [shrunk (#'xmas.session/data->buffer
+                   (assoc snap :text "a\nb\n" :collapsed [0 9]))]
+      (is (= #{0} (:collapsed shrunk))))))

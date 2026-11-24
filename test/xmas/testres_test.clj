@@ -45,3 +45,34 @@
       (is (= "clojure -M:test" (testres/default-command dir)))
       (finally (.delete (java.io.File. dir "deps.edn"))
                (.delete (java.io.File. dir))))))
+(deftest clojure-test-runner-output-is-parsed
+  ;; clojure -M:test prints human text, not TAP or JUnit; the default command
+  ;; still has to yield jumpable failures.
+  (let [out (str "Testing a.b-test\n"
+                 "FAIL in (adds) (src/a/b_test.clj:12)\n"
+                 "expected: (= 3 (add 1 1))\n"
+                 "ERROR in (boom) (src/a/c_test.clj:40)\n"
+                 "Ran 7 tests containing 9 assertions.\n"
+                 "1 failures, 1 errors.\n")
+        p (testres/parse out)]
+    (is (= :text (:kind p)))
+    (is (= 7 (:total p)))
+    (is (= 2 (:failed p)))
+    (is (= [{:name "adds" :file "src/a/b_test.clj" :line 12}
+            {:name "boom" :file "src/a/c_test.clj" :line 40}]
+           (mapv #(select-keys % [:name :file :line])
+                 (testres/failure-entries p))))))
+
+(deftest pytest-output-is-parsed
+  (let [out (str "test_math.py:5: AssertionError: assert 3 == 4\n"
+                 "1 failed, 2 passed in 0.03s\n")
+        p (testres/parse out)]
+    (is (= 3 (:total p)))
+    (is (= 1 (:failed p)))
+    (is (= {:file "test_math.py" :line 5}
+           (select-keys (first (testres/failure-entries p)) [:file :line])))))
+
+(deftest clojure-summary-without-failures
+  (let [p (testres/parse "Ran 578 tests containing 6299 assertions.\n0 failures, 0 errors.\n")]
+    (is (= 578 (:total p)))
+    (is (zero? (:failed p)))))

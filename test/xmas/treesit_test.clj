@@ -65,3 +65,14 @@
 
 (deftest unknown-grammar-falls-back-silently
   (is (nil? (treesit/spans "ts-no-grammar" {:grammar "does.not.Exist" :id "nope"} "x" 1))))
+(deftest clojure-lit-folds-nest
+  ;; The vendored Clojure folds query is top-level only; folding a form at
+  ;; point needs the inner list/vector/map literals too.
+  (let [text (str "(defn f [x]\n"
+                  "  (let [m {:a 1\n"
+                  "           :b 2}]\n"
+                  "    (str m)))\n")
+        rs (treesit/lit-folds (str "lit-" (hash text)) (lang/language :clojure) text 1)]
+    (is (some #{[0 3]} rs) "whole defn")
+    (is (some #{[1 2]} rs) "let binding and map")
+    (is (not-any? (fn [[s e]] (= s e)) rs))))

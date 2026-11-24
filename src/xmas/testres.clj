@@ -44,6 +44,47 @@
                   :message msg})))
        vec))
 
+(defn parse-text
+  "Failures and totals from the human output of `clojure.test` (cognitect
+   test-runner) and `pytest`. Neither prints TAP or JUnit by default."
+  [^String text]
+  (let [clj-fails (mapv (fn [[_ kind name file line]]
+                          {:ok false
+                           :name name
+                           :message (str file ":" line " " kind)})
+                        (re-seq #"(?m)^(FAIL|ERROR) in \(([^)]*)\) \(([^:\s)]+):(\d+)\)" text))
+        py-loc (re-seq #"(?m)^(\S+\.py):(\d+): (.+)$" text)
+        py-fails (if (seq py-loc)
+                   (mapv (fn [[_ file line msg]]
+                           {:ok false :name msg :file file :line (Long/parseLong line)
+                            :message (str file ":" line " " msg)})
+                         py-loc)
+                   (mapv (fn [[_ file test msg]]
+                           {:ok false
+                            :name test
+                            :message (str file (when msg (str " " msg)))})
+                         (re-seq #"(?m)^(?:FAILED|ERROR)\s+(\S+?)::(\S+)(?: - (.*))?$" text)))
+        tests (into clj-fails py-fails)
+        [total failed]
+        (cond
+          (re-find #"Ran \d+ tests" text)
+          (let [t (some-> (re-find #"Ran (\d+) tests" text) second Long/parseLong)
+                f (some->> [(re-find #"(\d+) failures?" text)
+                            (re-find #"(\d+) errors?" text)]
+                           (keep second) (map #(Long/parseLong %)) (reduce +))]
+            [t f])
+
+          (re-find #"\d+ (failed|passed)" text)
+          (let [n (fn [w] (some-> (re-find (re-pattern (str "(\\d+) " w)) text)
+                                  second Long/parseLong))
+                f (+ (or (n "failed") 0) (or (n "error") 0) (or (n "errors") 0))]
+            [(+ f (or (n "passed") 0)) f])
+
+          :else [nil nil])]
+    (when (and total (pos? (long total)))
+      {:kind :text :tests tests :total total
+       :failed (or failed (count tests))})))
+
 (defn parse
   "Parse test output. Returns {:kind :tests :total :failed} or nil."
   [^String text]
@@ -60,7 +101,7 @@
        :total (count tests)
        :failed (count (remove :ok tests))})
 
-    :else nil))
+    :else (parse-text text)))
 
 (defn- file-line
   "First file:line in a failure message, for jumping."
@@ -74,6 +115,7 @@
                (when-not (:ok t)
                  (merge {:name (str/trim (str (:class t) " " (:name t)))
                          :message (:message t)}
+                        (select-keys t [:file :line])
                         (file-line (:message t)))))
              (:tests parsed))))
 
@@ -109,15 +151,17 @@
     (doseq [[name b] pending]
       (let [parsed (try (parse (str (:text b))) (catch Exception _ nil))]
         (swap! editor update-in [:bufs name] assoc :test-parsed? true)
-        (when (and parsed (pos? (:total parsed)))
-          (swap! editor show-results parsed (:test-root b)))))))
+        (if (and parsed (pos? (:total parsed)))
+          (swap! editor show-results parsed (:test-root b))
+          (swap! editor cmd/msg
+                 "Test output not recognized; set :test-command to one that prints TAP, JUnit XML or clojure.test/pytest summaries"))))))
 
 ;; --- Command ---
 
 (defn default-command [root]
   (cond
     (.exists (java.io.File. ^String root "deps.edn")) "clojure -M:test"
-    (.exists (java.io.File. ^String root "pyproject.toml")) "pytest"
+    (.exists (java.io.File. ^String root "pyproject.toml")) "pytest -q --tb=line"
     (.exists (java.io.File. ^String root "package.json")) "npm test"
     :else ""))
 

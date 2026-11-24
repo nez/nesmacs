@@ -110,38 +110,43 @@
            (.format (DateTimeFormatter/ofPattern "yyyy-MM-dd")))
        (catch Exception _ "")))
 
-(defn blame
-  "Per-line blame for `path`: {:line :hash :author :date :text}. `--line-porcelain`
-   repeats the headers for every line, so no grouping state is needed."
-  [dir path]
-  (let [root (repo-root dir)
-        out (when root (run ["git" "blame" "--line-porcelain" "--" path] root))]
-    (when (and root out (not (str/starts-with? out "Error:")))
-      (loop [lines (str/split-lines out) cur {} acc []]
-        (if-let [line (first lines)]
-          (cond
-            (re-matches #"[0-9a-f]{40} .*" line)
-            (let [[sha _ final & _] (str/split line #"\s+")]
-              (recur (rest lines)
-                     {:hash (subs sha 0 8) :line (Long/parseLong final)}
-                     acc))
+(defn parse-blame
+  "`git blame --line-porcelain` output as {:line :hash :author :date :text}.
+   The porcelain format repeats the headers for every line, so no grouping
+   state is needed."
+  [^String out]
+  (loop [lines (str/split-lines out) cur {} acc []]
+    (if-let [line (first lines)]
+      (cond
+        (re-matches #"[0-9a-f]{40} .*" line)
+        (let [[sha _ final & _] (str/split line #"\s+")]
+          (recur (rest lines)
+                 {:hash (subs sha 0 8) :line (Long/parseLong final)}
+                 acc))
 
-            (str/starts-with? line "author ")
-            (recur (rest lines) (assoc cur :author (subs line 7)) acc)
+        (str/starts-with? line "author ")
+        (recur (rest lines) (assoc cur :author (subs line 7)) acc)
 
-            (str/starts-with? line "author-time ")
-            (recur (rest lines) (assoc cur :date (fmt-date (subs line 12))) acc)
+        (str/starts-with? line "author-time ")
+        (recur (rest lines) (assoc cur :date (fmt-date (subs line 12))) acc)
 
-            (str/starts-with? line "\t")
-            (recur (rest lines) {}
-                   (conj acc (assoc cur :text (subs line 1))))
+        (str/starts-with? line "\t")
+        (recur (rest lines) {}
+               (conj acc (assoc cur :text (subs line 1))))
 
-            :else (recur (rest lines) cur acc))
-          acc)))))
+        :else (recur (rest lines) cur acc))
+      acc)))
+
+(defn path-arg
+  "Path relative to the repo root, as git wants it for a pathspec."
+  [^String root ^String path]
+  (if (str/starts-with? path (str root java.io.File/separator))
+    (subs path (inc (count root)))
+    path))
 
 ;; --- Hunk staging ---
 
-(defn- split-hunks
+(defn parse-hunks
   "Split `git diff` output into the file header plus one map per hunk.
    Each map carries the full patch text needed to stage just that hunk."
   [^String out]
@@ -168,7 +173,7 @@
   (let [root (repo-root dir)
         out (when root (run ["git" "diff" "--no-color" "--" path] root))]
     (when (and root out (not (str/starts-with? out "Error:")))
-      (vec (split-hunks out)))))
+      (vec (parse-hunks out)))))
 
 (defn staged-hunks
   "Staged hunks for `path` (what `git diff --cached` shows)."
@@ -176,7 +181,7 @@
   (let [root (repo-root dir)
         out (when root (run ["git" "diff" "--cached" "--no-color" "--" path] root))]
     (when (and root out (not (str/starts-with? out "Error:")))
-      (vec (split-hunks out)))))
+      (vec (parse-hunks out)))))
 
 (defn apply-cached
   "Stage one hunk patch (or unstage it with `reverse?`)."

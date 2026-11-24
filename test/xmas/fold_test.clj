@@ -1,7 +1,8 @@
 (ns xmas.fold-test
   (:require [clojure.test :refer [deftest is testing]]
             [xmas.fold :as fold]
-            [xmas.gap :as gap]))
+            [xmas.gap :as gap]
+            [xmas.lang :as lang]))
 
 (defn- ranges-for [text mode]
   (fold/ranges "fold-test" {:mode mode} (gap/of text) 1))
@@ -42,3 +43,12 @@
     (is (= #{} (fold/toggle ranges #{2} 3)))
     (testing "a line outside every range changes nothing"
       (is (= #{7} (fold/toggle ranges #{7} 20))))))
+(deftest clojure-folds-come-from-nested-lits
+  (let [text (str "(defn f [x]\n"
+                  "  (let [m {:a 1\n"
+                  "           :b 2}]\n"
+                  "    (str m)))\n")
+        b {:mode :clojure-mode :language (lang/language :clojure)}
+        rs (fold/ranges (str "fold-lit-" (hash text)) b text 1)]
+    (is (some #{[0 3]} rs))
+    (is (some #{[1 2]} rs))))

@@ -431,3 +431,62 @@ not architecture.
 - Performance: the M7 targets, measured on the user's machine, not synthetic
   hardware.
 - Product: the seven-day v1.0 loop, with zero data-loss incidents.
+## M8 addenda (delivered beyond original scope)
+
+- Nested Clojure folds: the vendored query is top-level only; a tree walk
+  adds inner `list_lit`/`vec_lit`/`map_lit` ranges so `C-c TAB` inside a
+  `let` or `cond` folds the form at point.
+- `run-tests` also parses the human output of `clojure -M:test` (cognitect
+  test-runner) and `pytest -q --tb=line`; the default command for Python now
+  emits line numbers, so failures are jumpable without extra plugins.
+- Blame, hunks and forge listings run as background jobs via `xmas.deferred`,
+  so opening them never blocks the editor. Staging/unstaging still uses a
+  synchronous `git apply --cached` call; a huge patch would stall — acceptable
+  for typical hunk sizes.
+- Folds persist in the session (`:collapsed`); on restore stale line numbers
+  are dropped so a shortened file does not leave orphaned ellipses.
+- Code actions pass the diagnostics under the cursor, so quick-fixes that
+  depend on the local diagnostic appear.
+- LSP initializes for standalone files using the file's directory as the
+  project root (no `.git` or `deps.edn` required).
+- Completion items are stored keyed by (version, line, char, label), so
+  accepting a completion from the minibuffer picks exactly the item offered
+  at that position.
+
+## M9 — IDE workflow (implemented)
+
+**Goal:** end-to-end editing workflows that reuse the same primitives
+(jobs, list buffers, minibuffer) without a new framework.
+
+**Settled decisions**
+
+- No drag/right/middle/wheel mouse; no text selection yet. Navigation is
+  keyboard-only.
+- Terminals stay tmux-backed; sessions survive editor exit; no scrollback.
+- Formatters: LSP first on demand (`C-c f`/`C-c F`), CLI fallback on save.
+- Forges: GitHub (`gh`) and GitLab (`glab`) CLIs only; their JSON output is
+  parsed. No direct API calls.
+- Tests: the project's test command runs as a job; output must be TAP, JUnit
+  XML, or one of the built-in parsers (clojure.test, pytest). The default
+  commands are chosen to produce parseable output.
+- Durable props are reused for diagnostics; they survive edits and
+  repaints.
+
+**Scope**
+
+1. `C-x v b`: `git blame --line-porcelain` → list buffer; RET jumps.
+2. `C-x v s` / `C-x v u`: unstaged / staged hunks via `git diff` and
+   `git apply --cached`; `s` stages the hunk at point, `u` unstages it.
+3. `C-x v p`: `gh pr list` / `glab mr list` → list buffer; RET opens in
+   browser via `xdg-open`.
+4. `M-x run-tests`: job + parser → `*Test Results*`; RET on a failure opens
+   the source file at the line.
+5. LSP snippets on completion accept (placeholders, defaults, choices).
+6. Tests: job smoke, blame/hunk/forge parser unit tests, pty round-trip for
+   the lists.
+
+**Done when:** every command runs without blocking, lists are jumpable, and
+the pty scripts pass with a real repository and real CLIs.
+
+**Not here:** `git commit`, `git push`, interactive rebase, blame annotations
+in the source margin, workspace symbol search, or a second non-editor app.
