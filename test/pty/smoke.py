@@ -32,6 +32,7 @@ pid, fd = pty.fork()
 if pid == 0:
     os.chdir(ROOT)
     os.environ["HOME"] = str(home)
+    os.environ["XMAS_NREPL_PORT"] = "0"
     os.execvp("clojure", ["clojure", "-J-Duser.home=" + str(home), "-M:run"])
 
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
