@@ -9,7 +9,8 @@
   (:import [java.io File]
            [java.nio.file Files]))
 
-(def ^:private markers [".git" "deps.edn" "project.clj" ".project"])
+(def ^:private markers [".git" "deps.edn" "project.clj" ".project"
+                        "pyproject.toml" "setup.py" "package.json"])
 
 (defn root
   "Nearest ancestor of `start` (file or directory) holding a project marker.

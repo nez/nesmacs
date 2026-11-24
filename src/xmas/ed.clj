@@ -6,12 +6,18 @@
             [xmas.cmd :as cmd]
             [xmas.complete :as complete]
             [xmas.dired :as dired]
+            [xmas.fold :as fold]
+            [xmas.forge :as forge]
+            [xmas.format :as format]
             [xmas.git :as git]
+            [xmas.gitblame :as gitblame]
             [xmas.gitcommit :as gitcommit]
+            [xmas.githunk :as githunk]
             [xmas.gitlog :as gitlog]
             [xmas.gitstatus :as gitstatus]
             [xmas.gap :as gap]
             [xmas.job :as job]
+            [xmas.lang :as lang]
             [xmas.listbuf :as listbuf]
             [xmas.lsp :as lsp]
             [xmas.mode :as mode]
@@ -22,10 +28,13 @@
             [xmas.props :as props]
             [xmas.rect :as rect]
             [xmas.session :as session]
+            [xmas.snippet :as snippet]
             [xmas.term :as t]
             [xmas.terminal :as terminal]
             [xmas.terminal.tmux :as tmux]
+            [xmas.testres :as testres]
             [xmas.text :as text]
+            [xmas.treesit :as treesit]
             [xmas.view :as view]
             [xmas.window :as win]
             [xmas.log :as log]
@@ -333,35 +342,51 @@
           (remember-auto-saves! saved)
           (swap! editor-atom reset-edit-counts saved))))))
 
+(defn- formatted-text
+  "Buffer text after format-on-save, or nil when nothing changed."
+  [s b]
+  (when (:format-on-save s)
+    (format/format-text (:language b) (str (:text b)) (:file b)
+                        (some-> ^String (:file b) java.io.File. .getParent))))
+
 (defn save-buffer-named
   "Save buffer `name` (a :bufs key). Writes the file and records the saved
    version in the edit journal, so a crash before the next session snapshot
-   can't replay edits the file already has."
+   can't replay edits the file already has. With :format-on-save set, the
+   language's formatter runs first (LSP formatting stays explicit, since it is
+   async)."
   [s name]
-  (let [b (cmd/buf s name)
-        f (:file b)]
+  (let [b0 (cmd/buf s name)]
     (cond
-      (nil? b) (msg s (str "No buffer: " name))
-      (str/blank? f) (msg s "No file")
+      (nil? b0) (msg s (str "No buffer: " name))
+      (str/blank? (:file b0)) (msg s "No file")
       :else
-      (try (let [raw  (str (:text b))
-                 ;; Preserve the EOL style the file had on read. Without
-                 ;; this, opening and saving a CRLF file silently rewrote
-                 ;; it as LF — a destructive edit we didn't intend.
-                 bytes (if (= :crlf (:line-ending b))
-                         (str/replace raw "\n" "\r\n") raw)]
-             (persist/atomic-spit f bytes)
-             (session/note-saved! name (:version b)))
-           (let [bak (auto-save-file f)]
-             (when (.exists bak) (.delete bak)))
-           (-> s (update-in [:bufs name] #(assoc % :modified false :edit-count 0))
-                 (msg (str "Wrote " f)))
-           (catch Exception e (msg-error s "Save failed" e))))))
+      (try
+        (let [s (if-let [fmt (formatted-text s b0)]
+                  (update-in s [:bufs name] #(buf/edit % 0 (count (:text %)) fmt))
+                  s)
+              b (cmd/buf s name)
+              f (:file b)
+              raw  (str (:text b))
+              ;; Preserve the EOL style the file had on read. Without
+              ;; this, opening and saving a CRLF file silently rewrote
+              ;; it as LF — a destructive edit we didn't intend.
+              bytes (if (= :crlf (:line-ending b))
+                      (str/replace raw "\n" "\r\n") raw)]
+          (persist/atomic-spit f bytes)
+          (session/note-saved! name (:version b))
+          (let [bak (auto-save-file f)]
+            (when (.exists bak) (.delete bak)))
+          (-> s (update-in [:bufs name] #(assoc % :modified false :edit-count 0))
+                (msg (str "Wrote " f))))
+        (catch Exception e (msg-error s "Save failed" e))))))
 
 (defn save-buffer [s] (save-buffer-named s (:buf s)))
 
 (defn- open-buf [s path b]
-  (let [s (-> s (assoc-in [:bufs path] b) (cmd/set-cur-buffer path))
+  (let [l (lang/language-for-file path)
+        b (cond-> b l (assoc :language l :comment-start (:comment-start l)))
+        s (-> s (assoc-in [:bufs path] b) (cmd/set-cur-buffer path))
         m (mode/mode-for-file path)]
     (cond-> s m (mode/set-major-mode m))))
 
@@ -421,6 +446,7 @@
       (let [file (:file (get-in s [:bufs target]))
             [s' fallback] (ensure-fallback-buf (update s :bufs dissoc target) nil)]
         (when file (lsp/close-doc! file))
+        (treesit/forget! target)
         (-> s'
             (update :windows win/replace-buffer target fallback)
             (cond-> (= target (:buf s')) (cmd/set-cur-buffer fallback))
@@ -647,7 +673,7 @@
                           (vec (:candidates (completer input s))))
       :else s)))
 
-(declare handle-key)
+(declare handle-key completion-item-for)
 
 ;; --- Buffer props ---
 
@@ -1177,20 +1203,50 @@
 
 (defn- symbol-prefix [^String text p]
   (let [before (gap/substr text 0 p)]
-    (or (second (re-find #"[\w\-\*\+!\?\.]*$" before)) "")))
+    (or (second (re-find #"[$\w\-\*\+!\?\./#]*$" before)) "")))
+
+(defn- lsp-range-offsets
+  "Char offsets for an LSP range within `text`."
+  [text {:keys [start end]}]
+  (let [n (gap/line-count text)
+        clamp-line (fn [l] (min (max 0 (long l)) (dec n)))
+        base (fn [l c] (+ (gap/nth-line-start text (clamp-line l)) (max 0 (long c))))]
+    [(base (:line start) (:character start))
+     (base (:line end) (:character end))]))
+
+(defn- completion-replacement
+  "Compute [from to text caret] for accepting `item` with `prefix` at point."
+  [s item prefix p]
+  (let [b (cur s)
+        text (str (or (:insertText item) (:label item)))
+        [text caret] (if (and (:insertTextFormat item)
+                              (== 2 (long (:insertTextFormat item))))
+                       (snippet/expand text)
+                       [text nil])]
+    (if-let [te (:textEdit item)]
+      (let [[from to] (lsp-range-offsets (:text b) (:range te))]
+        [from to (str (or (:newText te) text)) caret])
+      [(- p (count prefix)) p text caret])))
 
 (defn complete-symbol-at-point
   "C-c i: complete the symbol at point asynchronously from buffers and the
-   project. The candidate is inserted replacing the prefix."
+   project. The candidate is inserted replacing the prefix; LSP items honour
+   textEdit and snippet insertTextFormat."
   [s]
   (let [b (cur s) p (:point b)
+        path (:file b) version (:version b)
         prefix (symbol-prefix (str (:text b)) p)]
     (mini-start s "Complete: "
       (fn [s chosen]
-        (let [b (cur s)]
+        (let [b (cur s)
+              item (when path (completion-item-for path version chosen))]
           (if (and (= prefix (gap/substr (:text b) (- p (count prefix)) p))
                    (<= (+ p (count chosen)) (count (:text b))))
-            (cmd/edit s (- p (count prefix)) p chosen)
+            (if item
+              (let [[from to repl caret] (completion-replacement s item prefix p)]
+                (-> s (cmd/edit from to repl)
+                      (cmd/goto-char (+ from (long (or caret (count repl)))))))
+              (cmd/edit s (- p (count prefix)) p chosen))
             (msg s "Buffer moved; completion skipped"))))
       {:sources (complete/sources-for s)})))
 
@@ -1203,9 +1259,25 @@
 
 ;; --- LSP commands ---
 
-(def ^:private default-lsp-command ["clojure-lsp"])
+(defn- lsp-argv
+  "Server argv for language `l`: per-language config wins, then the legacy
+   global override, then the registry default."
+  [s l]
+  (or (get-in s [:lsp-commands (:id l)])
+      (:lsp-command s)
+      (:lsp l)))
 
-(defn- lsp-command [s] (or (:lsp-command s) default-lsp-command))
+(defn- lsp-session
+  "Resolve {:root :root-id :argv :language} for the current buffer, or nil."
+  [s]
+  (let [b (cur s)
+        l (:language b)]
+    (when (and (:file b) l (:lsp l))
+      (when-let [root (project-root s)]
+        {:root root
+         :root-id (lsp/server-id root (:id l))
+         :argv (lsp-argv s l)
+         :language l}))))
 
 (defn- char-col
   "0-based UTF-16 character index of point within its line — what LSP wants."
@@ -1216,16 +1288,22 @@
         ln (gap/line-of t p)]
     (- p (gap/nth-line-start t ln))))
 
-(defn- lsp-when-ready
-  "Run `(f state root-id)` once the project's LSP server is initialized.
-   `f` returns the new editor state; it is applied with swap! because the
-   initialize handshake completes later, on the editor loop."
+(defn- lsp-request-at-point
+  "Run `(f state session)` once the language server for the current buffer is
+   ready. `f` returns the new editor state and is applied with swap! because
+   the initialize handshake completes later, on the editor loop."
   [s f]
-  (if-let [root (project-root s)]
-    (let [root-id (str root)]
-      (lsp/ensure! root-id (lsp-command s) root
-                   (fn [_] (swap! editor f root-id))))
-    (msg s "Not in a project")))
+  (let [path (:file (cur s))]
+    (cond
+      (nil? path)                (msg s "Buffer has no file")
+      (not (lsp/supports? path)) (msg s "No language server for this file")
+      :else
+      (if-let [sess (lsp-session s)]
+        (do (lsp/ensure! (:root-id sess) (:argv sess) (:root sess)
+                         (:id (:language sess))
+                         (fn [_] (swap! editor f sess)))
+            s)
+        (msg s "Not in a project")))))
 
 (defn- show-hover
   "Echo an LSP Hover result in the message bar."
@@ -1237,6 +1315,14 @@
         txt (some-> txt (str/replace #"\s+" " "))]
     (when txt
       (swap! editor assoc :msg (str "LSP: " (subs txt 0 (min 200 (count txt))))))))
+
+(defn- location->entry
+  [loc]
+  (let [uri   (or (:uri loc) (:targetUri loc))
+        range (or (:range loc) (:targetRange loc))]
+    (when (and uri range)
+      {:file (lsp/uri->path uri)
+       :line (inc (max 0 (get-in range [:start :line] 0)))})))
 
 (defn- jump-to-definition
   "Move point to an LSP Location / LocationLink, exact line and column."
@@ -1254,28 +1340,224 @@
                        ln (min line (dec (gap/line-count t)))]
                    (cmd/goto-char s (+ (gap/nth-line-start t ln) ch)))))))))
 
-(defn- lsp-at-point
-  "Ask the project's server something at point and hand `cb` the result."
-  [s request cb]
-  (let [path (:file (cur s))]
-    (cond
-      (nil? path)                (msg s "Buffer has no file")
-      (not (lsp/supports? path)) (msg s "LSP is only wired for Clojure/EDN files")
-      :else
-      (lsp-when-ready
-        s
-        (fn [state root-id]
-          (request root-id (:file (cur state)) (cmd/line-idx state) (char-col state) cb)
-          state)))))
+(defn lsp-hover [s]
+  (lsp-request-at-point s
+    (fn [state sess]
+      (lsp/hover (:root-id sess) (:file (cur state))
+                 (cmd/line-idx state) (char-col state) show-hover)
+      state)))
 
-(defn lsp-hover [s]      (lsp-at-point s lsp/hover show-hover))
-(defn lsp-definition [s] (lsp-at-point s lsp/definition jump-to-definition))
+(defn lsp-definition [s]
+  (lsp-request-at-point s
+    (fn [state sess]
+      (lsp/definition (:root-id sess) (:file (cur state))
+                      (cmd/line-idx state) (char-col state) jump-to-definition)
+      state)))
+
+(defn- show-references [res]
+  (let [entries (vec (keep location->entry res))]
+    (swap! editor
+           (fn [s]
+             (if (empty? entries)
+               (msg s "No references")
+               (-> s (assoc-in [:bufs "*References*"]
+                               (listbuf/make
+                                 {:name "*References*"
+                                  :mode :nav-mode
+                                  :header (str (count entries) " references")
+                                  :entries entries
+                                  :format-entry (fn [{:keys [file line]}]
+                                                  (format "%s:%d" file line))
+                                  :extras {:nav-root nil}}))
+                     (cmd/set-cur-buffer "*References*")))))))
+
+(defn lsp-references [s]
+  (lsp-request-at-point s
+    (fn [state sess]
+      (lsp/references (:root-id sess) (:file (cur state))
+                      (cmd/line-idx state) (char-col state) show-references)
+      state)))
+
+;; --- Workspace edits (rename, code actions, formatting) ---
+
+(defn- text-for-path
+  "Current text of `path`: the open buffer, else the file on disk."
+  [s path]
+  (if-let [b (some (fn [[_ b]] (when (= path (:file b)) b)) (:bufs s))]
+    (str (:text b))
+    (let [f (java.io.File. ^String path)]
+      (when (.exists f)
+        (try (slurp f :encoding "UTF-8") (catch Exception _ nil))))))
+
+(defn- apply-edit-group
+  [s {:keys [path edits]}]
+  (let [s (if (contains? (:bufs s) path) s (find-file s path))]
+    (if (contains? (:bufs s) path)
+      (update-in s [:bufs path]
+                 (fn [b] (reduce (fn [b {:keys [from to text]}]
+                                   (buf/edit b from to text))
+                                 b edits)))
+      s)))
+
+(defn apply-workspace-edit!
+  "Apply a WorkspaceEdit to open buffers (opening files as needed). Runs on
+   the editor loop; returns the message shown."
+  [edit]
+  (let [groups (lsp/workspace-edits edit (fn [path] (text-for-path @editor path)))]
+    (if (empty? groups)
+      (swap! editor msg "No edits to apply")
+      (do (swap! editor (fn [s] (reduce apply-edit-group s groups)))
+          (swap! editor msg (str "Applied edits in " (count groups) " file(s)"))))))
+
+(defn- apply-code-action!
+  [sess action]
+  (let [cmd (:command action)]
+    (when-let [edit (:edit action)] (apply-workspace-edit! edit))
+    (when cmd
+      (lsp/execute-command (:root-id sess) (:command cmd) (:arguments cmd)
+                           (fn [r] (when (map? r) (apply-workspace-edit! r)))))))
+
+(defn lsp-code-action [s]
+  (lsp-request-at-point s
+    (fn [state sess]
+      (let [t (:text (cur state))
+            ln (cmd/line-idx state)
+            [lo hi] (or (cmd/region-bounds state)
+                        [(gap/nth-line-start t ln) (gap/nth-line-end t ln)])
+            pos (fn [i] (let [l (gap/line-of t i)]
+                          {:line l :character (- i (gap/nth-line-start t l))}))
+            range {:start (pos lo) :end (pos hi)}]
+        (lsp/code-action (:root-id sess) (:file (cur state)) range []
+          (fn [res]
+            (let [actions (vec (filter :title res))]
+              (cond
+                (empty? actions) (swap! editor msg "No code actions")
+                (= 1 (count actions)) (apply-code-action! sess (first actions))
+                :else
+                (swap! editor
+                       (fn [s]
+                         (mini-start
+                           s "Code action: "
+                           (fn [st input]
+                             (if-let [a (first (filter #(= input (:title %)) actions))]
+                               (do (apply-code-action! sess a) st)
+                               st))
+                           (fn [_ _]
+                             {:completed ""
+                              :candidates (vec (map :title actions))}))))))))
+        state))))
+
+(defn lsp-signature-help [s]
+  (lsp-request-at-point s
+    (fn [state sess]
+      (lsp/signature-help (:root-id sess) (:file (cur state))
+                          (cmd/line-idx state) (char-col state)
+                          (fn [res]
+                            (let [sigs (:signatures res)
+                                  idx (max 0 (or (:activeSignature res) 0))
+                                  sig (get sigs idx)]
+                              (when-let [label (or (:label sig) (:label (first sigs)))]
+                                (swap! editor assoc :msg (str "LSP: " label))))))
+      state)))
+
+(defn- symbol-entries
+  "Flatten DocumentSymbol trees (or a flat SymbolInformation vector)."
+  [res]
+  (letfn [(walk [items]
+            (mapcat (fn [d]
+                      (let [name (str (:name d))
+                            line (or (get-in d [:selectionRange :start :line])
+                                     (get-in d [:location :range :start :line])
+                                     (get-in d [:range :start :line]) 0)
+                            entry (cond-> {:name name :line (inc line)}
+                                    (get-in d [:location :uri])
+                                    (assoc :file (lsp/uri->path (get-in d [:location :uri]))))]
+                        (cons entry (walk (:children d)))))
+                    items))]
+    (vec (walk res))))
+
+(defn lsp-document-symbols [s]
+  (lsp-request-at-point s
+    (fn [state sess]
+      (lsp/document-symbol (:root-id sess) (:file (cur state))
+                           (fn [res]
+                             (let [entries (symbol-entries res)]
+                               (swap! editor
+                                      (fn [s]
+                                        (if (empty? entries)
+                                          (msg s "No symbols")
+                                          (-> s
+                                              (assoc-in [:bufs "*Imenu*"]
+                                                        (listbuf/make
+                                                          {:name "*Imenu*"
+                                                           :mode :nav-mode
+                                                           :header (str (count entries) " symbols")
+                                                           :entries (mapv #(assoc % :buf (:file (cur state))) entries)
+                                                           :format-entry (fn [{:keys [line name]}]
+                                                                           (format "%5d  %s" line name))
+                                                           :extras {:nav-root nil}}))
+                                              (cmd/set-cur-buffer "*Imenu*"))))))))
+      state)))
+
+(defn- format-options [s] {:tabSize (or (:indent (:language (cur s))) 2)
+                           :insertSpaces true})
+
+(defn lsp-format [s]
+  (lsp-request-at-point s
+    (fn [state sess]
+      (let [path (:file (cur state))]
+        (lsp/formatting (:root-id sess) path (format-options state)
+                        (fn [edits]
+                          (if (seq edits)
+                            (apply-workspace-edit! {:changes {(lsp/path->uri path) edits}})
+                            (swap! editor msg "Already formatted")))))
+      state)))
+
+(defn lsp-format-region [s]
+  (if-let [[lo hi] (cmd/region-bounds s)]
+    (lsp-request-at-point s
+      (fn [state sess]
+        (let [path (:file (cur state))
+              t (:text (cur state))
+              ln-lo (gap/line-of t lo)
+              ln-hi (gap/line-of t hi)
+              start-col (- lo (gap/nth-line-start t ln-lo))
+              end-col (- hi (gap/nth-line-start t ln-hi))
+              range {:start {:line ln-lo :character start-col}
+                     :end {:line ln-hi :character end-col}}]
+          (lsp/range-formatting (:root-id sess) path range (format-options state)
+                                (fn [edits]
+                                  (if (seq edits)
+                                    (apply-workspace-edit! {:changes {(lsp/path->uri path) edits}})
+                                    (swap! editor msg "Already formatted"))))
+          state)))
+    (msg s "No region")))
+
+;; --- Rename ---
+
+(defn lsp-rename [s]
+  (lsp-request-at-point s
+    (fn [state sess]
+      (let [path (:file (cur state))
+            line (cmd/line-idx state)
+            ch   (char-col state)]
+        (mini-start
+          state
+          "Rename to: "
+          (fn [st new-name]
+            (when-not (str/blank? new-name)
+              (lsp/rename (:root-id sess) path line ch new-name
+                          (fn [edit] (if edit
+                                       (apply-workspace-edit! edit)
+                                       (swap! editor msg "Rename failed")))))
+            st)))
+      state)))
 
 ;; Completion is cache + push, never blocking: a cache miss starts one async
 ;; request and returns the cached hits (usually none); when the reply lands we
 ;; stash it and nudge the minibuffer to re-run its sources, which now hit the
 ;; cache. So a slow server only delays the *list*, never a keystroke.
-(defonce ^:private comp-cache (atom {}))     ; path -> {:v version :pos {[line ch] labels}}
+(defonce ^:private comp-cache (atom {}))     ; path -> {:v version :pos {[line ch] {label item}}}
 (defonce ^:private comp-inflight (atom {}))  ; [path version line ch] -> millis
 
 (def ^:private comp-inflight-ttl-ms 5000)
@@ -1283,16 +1565,25 @@
 (defn- cached-completion [path version line ch prefix]
   (let [{:keys [v pos]} (get @comp-cache path)]
     (when (and (= v version) (contains? pos [line ch]))
-      (->> (get pos [line ch])
+      (->> (keys (get pos [line ch]))
            (filter #(str/starts-with? % prefix))
            vec))))
 
-(defn- remember-completion! [path version line ch labels]
-  (swap! comp-cache
-         (fn [m]
-           (if (= version (:v (get m path)))
-             (assoc-in m [path :pos [line ch]] labels)
-             (assoc m path {:v version :pos {[line ch] labels}})))))
+(defn completion-item-for
+  "The raw LSP completion item for `label` at this document version, if any.
+   Used on accept to honour insertText/textEdit/snippets."
+  [path version label]
+  (let [{:keys [v pos]} (get @comp-cache path)]
+    (when (= v version)
+      (some (fn [[_ items]] (get items label)) (vals pos)))))
+
+(defn- remember-completion! [path version line ch items]
+  (let [by-label (into {} (keep (fn [i] (when-let [l (:label i)] [l i])) items))]
+    (swap! comp-cache
+           (fn [m]
+             (if (= version (:v (get m path)))
+               (assoc-in m [path :pos [line ch]] by-label)
+               (assoc m path {:v version :pos {[line ch] by-label}}))))))
 
 (defn- refresh-completion!
   "Make complete/tick! re-run the active minibuffer's sources so a freshly
@@ -1305,9 +1596,9 @@
   [prefix ctx]
   (let [state (:state ctx)
         b     (cmd/cur state)
-        root  (when (:file b) (project-root state))]
-    (when (and root (:file b) (lsp/supports? (:file b)))
-      (let [root-id  (str root)
+        l     (:language b)]
+    (if (and (:file b) l (:lsp l) (lsp-session state))
+      (let [{:keys [root-id]} (lsp-session state)
             path     (:file b)
             version  (or (:version b) 0)
             line     (cmd/line-idx state)
@@ -1318,7 +1609,9 @@
                        (< (- (System/currentTimeMillis) t) comp-inflight-ttl-ms))]
         (cond
           (not (lsp/server-exists? root-id))
-          (do (lsp/ensure! root-id (lsp-command state) root (fn [_])) [])
+          (do (when-let [{:keys [root argv language]} (lsp-session state)]
+                (lsp/ensure! root-id argv root (:id language) (fn [_])))
+              [])
 
           (not (lsp/ready? root-id)) []
           (or inflight cached)       cached
@@ -1328,12 +1621,12 @@
             (lsp/completion root-id path line ch
                             (fn [res]
                               (let [items  (cond (map? res)    (:items res)
-                                                 (vector? res) res)
-                                    labels (vec (keep :label items))]
-                                (remember-completion! path version line ch labels)
+                                                 (vector? res) res)]
+                                (remember-completion! path version line ch items)
                                 (swap! comp-inflight dissoc key)
                                 (refresh-completion!))))
-            []))))))
+            [])))
+      [])))
 
 (defn- project-search
   "C-x p g: run rg over the project as a job; RET on a hit opens it."
@@ -1395,10 +1688,27 @@
         (-> s (assoc-in [:bufs name] (nav/imenu-buffer name (:buf s) syms))
               (cmd/set-cur-buffer name))))))
 
+(declare format-buffer toggle-fold fold-all unfold-all git-blame git-stage-hunk
+         git-unstage-hunk forge-prs)
+
 (def ^:private cx-c-map
   {\i complete-symbol-at-point
    \h lsp-hover
-   \t terminal-open})
+   \t terminal-open
+   \a lsp-code-action
+   \f format-buffer
+   \F lsp-format-region
+   \r lsp-references
+   \R lsp-rename
+   \g lsp-signature-help
+   \m lsp-document-symbols
+   :tab toggle-fold})
+
+(def ^:private cx-v-map
+  {\b git-blame
+   \s git-stage-hunk
+   \u git-unstage-hunk
+   \p forge-prs})
 
 (def ^:private nav-keys {:return nav-jump})
 
@@ -1408,6 +1718,62 @@
   {:return nav-jump
    \g      job/rerun
    [:ctrl \c] {[:ctrl \k] job/kill}})
+
+;; --- Folding ---
+
+(defn toggle-fold
+  "C-c TAB: collapse or expand the form at point."
+  [s]
+  (let [b (cur s)
+        ranges (fold/ranges (:buf s) b (:text b) (:version b))
+        line (cmd/line-idx s)]
+    (if (empty? ranges)
+      (msg s "Nothing to fold")
+      (cmd/update-cur s #(assoc % :collapsed
+                                     (fold/toggle ranges (set (:collapsed %)) line))))))
+
+(defn fold-all [s]
+  (let [b (cur s)
+        ranges (fold/ranges (:buf s) b (:text b) (:version b))]
+    (cmd/update-cur s #(assoc % :collapsed (set (map first ranges))))))
+
+(defn unfold-all [s]
+  (cmd/update-cur s #(assoc % :collapsed #{})))
+
+;; --- M9: git blame, hunk staging, forge, tests ---
+
+(defn git-blame [s] (gitblame/open s))
+(defn git-stage-hunk [s] (githunk/open s false))
+(defn git-unstage-hunk [s] (githunk/open s true))
+(defn forge-prs [s] (forge/open s))
+
+(defn run-tests [s]
+  (let [root (or (project-root s) (System/getProperty "user.dir"))
+        default (or (:test-command s) (testres/default-command root))]
+    (mini-start s (str "Test command (blank = " (if (str/blank? default) "none" default) "): ")
+      (fn [s input]
+        (testres/run s (if (str/blank? input) default input)))
+      (fn [_ _] {:completed "" :candidates []}))))
+
+(defn toggle-format-on-save [s]
+  (let [on (not (:format-on-save s))]
+    (-> s (assoc :format-on-save on)
+          (msg (str "Format on save " (if on "on" "off"))))))
+
+(defn format-buffer
+  "C-c f: format with the language server when there is one, else the
+   language's CLI formatter."
+  [s]
+  (if (lsp-session s)
+    (lsp-format s)
+    (let [b (cur s)
+          out (format/format-text (:language b) (str (:text b)) (:file b)
+                                  (some-> ^String (:file b) java.io.File. .getParent))]
+      (cond
+        (nil? (:language b)) (msg s "No formatter for this buffer")
+        out (-> s (update-cur #(buf/edit % 0 (count (:text %)) out))
+                  (msg "Formatted"))
+        :else (msg s "No formatter available or nothing changed")))))
 
 ;; --- Config reload ---
 
@@ -1535,7 +1901,25 @@
    "git-status"                  (cmd-entry git-status "Show git status for the current project.")
    "git-commit"                  (cmd-entry gitcommit/commit-at-point "Commit staged changes.")
    "git-diff"                    (cmd-entry diff-open-at-point "Show diff for the entry at point.")
-   "git-log"                     (cmd-entry gitlog/show-commit "Show commit log.")})
+   "git-log"                     (cmd-entry gitlog/show-commit "Show commit log.")
+   "git-blame"                   (cmd-entry git-blame "Show blame for the current file.")
+   "git-stage-hunk"              (cmd-entry git-stage-hunk "Stage a hunk of the current file.")
+   "git-unstage-hunk"            (cmd-entry git-unstage-hunk "Unstage a hunk of the current file.")
+   "forge-prs"                   (cmd-entry forge-prs "List pull/merge requests with gh or glab.")
+   "run-tests"                   (cmd-entry run-tests "Run the project's tests and parse TAP/JUnit output.")
+   "lsp-hover"                   (cmd-entry lsp-hover "Show hover information at point.")
+   "lsp-definition"              (cmd-entry lsp-definition "Jump to the definition at point.")
+   "lsp-references"              (cmd-entry lsp-references "List references to the symbol at point.")
+   "lsp-rename"                  (cmd-entry lsp-rename "Rename the symbol at point across the project.")
+   "lsp-code-action"             (cmd-entry lsp-code-action "Choose a code action at point.")
+   "lsp-signature-help"          (cmd-entry lsp-signature-help "Show the signature at point.")
+   "lsp-document-symbols"        (cmd-entry lsp-document-symbols "List symbols from the language server.")
+   "format-buffer"               (cmd-entry format-buffer "Format the buffer (LSP, else CLI).")
+   "format-region"               (cmd-entry lsp-format-region "Format the region through the language server.")
+   "toggle-format-on-save"       (cmd-entry toggle-format-on-save "Toggle formatting with the CLI formatter before save.")
+   "toggle-fold"                 (cmd-entry toggle-fold "Fold or unfold the form at point.")
+   "fold-all"                    (cmd-entry fold-all "Fold every range in the buffer.")
+   "unfold-all"                  (cmd-entry unfold-all "Unfold every range in the buffer.")})
 
 (defn- register-builtin-commands [s]
   (assoc s :commands (builtin-commands)))
@@ -1737,6 +2121,7 @@
                 \p         {\f project-find-file
                             \g project-search}
                \g         git-status
+               \v         cx-v-map
                \0         delete-window
                \1         delete-other-windows
                \2         split-window-below
@@ -1913,6 +2298,7 @@
       (auto-save-tick! editor)
       (session/save-tick! editor)
       (lsp/tick! editor)
+      (testres/tick! editor)
       (when (:exit @editor)
         ;; Clean exit: the final snapshot includes every edit, so the journal
         ;; is only deleted after that write succeeds.
@@ -1934,6 +2320,10 @@
       (mode/register :fundamental :major)
       (mode/register :clojure-mode :major)
       (mode/register :emacs-lisp-mode :major)
+      (mode/register :python-mode :major)
+      (mode/register :javascript-mode :major)
+      (mode/register :typescript-mode :major)
+      (mode/register :tsx-mode :major)
       (mode/register :dired-mode :major :keymap dired-keymap)
       (mode/register :buflist-mode :major :keymap buflist-keymap)
       (mode/register :job-mode :major :keymap job-keymap)
@@ -1943,6 +2333,8 @@
       (mode/register :gitstatus-mode :major :keymap gitstatus-keymap)
       (mode/register :gitdiff-mode :major :keymap gitdiff-keymap)
       (mode/register :gitlog-mode :major :keymap gitlog-keymap)
+      (mode/register :hunks-mode :major :keymap githunk/hunks-keymap)
+      (mode/register :forge-mode :major :keymap forge/forge-keymap)
       (mode/register :gitcommit-mode :major :keymap gitcommit/gitcommit-keymap)))
 
 (defn- initial-state [rows cols]
@@ -1951,8 +2343,12 @@
        :kill [] :msg nil :mini nil :mini-history []
        :windows (win/leaf "*scratch*") :cur-window []
        :rows rows :cols cols
-       :completion-sources {:default [complete/buffers complete/buffer-symbols]
-                            :clojure-mode [complete/buffer-symbols complete/project-symbols lsp-completion-source]}}
+       :completion-sources
+       (into {:default [complete/buffers complete/buffer-symbols]}
+             (for [[_ l] lang/languages
+                   :when (:lsp l)]
+               [(:mode l) [complete/buffer-symbols complete/project-symbols
+                           lsp-completion-source]]))}
       register-builtin-modes
       register-builtin-commands))
 

@@ -391,7 +391,7 @@
 (deftest command-completer-returns-matches
   (let [s (with-commands (make-state "hello"))
         {:keys [completed candidates]} (#'xmas.ed/command-completer "for" s)]
-    (is (= "forward-" completed))
+    (is (= "for" completed))
     (is (every? #(.startsWith ^String % "for") candidates))))
 
 (deftest c-u-sets-prefix-arg-to-4

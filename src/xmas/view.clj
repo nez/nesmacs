@@ -1,10 +1,12 @@
 (ns xmas.view
   (:require [clojure.string :as str]
             [xmas.face :as face]
+            [xmas.fold :as fold]
             [xmas.gap :as gap]
             [xmas.props :as props]
             [xmas.term :as t]
             [xmas.text :as text]
+            [xmas.treesit :as treesit]
             [xmas.window :as win]))
 
 (def faces
@@ -18,6 +20,13 @@
    :string    {:fg 107 :bg nil :bold false}
    :keyword   {:fg 180 :bg nil :bold false}
    :builtin   {:fg 67  :bg nil :bold true}
+   :function  {:fg 81  :bg nil :bold false}
+   :type      {:fg 215 :bg nil :bold false}
+   :variable  {:fg 189 :bg nil :bold false}
+   :number    {:fg 176 :bg nil :bold false}
+   :constant  {:fg 173 :bg nil :bold false}
+   :operator  {:fg 146 :bg nil :bold false}
+   :fold      {:fg 244 :bg nil :bold false}
    :match     {:fg 232 :bg 180 :bold false}
    :diag-error   {:fg 231 :bg 124 :bold true}
    :diag-warning {:fg 232 :bg 136 :bold false}
@@ -27,7 +36,7 @@
    :diff-hunk    {:fg 67  :bg nil :bold true}
    :diff-meta    {:fg 244 :bg nil :bold false}})
 
-(defn- ensure-visible [content point scroll rows]
+(defn- ensure-visible [content point scroll rows folds]
   ;; A pane with body-rows <= 0 (e.g. a 1-row split that gets 0 body rows
   ;; after reserving the modeline) has nowhere to show the point, so
   ;; scrolling it produces out-of-range line indices — the old "anchor on
@@ -36,13 +45,17 @@
   (if (<= rows 0)
     scroll
     (let [point-line  (gap/line-of content point)
-          scroll-line (gap/line-of content scroll)]
+          folds (fold/effective folds point-line)
+          scroll-line (fold/visible-start folds (gap/line-of content scroll))
+          pd (fold/visible-before folds point-line)
+          sd (fold/visible-before folds scroll-line)]
       (cond
-        (< point scroll)
-        (gap/nth-line-start content point-line)
+        (< pd sd)
+        (gap/nth-line-start content (fold/line-at-display folds pd))
 
-        (>= (- point-line scroll-line) rows)
-        (gap/nth-line-start content (- point-line (dec rows)))
+        (>= (- pd sd) rows)
+        (gap/nth-line-start content
+                            (fold/line-at-display folds (- pd (dec rows))))
 
         :else scroll))))
 
@@ -69,8 +82,9 @@
 (defn- write-spans!
   "Write row at (screen-row, screen-col) with face spans. Content is clipped
    to `width` columns (at most), and remaining columns are padded with spaces.
-  `hscroll` is the horizontal offset into glyphs (0 for modeline etc.)."
-  [screen-row screen-col width glyphs spans hscroll]
+  `hscroll` is the horizontal offset into glyphs (0 for modeline etc.). When
+  `fold?` is true, an ellipsis marks a collapsed range."
+  [screen-row screen-col width glyphs spans hscroll & [fold?]]
   (when (pos? width)
     (t/move screen-row screen-col)
     (let [n (count glyphs)
@@ -79,8 +93,10 @@
           avail (if scrolled (dec width) width)
           end   (text/pos-at-col glyphs start n avail)
           ;; visible display width used
-          used-cols (cond-> (text/display-width glyphs start end)
-                      scrolled inc)]
+          used-cols (+ (cond-> (text/display-width glyphs start end)
+                         scrolled inc)
+                       (if (and fold? (< (text/display-width glyphs start end) avail))
+                         1 0))]
       (when scrolled (set-face! :default) (t/tw "$"))
       (doseq [[from to face] spans]
         (let [a (max (long from) start)
@@ -88,6 +104,9 @@
           (when (< a b)
             (set-face! face)
             (t/tw (safe-text (subs glyphs a b))))))
+      (t/reset-sg)
+      (when (and fold? (< (text/display-width glyphs start end) avail))
+        (set-face! :fold) (t/tw "…"))
       (t/reset-sg)
       (when (< used-cols width)
         (t/tw (pad-spaces (- width used-cols)))))))
@@ -214,41 +233,50 @@
   "Render visible lines and return the possibly-extended :font-lock cache and
    its viewport window. If large-file? is true, skip fontification and buffer
    props for performance; the region still paints because it is a render-time
-   prop."
-  [rect content mode props region scroll hscroll font-lock window large-file?]
+   prop. `folds` are the collapsed ranges to skip; `collapsed` marks the lines
+   that show an ellipsis. `hl-spans` are whole-buffer Tree-sitter spans (nil
+   falls back to the line tokenizer)."
+  [rect content mode props region scroll hscroll font-lock window large-file?
+   folds collapsed hl-spans]
   (let [{:keys [row col rows cols]} rect
         body-rows (dec rows)
-        start-line  (gap/line-of content scroll)
+        start-line  (fold/visible-start folds (gap/line-of content scroll))
         total-lines (gap/line-count content)
-        [font-lock0 init-state] (if large-file?
+        use-ts? (and (some? hl-spans) (not large-file?))
+        [font-lock0 init-state] (if (or large-file? use-ts?)
                                   [(or font-lock []) :normal]
                                   (extend-font-lock mode content (or font-lock []) start-line))
         result
-        (loop [ln start-line r 0 state init-state font-lock font-lock0]
+        (loop [ln start-line r 0 state init-state font-lock font-lock0 last-line start-line]
           (if (and (< r body-rows) (< ln total-lines))
             (let [pos  (gap/nth-line-start content ln)
                   eol  (gap/nth-line-end content ln)
                   line (line-str content pos eol)
                   len  (count line)
                   [toks nxt-state font-lock']
-                  (if large-file?
+                  (if (or large-file? use-ts?)
                     [[[0 len :default]] :normal font-lock]
                     (line-font-spans mode content font-lock ln state))
+                  hl (when use-ts? (treesit/line-spans hl-spans pos eol))
                   line-props (cond-> (if large-file? [] (props/in-range props pos eol))
                                region (conj region))
-                  spans  (apply-props toks line-props pos len)]
-              (write-spans! (+ row r) col cols line spans hscroll)
-              (recur (inc ln) (inc r) nxt-state font-lock'))
-            {:r r :font-lock font-lock}))]
+                  spans  (apply-props toks (concat hl line-props) pos len)]
+              (if (fold/hidden? folds ln)
+                (recur (inc ln) r nxt-state font-lock' last-line)
+                (do
+                  (write-spans! (+ row r) col cols line spans hscroll
+                                (contains? collapsed ln))
+                  (recur (inc ln) (inc r) nxt-state font-lock' (inc ln)))))
+            {:r r :font-lock font-lock :last last-line}))]
     (loop [r (:r result)]
       (when (< r body-rows)
         (fill-row! (+ row r) col cols :default)
         (recur (inc r))))
-    (if large-file?
+    (if (or large-file? use-ts?)
       {:font-lock (:font-lock result) :font-lock-window nil}
       {:font-lock (prune-font-lock (:font-lock result) window
-                                   start-line (min total-lines (+ start-line body-rows)))
-       :font-lock-window [start-line (min total-lines (+ start-line body-rows))]})))
+                                   start-line (:last result))
+       :font-lock-window [start-line (:last result)]})))
 
 (defn- render-window-modeline
   [rect buf-name modified mode minor-modes point-line cursor-col current?]
@@ -284,26 +312,42 @@
         point (:point buf)
         mark (:mark buf)
         mode (:mode buf)
+        version (:version buf)
+        large-file? (:large-file buf)
+        fold-ranges (if large-file? [] (fold/ranges buf-name buf content version))
+        collapsed-in (set (:collapsed buf))
         scroll-in (:scroll window 0)
         hscroll-in (:hscroll window 0)
-        scroll (if current? (ensure-visible content point scroll-in body-rows) scroll-in)
+        scroll (if current? (ensure-visible content point scroll-in body-rows fold-ranges)
+                   scroll-in)
         point-line (gap/line-of content point)
+        folds (fold/effective fold-ranges point-line)
+        ;; Only folds that are actually applied may show an ellipsis; a fold
+        ;; opened because point sits inside it must not claim to be collapsed.
+        collapsed (into #{} (filter collapsed-in) (map first folds))
+        cursor-row (- (fold/visible-before folds point-line)
+                      (fold/visible-before folds
+                                           (fold/visible-start folds
+                                                               (gap/line-of content scroll))))
         cursor-col (text/display-width content (gap/nth-line-start content point-line) point)
         hscroll (if current? (ensure-hvisible hscroll-in cursor-col cols) hscroll-in)
         [r-lo r-hi] (when (and mark current?) (sort [(long mark) (long point)]))
         region (when (and r-lo (< r-lo r-hi))
                  (props/make r-lo r-hi :region {:owner :region :priority 100}))
         props (:props buf)
-        large-file? (:large-file buf)
+        hl-spans (when (and (not large-file?) (:language buf))
+                   (treesit/spans buf-name (:language buf) content version))
         {:keys [font-lock font-lock-window]}
         (render-window-body rect content mode props region scroll hscroll
-                            (:font-lock buf) (:font-lock-window buf) large-file?)]
+                            (:font-lock buf) (:font-lock-window buf) large-file?
+                            folds collapsed hl-spans)]
     (render-window-modeline rect (or (:title buf) (:name buf)) (:modified buf) mode (:minor-modes buf)
                             point-line cursor-col current?)
     {:window (assoc window :scroll scroll :hscroll hscroll
-                           :point-line point-line :cursor-col cursor-col)
+                           :point-line point-line :cursor-col cursor-col
+                           :cursor-row cursor-row)
      :buf-name buf-name
-     :version (:version buf)
+     :version version
      :font-lock font-lock
      :font-lock-window font-lock-window}))
 
@@ -395,7 +439,7 @@
   (let [buf (get (:bufs state) (:buffer window))]
     [(:buffer window) (:version buf) (:point buf) (:mark buf)
      (:mode buf) (:minor-modes buf) (:modified buf) (:name buf) (:title buf)
-     (:props buf) (:scroll window) (:hscroll window) current?]))
+     (:props buf) (:scroll window) (:hscroll window) (:collapsed buf) current?]))
 
 (defn- echo-sig [state]
   (cond
@@ -460,10 +504,8 @@
             (let [rect (get layouts cur-path)
                   win  (get @rendered cur-path)]
               (when (and rect win (> (:rows rect) 1) (pos? (:cols rect)))
-                (let [content (:text (get (:bufs state) (:buffer win)))
-                      scroll-line (gap/line-of content (:scroll win))
-                      body-rows (dec (:rows rect))
-                      row-in-win (min (- (:point-line win) scroll-line) (dec body-rows))
+                (let [body-rows (dec (:rows rect))
+                      row-in-win (max 0 (min (long (:cursor-row win)) (dec body-rows)))
                       col-in-win (cond-> (- (:cursor-col win) (:hscroll win))
                                          (pos? (:hscroll win)) inc)]
                   (t/move (+ (:row rect) row-in-win) (+ (:col rect) col-in-win))))))

@@ -2,8 +2,11 @@
   "Git porcelain wrappers. All functions return plain data; they never mutate
    the editor state. Callers are responsible for displaying results.
    Commands are argv vectors; no shell strings."
-  (:require [clojure.string :as str])
-  (:import [java.io File]))
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str])
+  (:import [java.io File]
+           [java.time Instant ZoneId]
+           [java.time.format DateTimeFormatter]))
 
 (defn- run [argv dir]
   (let [pb (ProcessBuilder. (into-array String argv))
@@ -13,6 +16,21 @@
             out (slurp (.getInputStream p) :encoding "UTF-8")
             _ (.waitFor p)]
         out)
+      (catch Exception e (str "Error: " (.getMessage e))))))
+
+(defn- run-stdin
+  "Run `argv` feeding `input` on stdin. Used for `git apply`."
+  [argv dir ^String input]
+  (let [pb (ProcessBuilder. (into-array String argv))
+        _ (.directory pb (File. dir))
+        _ (.redirectErrorStream pb true)]
+    (try
+      (let [p (.start pb)]
+        (with-open [w (io/writer (.getOutputStream p) :encoding "UTF-8")]
+          (.write w input))
+        (let [out (slurp (.getInputStream p) :encoding "UTF-8")]
+          (.waitFor p)
+          out))
       (catch Exception e (str "Error: " (.getMessage e))))))
 
 (defn repo-root [dir]
@@ -83,3 +101,88 @@
     (when root (str/trim (run ["git" "rev-parse" "--abbrev-ref" "HEAD"] root)))))
 
 (defn is-repo? [dir] (boolean (repo-root dir)))
+
+;; --- Blame ---
+
+(defn- fmt-date [^String epoch]
+  (try (-> (Instant/ofEpochSecond (Long/parseLong epoch))
+           (.atZone (ZoneId/systemDefault))
+           (.format (DateTimeFormatter/ofPattern "yyyy-MM-dd")))
+       (catch Exception _ "")))
+
+(defn blame
+  "Per-line blame for `path`: {:line :hash :author :date :text}. `--line-porcelain`
+   repeats the headers for every line, so no grouping state is needed."
+  [dir path]
+  (let [root (repo-root dir)
+        out (when root (run ["git" "blame" "--line-porcelain" "--" path] root))]
+    (when (and root out (not (str/starts-with? out "Error:")))
+      (loop [lines (str/split-lines out) cur {} acc []]
+        (if-let [line (first lines)]
+          (cond
+            (re-matches #"[0-9a-f]{40} .*" line)
+            (let [[sha _ final & _] (str/split line #"\s+")]
+              (recur (rest lines)
+                     {:hash (subs sha 0 8) :line (Long/parseLong final)}
+                     acc))
+
+            (str/starts-with? line "author ")
+            (recur (rest lines) (assoc cur :author (subs line 7)) acc)
+
+            (str/starts-with? line "author-time ")
+            (recur (rest lines) (assoc cur :date (fmt-date (subs line 12))) acc)
+
+            (str/starts-with? line "\t")
+            (recur (rest lines) {}
+                   (conj acc (assoc cur :text (subs line 1))))
+
+            :else (recur (rest lines) cur acc))
+          acc)))))
+
+;; --- Hunk staging ---
+
+(defn- split-hunks
+  "Split `git diff` output into the file header plus one map per hunk.
+   Each map carries the full patch text needed to stage just that hunk."
+  [^String out]
+  (let [lines (str/split-lines out)
+        header (vec (take-while #(not (str/starts-with? % "@@")) lines))
+        hunks (reduce (fn [acc line]
+                        (if (str/starts-with? line "@@")
+                          (conj acc [line])
+                          (if (seq acc)
+                            (update acc (dec (count acc)) conj line)
+                            acc)))
+                      [] (drop-while #(not (str/starts-with? % "@@")) lines))]
+    (map-indexed
+      (fn [i hunk]
+        {:index i
+         :label (first hunk)
+         :lines (vec hunk)
+         :patch (str (str/join "\n" (concat header hunk)) "\n")})
+      hunks)))
+
+(defn diff-hunks
+  "Unstaged hunks for `path` (what `git diff` shows)."
+  [dir path]
+  (let [root (repo-root dir)
+        out (when root (run ["git" "diff" "--no-color" "--" path] root))]
+    (when (and root out (not (str/starts-with? out "Error:")))
+      (vec (split-hunks out)))))
+
+(defn staged-hunks
+  "Staged hunks for `path` (what `git diff --cached` shows)."
+  [dir path]
+  (let [root (repo-root dir)
+        out (when root (run ["git" "diff" "--cached" "--no-color" "--" path] root))]
+    (when (and root out (not (str/starts-with? out "Error:")))
+      (vec (split-hunks out)))))
+
+(defn apply-cached
+  "Stage one hunk patch (or unstage it with `reverse?`)."
+  [dir patch reverse?]
+  (if-let [root (repo-root dir)]
+    (run-stdin (cond-> ["git" "apply" "--cached"]
+                 reverse? (conj "--reverse"))
+               root patch)
+    "Not in a git repository"))

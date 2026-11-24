@@ -223,3 +223,12 @@
             (is ok)
             (is (contains? (:bufs restored) "*test*")))))
       (finally (delete-tree dir)))))
+
+(deftest restored-buffers-rederive-language-data
+  ;; Language data is derived, not persisted: a restored Python buffer must
+  ;; keep highlighting and comment syntax without reopening the file.
+  (let [b (#'xmas.session/data->buffer
+            {:name "app.py" :text "x = 1\n" :file "/tmp/app.py"
+             :mode :python-mode :version 1})]
+    (is (= "python" (:id (:language b))))
+    (is (= "# " (:comment-start b)))))

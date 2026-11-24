@@ -97,17 +97,27 @@ The rest follows from the same decision:
 - **Programs** — `M-!` and `M-|` are jobs: output streams into a buffer while
   typing stays responsive, `C-c C-k` kills, `g` reruns.
 - **Git** — `C-x g` status with stage/unstage, diff, log and commit. Diff and
-  log buffers are ordinary buffers with faces and navigation.
+  log buffers are ordinary buffers with faces and navigation. `C-x v b` blame,
+  `C-x v s`/`C-x v u` stage or unstage one hunk through `git apply --cached`,
+  `C-x v p` lists pull/merge requests via `gh` or `glab`.
+- **Languages** — one registry (`xmas.lang`) maps extension to mode, comment
+  syntax, formatter, language server, Tree-sitter grammar and query set.
+  Clojure/EDN, Python, JavaScript, TypeScript and TSX highlight through
+  vendored nvim-treesitter queries, with the line tokenizer as fallback.
+  `C-c TAB` folds, `C-c f` formats.
 - **LSP** — diagnostics as props, `M-.` definition, `C-c h` hover, `C-c i`
-  symbol completion for Clojure/EDN files through `:lsp-command`
-  (`clojure-lsp` by default).
+  symbol completion (honouring `textEdit` and snippets), `C-c r` references,
+  `C-c R` rename, `C-c a` code actions, `C-c g` signature help, `C-c m`
+  document symbols, `C-c f`/`C-c F` format buffer/region. One server per
+  project root and language; servers start on demand.
+- **Tests** — `M-x run-tests` runs the project's command as a job and parses
+  JUnit XML or TAP into `*Test Results*`; RET jumps to a failure.
 - **Durability** — session restore for buffers, windows, points and props;
   per-command journal; auto-save with a recovery prompt; safe quit dialog.
 - **Rendering** — one named face map, durable props, incremental font-lock,
   large-file mode above 1 MB or 100k lines (the region still paints there).
 
-Highlighting ships for Clojure/EDN and Emacs Lisp. Packages are Clojure
-libraries on `deps.edn`; there is no package manager yet.
+Packages are Clojure libraries on `deps.edn`; there is no package manager yet.
 
 ## Configure it in Clojure
 
@@ -155,8 +165,9 @@ tested, replayed from a journal, and rendered by another process.
 | `xmas.props`, `xmas.face` | durable text properties, tokenizer |
 | `xmas.api`, `xmas.keymap`, `xmas.mode` | extension surface, key parsing, modes and hooks |
 | `xmas.proc`, `xmas.job`, `xmas.lsp` | processes, streaming job buffers, language server |
+| `xmas.lang`, `xmas.treesit`, `xmas.fold`, `xmas.format`, `xmas.snippet` | language registry, Tree-sitter backend, folding, CLI formatters, LSP snippets |
 | `xmas.terminal`, `xmas.terminal.tmux` | terminal buffers behind a backend protocol; the tmux control-mode backend |
-| `xmas.git*`, `xmas.project`, `xmas.dired`, `xmas.buflist`, `xmas.nav`, `xmas.complete` | git app, project search, file and buffer navigation, completion |
+| `xmas.git*`, `xmas.githunk`, `xmas.gitblame`, `xmas.forge`, `xmas.testres`, `xmas.project`, `xmas.dired`, `xmas.buflist`, `xmas.nav`, `xmas.complete` | git apps (status, log, hunk staging, blame, forge), test reports, project search, file and buffer navigation, completion |
 | `xmas.session`, `xmas.persist`, `xmas.term` | session and journal, persistence, raw terminal I/O |
 
 Design rules live in [PRD.md](PRD.md): commands stay pure, one atom, one
@@ -167,7 +178,7 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 540 tests / 6,184 assertions
+make test    # 578 tests / 6,299 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # integration tests against a real clojure-lsp
@@ -186,11 +197,11 @@ generative tests for buffers, props and text.
 
 Pre-1.0. Solid editing and text properties are done; async jobs, project
 navigation, git, LSP, completion and tmux-backed terminals have working slices.
-The language platform (M8: Tree-sitter highlighting, with queries vendored
-from nvim-treesitter under Apache-2.0, plus LSP breadth for Clojure/EDN,
-Python, TypeScript and JavaScript) and the IDE workflow (M9: git history and
-staging, forge, test results, snippets) are accepted and gate 1.0; debugging
-(M10) is post-1.0.
+The language platform (M8: Tree-sitter highlighting and folding, with queries
+vendored from nvim-treesitter under Apache-2.0, plus LSP breadth for Clojure/EDN,
+Python, TypeScript and JavaScript) and the IDE workflow (M9: blame, hunk
+staging, forge, test results, snippets) are implemented. Debugging (M10) is
+post-1.0.
 [ROADMAP.md](ROADMAP.md) tracks the rest and defines 1.0: a full week as the
 primary editor without falling back to another tool.
 

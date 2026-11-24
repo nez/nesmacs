@@ -1,7 +1,9 @@
 (ns xmas.mode
   "Major and minor mode registry. Lives as data on the editor state under
-   :modes {name {:type :major|:minor :keymap {...}}} and :hooks {name [fns]}."
-  (:require [xmas.cmd :as cmd]))
+   :modes {name {:type :major|:minor :keymap {...}}} and :hooks {name [fns]}.
+   File-extension -> mode comes from the language registry in `xmas.lang`."
+  (:require [xmas.cmd :as cmd]
+            [xmas.lang :as lang]))
 
 ;; --- Registration ---
 
@@ -53,15 +55,7 @@
 
 ;; --- File extension → mode ---
 
-(def ^:private ext->mode
-  {".clj" :clojure-mode ".cljc" :clojure-mode ".cljs" :clojure-mode
-   ".edn" :clojure-mode
-   ".el"  :emacs-lisp-mode})
-
 (defn mode-for-file
-  "Return the major-mode symbol matching the filename's extension, or nil."
+  "Return the major-mode keyword matching the filename, or nil."
   [^String filename]
-  (when filename
-    (let [dot (.lastIndexOf filename ".")]
-      (when (pos? dot)
-        (get ext->mode (.substring filename dot))))))
+  (lang/mode-for-file filename))

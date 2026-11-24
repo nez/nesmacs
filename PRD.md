@@ -27,13 +27,14 @@ Packages are Clojure libraries on `deps.edn`.
 
 ## Current state
 
-The editor implements the M0-M7 scope in [ROADMAP.md](ROADMAP.md): Emacs-style
+The editor implements the M0-M9 scope in [ROADMAP.md](ROADMAP.md): Emacs-style
 editing, durable text properties, async jobs, project navigation, completion,
-git, LSP, crash-safe sessions, and tmux-backed terminals. M8 (language
-platform) and M9 (IDE workflow) are accepted and gate v1.0; M10 (debugging and
-platform extras) is post-v1.0. [README.md](README.md) has the current feature
-list, test counts and benchmarks. v1.0 is still pending M8/M9 plus a full week
-of primary-editor use.
+git, LSP, crash-safe sessions, tmux-backed terminals, the language platform
+(Tree-sitter highlighting and folds, LSP breadth, formatting) and the IDE
+workflow (blame, hunk staging, forge, test reports, snippets). M10 (debugging
+and platform extras) is post-v1.0. [README.md](README.md) has the current
+feature list, test counts and benchmarks. v1.0 is still pending a full week of
+primary-editor use.
 
 Terminals are core, not an experiment. `xmas.terminal` keeps the editor side
 pure — screen text, props and an input queue — behind a `Backend` protocol;
@@ -49,8 +50,8 @@ Clojure in the same context.
 ## Roadmap
 
 Milestones, scope and the settled decisions live in [ROADMAP.md](ROADMAP.md).
-M0-M7 are implemented; M8 and M9 gate v1.0; M10 is post-v1.0. v1.0 is pending
-M8/M9 plus a full week of primary-editor use.
+M0-M9 are implemented; M10 is post-v1.0. v1.0 is pending a full week of
+primary-editor use.
 
 ## Principles
 

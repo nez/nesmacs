@@ -3,19 +3,21 @@
    `xmas.proc` for the server process and `clojure.data.json` for the wire.
 
    Deliberately small: full-document sync, diagnostics as props, hover,
-   definition, completion. Positions are UTF-16 code units (the LSP default),
-   which is exactly what Java/Clojure strings index by, so no conversion.
+   definition, completion, references, rename, code actions, signature help,
+   document symbols and formatting. Positions are UTF-16 code units (the LSP
+   default), which is exactly what Java/Clojure strings index by, so no
+   conversion.
 
-   Servers are started on demand (first hover/definition/completion) and
-   restarted lazily if the process dies. A slow server never blocks typing:
-   requests are async and `tick!` reads output from the editor loop.
+   Servers are started on demand (first request) and restarted lazily if the
+   process dies. A slow server never blocks typing: requests are async and
+   `tick!` reads output from the editor loop.
 
-   shortcut: no rename/code-action/references/workspace-edit, and diagnostics
-   are applied by absolute offset only (no incremental per-line tracking).
-   Extend when a real workload needs it."
+   One server per (project root, language): a Clojure and a Python server in
+   the same project must not share a handle."
   (:require [clojure.string :as str]
             [clojure.data.json :as json]
             [xmas.gap :as gap]
+            [xmas.lang :as lang]
             [xmas.proc :as proc]
             [xmas.props :as props]
             [xmas.log :as log])
@@ -28,7 +30,7 @@
 
 (defn- utf8-len ^long [^String s] (alength (.getBytes s "UTF-8")))
 
-(defn- path->uri
+(defn path->uri
   "file: URI for `path`. Uses File.toURI so spaces and non-ASCII are escaped."
   [^String path]
   (str (.toURI (java.io.File. path))))
@@ -89,10 +91,11 @@
   [root-id]
   (boolean (get-in @servers [root-id :initialized?])))
 
-(defn- start! [root-id argv dir]
+(defn- start! [root-id argv dir language-id]
   (let [h (proc/start {:argv argv :dir dir :keep-stdin? true :stderr :log})]
     (swap! servers assoc root-id
            {:handle h :inbox (atom "") :pending {} :root dir
+            :language-id language-id
             :initialized? false :docs {}})))
 
 (defn- drop! [root-id]
@@ -135,27 +138,34 @@
             :contentChanges [{:text text}]})
   (note-version! root-id path version))
 
-(defn supports?
-  "True when this client can declare `path` to the configured server.
-   The client is wired for Clojure and EDN files only."
-  [path]
-  (boolean (and path (re-find #"\.(clj|cljc|cljs|edn)$" (str path)))))
+(defn server-id
+  "Opaque key for one server: project root plus language."
+  [root language-id]
+  (str root "|" language-id))
 
-(def ^:private language-id "clojure")
+(defn supports?
+  "True when `path` belongs to a language with a configured server."
+  [path]
+  (boolean (:lsp (lang/language-for-file path))))
+
+(defn language-id-for [path]
+  (:id (lang/language-for-file path)))
 
 (defn- sync-docs! [root-id state]
   (let [s (srv root-id)]
     (when (:initialized? s)
       (doseq [[_ b] (:bufs state)]
         (when-let [path (:file b)]
-          (when (and (supports? path)
-                     (or (= path (:root s))
-                         (str/starts-with? path (str (:root s) java.io.File/separator))))
-            (let [v (or (:version b) 0)
-                  seen (get-in s [:docs path])]
-              (cond
-                (nil? seen)      (did-open! root-id path (str (:text b)) v language-id)
-                (not= seen v)    (did-change! root-id path (str (:text b)) v)))))))))
+          (let [l (lang/language-for-file path)]
+            (when (and l
+                       (= (:id l) (:language-id s))
+                       (or (= path (:root s))
+                           (str/starts-with? path (str (:root s) java.io.File/separator))))
+              (let [v (or (:version b) 0)
+                    seen (get-in s [:docs path])]
+                (cond
+                  (nil? seen)   (did-open! root-id path (str (:text b)) v (:id l))
+                  (not= seen v) (did-change! root-id path (str (:text b)) v))))))))))
 
 (defn close-doc!
   "Notify every server that has `path` open that the document closed."
@@ -249,33 +259,43 @@
   "Start the server for `root-id` if absent and run the initialize handshake.
    `cb` runs once the server is ready — immediately if it already is, otherwise
    queued behind the handshake. Safe to call repeatedly and concurrently."
-  [root-id argv dir cb]
-  (cond
-    (ready? root-id)
-    (when cb (cb nil))
-
-    (server-exists? root-id)
-    (queue-init! root-id cb)
-
-    :else
-    (do
-      (start! root-id argv dir)
-      (queue-init! root-id cb)
-      (request! root-id "initialize"
-                {:processId (.pid (ProcessHandle/current))
-                 :rootUri (path->uri dir)
-                 :capabilities {:textDocument {:synchronization {:dynamicRegistration false}
-                                               :hover {}
-                                               :definition {}
-                                               :completion {:completionItem {:snippetSupport false}}
-                                               :publishDiagnostics {}}}}
-                (fn [result]
-                  (swap! servers update root-id assoc :initialized? true)
-                  (notify! root-id "initialized" {})
-                  (log/log "LSP initialized" root-id)
-                  (let [cbs (:after-init (srv root-id))]
-                    (swap! servers update root-id assoc :after-init [])
-                    (doseq [c cbs] (c result))))))))
+  ([root-id argv dir cb]
+   (ensure! root-id argv dir "clojure" cb))
+  ([root-id argv dir language-id cb]
+   (if (ready? root-id)
+     (when cb (cb nil))
+     (if (server-exists? root-id)
+       (queue-init! root-id cb)
+       (do
+         (start! root-id argv dir language-id)
+         (queue-init! root-id cb)
+         (request! root-id "initialize"
+                   {:processId (.pid (ProcessHandle/current))
+                    :rootUri (path->uri dir)
+                    :capabilities
+                    {:textDocument {:synchronization {:dynamicRegistration false}
+                                    :hover {}
+                                    :definition {}
+                                    :references {}
+                                    :rename {:prepareSupport false}
+                                    :codeAction {}
+                                    :signatureHelp {}
+                                    :documentSymbol {}
+                                    :formatting {}
+                                    :rangeFormatting {}
+                                    :completion {:completionItem {:snippetSupport true
+                                                                  :documentationFormat ["plaintext"]}}
+                                    :publishDiagnostics {}}
+                     :workspace {:workspaceEdit {:documentChanges false}}}}
+                   (fn [result]
+                     (swap! servers update root-id
+                            assoc :initialized? true
+                            :capabilities (get-in result [:capabilities]))
+                     (notify! root-id "initialized" {})
+                     (log/log "LSP initialized" root-id)
+                     (let [cbs (:after-init (srv root-id))]
+                       (swap! servers update root-id assoc :after-init [])
+                       (doseq [c cbs] (c result))))))))))
 
 (defn- at-pos
   "Per-request document + position params, shared by hover/definition/completion."
@@ -291,6 +311,75 @@
 
 (defn completion [root-id path line char cb]
   (request! root-id "textDocument/completion" (at-pos path line char) cb))
+
+(defn references [root-id path line char cb]
+  (request! root-id "textDocument/references"
+            (assoc (at-pos path line char)
+                   :context {:includeDeclaration true})
+            cb))
+
+(defn rename [root-id path line char new-name cb]
+  (request! root-id "textDocument/rename"
+            (assoc (at-pos path line char) :newName new-name)
+            cb))
+
+(defn code-action [root-id path range diagnostics cb]
+  (request! root-id "textDocument/codeAction"
+            {:textDocument {:uri (path->uri path)}
+             :range range
+             :context {:diagnostics (vec diagnostics)}}
+            cb))
+
+(defn signature-help [root-id path line char cb]
+  (request! root-id "textDocument/signatureHelp" (at-pos path line char) cb))
+
+(defn document-symbol [root-id path cb]
+  (request! root-id "textDocument/documentSymbol"
+            {:textDocument {:uri (path->uri path)}} cb))
+
+(defn formatting [root-id path opts cb]
+  (request! root-id "textDocument/formatting"
+            {:textDocument {:uri (path->uri path)}
+             :options (merge {:tabSize 2 :insertSpaces true} opts)}
+            cb))
+
+(defn range-formatting [root-id path range opts cb]
+  (request! root-id "textDocument/rangeFormatting"
+            {:textDocument {:uri (path->uri path)}
+             :range range
+             :options (merge {:tabSize 2 :insertSpaces true} opts)}
+            cb))
+
+(defn execute-command [root-id command args cb]
+  (request! root-id "workspace/executeCommand"
+            {:command command :arguments (vec args)} cb))
+
+(defn workspace-edits
+  "Normalize a WorkspaceEdit into [{:path :edits [{:from :to :text}]}], with
+   absolute char offsets, sorted descending so applying them in order is safe.
+   `text-for` returns the current text of a path (nil if unavailable).
+   File create/rename/delete operations are ignored: xmas does not edit the
+   filesystem behind the user's back."
+  [edit text-for]
+  (when (map? edit)
+    (let [pairs (concat (for [[uri edits] (:changes edit)] [uri edits])
+                        (for [d (:documentChanges edit)
+                              :when (nil? (:kind d))]
+                          [(get-in d [:textDocument :uri]) (:edits d)]))]
+      (->> pairs
+           (keep (fn [[uri edits]]
+                   (when (and uri (seq edits))
+                     (let [path (uri->path uri)
+                           text (text-for path)]
+                       (when text
+                         {:path path
+                          :edits (->> edits
+                                      (keep (fn [e]
+                                              (when-let [[f t] (lsp-range->offsets text (:range e))]
+                                                {:from f :to t :text (str (or (:newText e) ""))})))
+                                      (sort-by :from >)
+                                      vec)})))))
+           (vec)))))
 
 (defn tick!
   "Editor-loop step: sync open documents and read server output. Applies

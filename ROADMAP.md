@@ -39,11 +39,9 @@ claim this project is testing.
 
 ## Status
 
-Milestones M0-M7 are implemented to the scope described below. M8 (language
-platform) and M9 (IDE workflow) are accepted and must ship before v1.0; M10
-(debugging and platform extras) is post-v1.0. v1.0 is not declared yet: it
-requires M8/M9 plus a full week as the primary editor (see
-[Definition of v1.0](#definition-of-v10)). Current features, test counts and
+Milestones M0-M9 are implemented to the scope described below. M10 (debugging
+and platform extras) is post-v1.0. v1.0 is not declared yet: it requires a full
+week as the primary editor (see [Definition of v1.0](#definition-of-v10)). Current features, test counts and
 benchmarks live in [README.md](README.md); this file keeps the milestone record
 and the settled decisions.
 
@@ -259,7 +257,7 @@ usable, and no failure mode leaves a broken terminal.
 
 Size M. Risk medium.
 
-## M8 — Language platform (accepted, before v1.0)
+## M8 — Language platform (implemented)
 
 **Goal:** edit the four supported languages as first-class languages without
 writing parsers, language servers or per-language code. Everything
@@ -272,10 +270,12 @@ protocol client.
 - Tree-sitter is an optional runtime backend: `io.github.bonede/tree-sitter`
   plus per-grammar Maven artifacts. That binding supports JDK 8+, so Java 17
   leaves room to move to the official binding later.
-- Queries are vendored from nvim-treesitter (Apache-2.0): highlights, folds,
-  locals, injections, and indents. Grammar repositories (MIT) supply only what
-  nvim-treesitter lacks and the grammar pins. GNU Emacs `treesit` queries are
-  GPLv3 and are not copied while xmas stays MIT.
+- Queries are vendored from nvim-treesitter (Apache-2.0): highlights and
+  folds. Locals, injections and indents are not consumed yet: indentation is
+  the formatter's job, and no feature needs the other two. Grammar
+  repositories (MIT) supply only what nvim-treesitter lacks and the grammar
+  pins. GNU Emacs `treesit` queries are GPLv3 and are not copied while xmas
+  stays MIT.
 - Languages: Clojure/EDN, Python, TypeScript, JavaScript. Emacs Lisp keeps its
   existing mode; unknown extensions open as plain text.
 - Debugging is post-v1.0 (M10).
@@ -284,10 +284,10 @@ protocol client.
 
 1. Mode registry as data: extension -> mode, comment syntax, formatter, LSP
    command, grammar, query set, indentation. Adding a language is data.
-2. A `:parser` per buffer behind a small interface: incremental edit,
-   byte->char offset conversion, parsing outside the render loop, skipped in
-   large-file mode. A missing grammar or native library falls back to the
-   tokenizer or plain text.
+2. A `:parser` per buffer behind a small interface: parse on the editor
+   thread between keystrokes, cached per buffer version, byte->char offset
+   conversion, skipped in large-file mode. A missing grammar or native library
+   falls back to the tokenizer or plain text.
 3. Highlighting for the four languages by mapping query captures to
    `xmas.view/faces`.
 4. LSP breadth on the existing client: references, rename, code actions,
@@ -295,7 +295,8 @@ protocol client.
    workspace edits for multi-file changes.
 5. Format-on-save: LSP formatting first, per-mode CLI fallback (`cljfmt`,
    `ruff format`, `prettier`).
-6. Folding and imenu from the Tree-sitter tree once highlighting is stable.
+6. Folding from the Tree-sitter `folds.scm` query (paren-depth fallback for
+   Lisp); imenu and document symbols through LSP.
 7. Tests: parser and offset unit tests, query mapping, a pty highlighting
    smoke, and `make lsp` coverage for each supported server. A missing grammar
    or server is a covered path, never a crash.
@@ -306,9 +307,9 @@ protocol client.
   editor never clones a query repository at runtime.
 - Resolve `; inherits:` while vendoring: TypeScript inherits `ecma`, and TSX
   adds the JSX rules.
-- Normalize the Neovim-specific predicates (`#lua-match?`, `#set!`, and
-  `#any-of?` if the binding does not implement it) in the vendoring step, so
-  the runtime only sees predicates the JNI binding supports.
+- Normalize Neovim-specific predicates in the vendoring step: translate
+  `#lua-match?` to `#match?` and drop `#set!`, which the binding rejects at a
+  variable arity. `#any-of?` and `#eq?` are supported natively.
 - Map captures by prefix (`@keyword.*` -> `:keyword`, `@string.*` ->
   `:string`, ...) onto the xmas face palette. Adding a face is one line in
   `xmas.view/faces`, and the palette, not the query source, is what limits how
@@ -330,7 +331,7 @@ Size L. Risk high: native code can end the JVM, and offset conversion is a
 classic off-by-one source. The journal bounds text loss; a grammar crash is an
 accepted, documented risk until a sidecar proves necessary.
 
-## M9 — IDE workflow (accepted, before v1.0)
+## M9 — IDE workflow (implemented)
 
 **Goal:** close the daily IDE loop around the language platform without
 building a second UI or a second process model.
@@ -374,8 +375,8 @@ Nothing in this milestone is promised.
 
 ## Order and cut line (historical)
 
-This is the original sequencing; M0-M7 are implemented. M8 and M9 are the
-accepted additions that gate v1.0; M10 is post-v1.0 and not promised.
+This is the original sequencing; M0-M9 are implemented. M10 is post-v1.0 and
+not promised.
 Dependencies: M1 ← nothing; M2 ← nothing; M3 ← M2; M4 ← M3; M5 ← M2 (+M1 for
 diff faces); M6 ← M1, M2, M4; M7 ← all; M8 ← M1, M4, M6; M9 ← M2, M5;
 M10 ← v1.0.

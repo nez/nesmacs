@@ -3,6 +3,7 @@
    Undo history is explicitly NOT persisted (per roadmap)."
   (:require [xmas.buf :as buf]
             [xmas.gap :as gap]
+            [xmas.lang :as lang]
             [xmas.log :as log]
             [xmas.persist :as persist]
             [xmas.window :as win]))
@@ -99,7 +100,12 @@
           ;; A file reloaded from disk may have shrunk, so the saved offsets can
           ;; point past the end.
           (cond-> (assoc b :point (buf/clamp-pos b (:point d)))
-            (some? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d)))))))))
+            (some? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d)))
+            ;; Language data is derived from the extension, not persisted, so
+            ;; restored buffers keep highlighting and comment syntax.
+            (lang/language-for-file file)
+            (assoc :language (lang/language-for-file file)
+                   :comment-start (:comment-start (lang/language-for-file file)))))))))
 
 (defn- window-tree->data
   "Serialize window tree, replacing buffer refs with names."

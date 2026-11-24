@@ -56,3 +56,15 @@
     (is (= #{"src/alpha.clj" "test/alpha_test.clj"}
            (set (project/fuzzy files "alp"))))
     (is (empty? (project/fuzzy files "zzz")))))
+(deftest language-manifests-are-project-roots
+  ;; LSP and test runs need a root for Python and Node projects that have no
+  ;; deps.edn or .git of their own.
+  (doseq [manifest ["pyproject.toml" "package.json"]]
+    (let [root (tmp-dir)]
+      (try
+        (write! root manifest "{}")
+        (write! root "src/a" "")
+        (is (= (.getCanonicalPath root)
+               (.getCanonicalPath (io/file (project/root (str root "/src/a")))))
+            manifest)
+        (finally (rm-rf root))))))

@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [xmas.buf :as buf]
             [xmas.gap :as gap]
+            [xmas.lang :as lang]
             [xmas.props :as props]
             [xmas.term :as term]
             [xmas.view :as view]
@@ -138,6 +139,29 @@
         {:keys [font-lock-updates]} (render-result s)]
     (is (= [] (get-in font-lock-updates ["t" :font-lock])))))
 
+;; --- Tree-sitter highlights and folds ---
+
+(deftest render-paints-tree-sitter-highlights
+  (let [b (assoc (buf/make "t-paint" "def foo():\n    return 1\n" nil)
+                 :mode :python-mode :language (lang/language :python))
+        s {:buf "t-paint" :bufs {"t-paint" b}
+           :windows (win/leaf "t-paint") :cur-window []
+           :rows 6 :cols 30}]
+    ;; :keyword is fg 180; the tokenizer would paint `def` as :builtin.
+    (is (.contains (render-str s) "38;5;180"))))
+
+(deftest render-hides-folded-lines-and-shows-an-ellipsis
+  (let [b (assoc (buf/make "t-fold" "def foo():\n    return 1\n    return 2\n" nil)
+                 :mode :python-mode :language (lang/language :python)
+                 :collapsed #{0})
+        s {:buf "t-fold" :bufs {"t-fold" b}
+           :windows (win/leaf "t-fold") :cur-window []
+           :rows 6 :cols 40}
+        out (render-str s)]
+    (is (.contains out "…"))
+    (is (.contains out "def") "the fold's start line stays visible")
+    (is (= 0 (count (re-seq #"return" out))) "the folded body is not drawn")))
+
 ;; --- render with a 0-body-row pane must not crash ---
 
 (deftest render-tiny-split-doesnt-crash
@@ -154,3 +178,17 @@
       (binding [xmas.term/*out-fn* #(.append out (str %))]
         (is (map? (view/render s))))
       (is (not (.contains (str out) (str (char 27) "[0;1H")))))))
+
+(deftest a-collapsed-fold-around-point-shows-no-ellipsis
+  ;; Point inside the fold keeps its line visible, so the fold is open even
+  ;; though :collapsed still names it; claiming "…" would hide nothing.
+  (let [text "def foo():\n    return 1\n"
+        b (assoc (buf/make "t-open" text nil)
+                 :mode :python-mode :language (lang/language :python)
+                 :collapsed #{0}
+                 :point (inc (gap/nth-line-start (gap/of text) 1)))
+        s {:buf "t-open" :bufs {"t-open" b}
+           :windows (win/leaf "t-open") :cur-window []
+           :rows 6 :cols 40}
+        out (render-str s)]
+    (is (not (.contains out "…")))))

@@ -2,7 +2,15 @@
  :deps {org.clojure/clojure {:mvn/version "1.12.4"}
         nrepl/nrepl {:mvn/version "1.3.0"}
         http-kit/http-kit {:mvn/version "2.8.0"}
-        org.clojure/data.json {:mvn/version "2.5.1"}}
+        org.clojure/data.json {:mvn/version "2.5.1"}
+        ;; Tree-sitter: optional syntax backend (M8). The binding loads native
+        ;; code; a missing library or grammar degrades to the tokenizer.
+        io.github.bonede/tree-sitter {:mvn/version "0.26.6"}
+        io.github.bonede/tree-sitter-clojure {:mvn/version "0.0.12a"}
+        io.github.bonede/tree-sitter-python {:mvn/version "0.25.0"}
+        io.github.bonede/tree-sitter-javascript {:mvn/version "0.25.0"}
+        io.github.bonede/tree-sitter-typescript {:mvn/version "0.23.2"}
+        io.github.bonede/tree-sitter-tsx {:mvn/version "0.23.2"}}
  :aliases
  {:run {:main-opts ["-m" "xmas.ed"]}
   :test {:extra-paths ["test"]

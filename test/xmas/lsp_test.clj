@@ -66,11 +66,13 @@
   (testing "a server URI with file:/// is decoded too"
     (is (= "/tmp/x.clj" (lsp/uri->path "file:///tmp/x.clj")))))
 
-(deftest only-clojure-and-edn-files-are-synced
+(deftest languages-with-servers-are-supported
   (is (lsp/supports? "src/foo.clj"))
   (is (lsp/supports? "foo.cljc"))
   (is (lsp/supports? "foo.cljs"))
   (is (lsp/supports? "deps.edn"))
+  (is (lsp/supports? "app.py"))
+  (is (lsp/supports? "app.tsx"))
   (is (not (lsp/supports? "init.el")))
   (is (not (lsp/supports? "README.md")))
   (is (not (lsp/supports? nil))))
@@ -80,7 +82,7 @@
            :bufs {"*test*" (assoc (buf/make "*test*" "x" nil)
                                   :file "/tmp/init.el")}
            :msg nil}]
-    (is (= "LSP is only wired for Clojure/EDN files" (:msg (ed/lsp-hover s))))))
+    (is (= "No language server for this file" (:msg (ed/lsp-hover s))))))
 
 (deftest diagnostic-ranges-clamp-at-end-and-drop-stale
   (let [offs (deref #'xmas.lsp/lsp-range->offsets)
@@ -99,13 +101,13 @@
   (let [remember (deref #'xmas.ed/remember-completion!)
         cached   (deref #'xmas.ed/cached-completion)
         path     "/lsp-cache-test/x.clj"]
-    (remember path 1 3 4 ["add" "add-watch" "assoc"])
+    (remember path 1 3 4 [{:label "add"} {:label "add-watch"} {:label "assoc"}])
     (testing "filters cached labels by prefix at the same version/position"
       (is (= ["add" "add-watch"] (cached path 1 3 4 "add")))
       (is (= []                   (cached path 1 3 4 "zzz"))))
     (testing "a version change invalidates old results"
       (is (nil? (cached path 2 3 4 "add")))
-      (remember path 2 3 4 ["new"])
+      (remember path 2 3 4 [{:label "new"}])
       (is (= ["new"] (cached path 2 3 4 "new"))))))
 
 (deftest completion-cache-does-not-swallow-uncached-positions
@@ -114,7 +116,7 @@
   (let [remember (deref #'xmas.ed/remember-completion!)
         cached   (deref #'xmas.ed/cached-completion)
         path     "/lsp-cache-pos/x.clj"]
-    (remember path 1 3 4 ["add"])
+    (remember path 1 3 4 [{:label "add"}])
     (is (= ["add"] (cached path 1 3 4 "add")))
     (is (nil? (cached path 1 3 9 "add")))))
 
