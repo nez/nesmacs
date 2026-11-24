@@ -77,18 +77,52 @@
         (when cb (swap! (:pending s) dissoc id))
         (str "Debug adapter error: " (.getMessage e))))))
 
-(defn- reply-unsupported!
-  "Adapter->client requests (runInTerminal, startDebugging) are out of scope;
-   answering keeps the adapter from waiting on a timeout."
+(defn- reply!
+  "Answer an adapter->client request. `success` false keeps the adapter from
+   waiting on a timeout."
+  [s msg success text]
+  (try (rpc/send! (:conn s) {:seq (swap! (:seq s) inc)
+                             :type "response"
+                             :request_seq (:seq msg)
+                             :command (:command msg)
+                             :success success
+                             :message text})
+       (catch Exception _)))
+
+(defn- reply-unsupported! [s msg]
+  (reply! s msg false "xmas does not support this request"))
+
+(declare initialize-args)
+
+(defn- start-child!
+  "js-debug starts the debuggee as a child target and asks the client to open a
+   second DAP connection for it (`startDebugging`). Move the session to that
+   connection; the launcher connection stays open until stop! because closing
+   it can end the target. Breakpoints and configurationDone are sent by the
+   normal `initialized` handler on the child connection."
   [s msg]
-  (try
-    (rpc/send! (:conn s) {:seq (swap! (:seq s) inc)
-                          :type "response"
-                          :request_seq (:seq msg)
-                          :command (:command msg)
-                          :success false
-                          :message "xmas does not support this request"})
-    (catch Exception _)))
+  (let [dap (or (:dap s) (:dap (:language s)))
+        configuration (get-in msg [:arguments :configuration])]
+    (if (or (not= :tcp (:transport dap)) (nil? (:port s)))
+      (do (reply-unsupported! s msg)
+          (message! s "Debug adapter asked for a child session on a transport xmas cannot share"))
+      (do
+        (reply! s msg true nil)
+        (try
+          (let [child (rpc/open-tcp {:port (:port s)})
+                child-s (assoc s :conn child)]
+            (swap! session assoc :parent-conn (:conn s) :conn child
+                   :state (atom :starting))
+            (request! child-s "initialize" (initialize-args s)
+                      (fn [_]
+                        (request! child-s "launch"
+                                  (merge (:launch dap)
+                                         {:program (:file s) :cwd (:root s)}
+                                         configuration)
+                                  nil))))
+          (catch Exception e
+            (log/log "DAP child session:" (.getMessage e))
+            (message! s (str "Debug adapter child session failed: " (.getMessage e)))))))))
 
 ;; --- Breakpoints ---
 
@@ -268,6 +302,13 @@
                                  (when description (str " (" description ")"))
                                  (when text (str " " text))))))))
 
+(defn- close-conns!
+  "Close the active connection and the launcher connection, if a child session
+   replaced it. `distinct` because a normal session has only the one."
+  [s]
+  (doseq [c (distinct (remove nil? [(:conn s) (:parent-conn s)]))]
+    (rpc/close! c)))
+
 (defn- on-terminated! [s]
   (when-not (= :terminated @(:state s))
     (reset! (:state s) :terminated)
@@ -275,7 +316,7 @@
     (reset! (:thread-id s) nil)
     ;; Adapters that listen on a port (js-debug) outlive the debuggee; close
     ;; and reap here instead of leaving a socket read failing every tick.
-    (rpc/close! (:conn s))
+    (close-conns! s)
     (when-let [a (:adapter s)] (proc/kill! a))
     (bump-markers!)
     (message! s "Debug session ended")))
@@ -335,7 +376,9 @@
   (case (:type msg)
     "response" (on-response! s msg)
     "event"    (on-event! s msg)
-    "request"  (reply-unsupported! s msg)
+    "request"  (case (:command msg)
+                 "startDebugging" (start-child! s msg)
+                 (reply-unsupported! s msg))
     (log/log "DAP unknown message type" (:type msg))))
 
 ;; --- Session lifecycle ---
@@ -358,6 +401,7 @@
    :supportsVariableType true
    :supportsVariablePaging false
    :supportsRunInTerminalRequest false
+   :supportsStartDebuggingRequest true
    :supportsTerminateRequest true
    :supportsRestartRequest false})
 
@@ -402,7 +446,7 @@
                              (rpc/open-tcp {:port port})
                              (rpc/open-stdio {:argv argv :dir root}))
                     s (merge opts
-                             {:conn conn :adapter adapter
+                             {:conn conn :adapter adapter :port port :dap dap
                               :state (atom :starting) :seq (atom 0)
                               :pending (atom {}) :thread-id (atom nil)
                               :frame (atom nil) :vars (atom {})})]
@@ -433,7 +477,7 @@
                                :command "disconnect"
                                :arguments {:terminateDebuggee true}})
          (catch Exception _))
-    (rpc/close! (:conn s))
+    (close-conns! s)
     (when-let [a (:adapter s)] (proc/kill! a))
     (reset! session nil)
     (bump-markers!)))
