@@ -293,8 +293,9 @@ protocol client.
 4. LSP breadth on the existing client: references, rename, code actions,
    signature help, document symbols, formatting and range formatting, and
    workspace edits for multi-file changes.
-5. Format-on-save: LSP formatting first, per-mode CLI fallback (`cljfmt`,
-   `ruff format`, `prettier`).
+5. Formatting: on demand through LSP (buffer and region) with a per-mode CLI
+   fallback (`cljfmt`, `ruff format`, `prettier`); format-on-save uses the CLI
+   formatter, because LSP formatting is asynchronous and saving is not.
 6. Folding from the Tree-sitter `folds.scm` query (paren-depth fallback for
    Lisp); imenu and document symbols through LSP.
 7. Tests: parser and offset unit tests, query mapping, a pty highlighting
