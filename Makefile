@@ -1,6 +1,6 @@
 JAR := target/xmas.jar
 
-.PHONY: dev run jar repl test bench lsp term pty crash lint check clean setup
+.PHONY: dev run jar repl test bench lsp term dap pty crash lint check clean setup
 
 setup:
 	./install.sh
@@ -23,6 +23,10 @@ test:
 # End-to-end against the real clojure-lsp binary; needs it on PATH.
 lsp:
 	clojure -M:test -n xmas.lsp-live-test
+
+# End-to-end against the real debugpy adapter; needs Python + `pip install debugpy`.
+dap:
+	clojure -M:test -n xmas.dap-live-test
 
 # End-to-end terminal session against the real tmux binary; needs tmux on PATH.
 term:

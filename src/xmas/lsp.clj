@@ -2,11 +2,12 @@
   "Minimal Language Server Protocol client: JSON-RPC 2.0 over stdio, using
    `xmas.proc` for the server process and `clojure.data.json` for the wire.
 
-   Deliberately small: full-document sync, diagnostics as props, hover,
-   definition, completion, references, rename, code actions, signature help,
-   document symbols and formatting. Positions are UTF-16 code units (the LSP
-   default), which is exactly what Java/Clojure strings index by, so no
-   conversion.
+   Deliberately small: incremental text sync when the server advertises it
+   (one minimal range per change, full document otherwise), diagnostics as
+   props, hover, definition, completion, references, rename, code actions,
+   signature help, document symbols and formatting. Positions are UTF-16 code
+   units (the LSP default), which is exactly what Java/Clojure strings index
+   by, so no conversion.
 
    Servers are started on demand (first request) and restarted lazily if the
    process dies. A slow server never blocks typing: requests are async and
@@ -15,11 +16,11 @@
    One server per (project root, language): a Clojure and a Python server in
    the same project must not share a handle."
   (:require [clojure.string :as str]
-            [clojure.data.json :as json]
             [xmas.gap :as gap]
             [xmas.lang :as lang]
             [xmas.proc :as proc]
             [xmas.props :as props]
+            [xmas.rpc :as rpc]
             [xmas.log :as log])
   (:import [java.lang ProcessHandle]))
 
@@ -28,7 +29,12 @@
 
 ;; --- Wire format ---
 
-(defn- utf8-len ^long [^String s] (alength (.getBytes s "UTF-8")))
+(def encode-msg
+  "See `xmas.rpc/encode-msg`. Kept here because the LSP client is the primary
+   user of the framing helpers and its tests name them."
+  rpc/encode-msg)
+
+(def decode-msgs rpc/decode-msgs)
 
 (defn path->uri
   "file: URI for `path`. Uses File.toURI so spaces and non-ASCII are escaped."
@@ -40,39 +46,6 @@
   [uri]
   (try (.getPath (java.io.File. (java.net.URI. uri)))
        (catch Exception _ (str/replace uri #"^file://" ""))))
-
-(defn encode-msg
-  "Frame `msg` (a Clojure map) as an LSP message. Content-Length is bytes."
-  [msg]
-  (let [body (json/write-str msg)]
-    (str "Content-Length: " (utf8-len body) "\r\n\r\n" body)))
-
-(defn- slice-bytes [^bytes bs ^long from ^long to]
-  (String. bs (int from) (int (- to from)) "UTF-8"))
-
-(defn decode-msgs
-  "Parse as many complete LSP messages as `buffer` holds. Returns
-   [messages rest]. `buffer` is a String; Content-Length counts UTF-8 bytes."
-  [^String buffer]
-  (loop [buf buffer
-         msgs []]
-    (let [hp (str/index-of buf "\r\n\r\n")]
-      (if hp
-        (let [header (subs buf 0 hp)
-              after  (subs buf (+ hp 4))
-              lm     (re-find #"(?i)Content-Length:\s*(\d+)" header)
-              have   (utf8-len after)]
-          (if (and lm (>= have (Long/parseLong (nth lm 1))))
-            (let [len   (Long/parseLong (nth lm 1))
-                  bytes (.getBytes after "UTF-8")
-                  body  (slice-bytes bytes 0 len)
-                  rest* (slice-bytes bytes len (alength bytes))
-                  msg   (try (json/read-str body {:key-fn keyword})
-                             (catch Exception e
-                               (log/log "LSP json parse:" (.getMessage e)) nil))]
-              (recur rest* (cond-> msgs msg (conj msg))))
-            [msgs buf]))
-        [msgs buf]))))
 
 ;; --- Server handles ---
 
@@ -96,7 +69,7 @@
     (swap! servers assoc root-id
            {:handle h :inbox (atom "") :pending {} :root dir
             :language-id language-id
-            :initialized? false :docs {}})))
+            :initialized? false :docs {} :texts {}})))
 
 (defn- drop! [root-id]
   (when-let [s (srv root-id)]
@@ -121,8 +94,13 @@
 
 ;; --- Document sync ---
 
-(defn- note-version! [root-id path version]
-  (swap! servers update root-id update-in [:docs path] (constantly version)))
+(defn- note-doc!
+  "Record the version the server now holds, plus the text it was sent, so the
+   next change can be sent as a minimal range."
+  [root-id path version text]
+  (swap! servers update root-id
+         (fn [s] (-> s (assoc-in [:docs path] version)
+                       (assoc-in [:texts path] text)))))
 
 (defn- did-open! [root-id path text version language-id]
   (notify! root-id "textDocument/didOpen"
@@ -130,13 +108,57 @@
                            :languageId language-id
                            :version version
                            :text text}})
-  (note-version! root-id path version))
+  (note-doc! root-id path version text))
 
 (defn- did-change! [root-id path text version]
   (notify! root-id "textDocument/didChange"
            {:textDocument {:uri (path->uri path) :version version}
             :contentChanges [{:text text}]})
-  (note-version! root-id path version))
+  (note-doc! root-id path version text))
+
+(defn change-range
+  "Minimal single-range replacement turning `prev` into `next`, as one
+   didChange contentChange. Nil when the texts are equal. The line/character
+   positions are counted during the same scans that find the differing span, so
+   a keystroke costs O(distance to it), not O(document)."
+  [^String prev ^String next]
+  (when (not= prev next)
+    (let [p (count prev)
+          n (count next)
+          [from from-line from-col]
+          (loop [i 0 line 0 col 0]
+            (if (and (< i p) (< i n) (= (.charAt prev i) (.charAt next i)))
+              (recur (inc i)
+                     (if (= \newline (.charAt prev i)) (inc line) line)
+                     (if (= \newline (.charAt prev i)) 0 (inc col)))
+              [i line col]))
+          suffix (loop [i 0]
+                   (if (and (< i (- p from)) (< i (- n from))
+                            (= (.charAt prev (- p i 1)) (.charAt next (- n i 1))))
+                     (recur (inc i)) i))
+          to (- p suffix)
+          [to-line to-col]
+          (loop [i from line from-line col from-col]
+            (if (>= i to)
+              [line col]
+              (if (= \newline (.charAt prev i))
+                (recur (inc i) (inc line) 0)
+                (recur (inc i) line (inc col)))))]
+      {:range {:start {:line from-line :character from-col}
+               :end {:line to-line :character to-col}}
+       :text (subs next from (- n suffix))})))
+
+(defn- did-change-range!
+  "Send one minimal change when the server asked for incremental sync. Falls
+   back to a full document send when the previous text is unknown."
+  [root-id path text version]
+  (if-let [prev (get-in (srv root-id) [:texts path])]
+    (do (when-let [chg (change-range prev text)]
+          (notify! root-id "textDocument/didChange"
+                   {:textDocument {:uri (path->uri path) :version version}
+                    :contentChanges [chg]}))
+        (note-doc! root-id path version text))
+    (did-change! root-id path text version)))
 
 (defn server-id
   "Opaque key for one server: project root plus language."
@@ -154,33 +176,34 @@
 (defn on-path?
   "True when the first element of a server `argv` is an executable on PATH."
   [argv]
-  (when-let [^String bin (first argv)]
-    (let [f (java.io.File. bin)]
-      (boolean
-       (if (or (.isAbsolute f) (str/includes? bin java.io.File/separator))
-         (.canExecute f)
-         (some (fn [dir]
-                 (let [c (java.io.File. ^String (str dir) bin)]
-                   (and (.isFile c) (.canExecute c))))
-               (str/split (or (System/getenv "PATH") "")
-                          (re-pattern java.io.File/pathSeparator))))))))
+  (proc/executable? argv))
+
+(defn- sync-kind
+  "TextDocumentSyncKind the server advertised: 0 none, 1 full, 2 incremental.
+   Servers may send the number directly or a {:change n} options map."
+  [capabilities]
+  (let [s (:textDocumentSync capabilities)]
+    (long (if (map? s) (long (or (:change s) 0)) (long (or s 0))))))
 
 (defn- sync-docs! [root-id state]
   (let [s (srv root-id)]
     (when (:initialized? s)
-      (doseq [[_ b] (:bufs state)]
-        (when-let [path (:file b)]
-          (let [l (lang/language-for-file path)]
-            (when (and l
-                       (not (:large-file b))
-                       (= (:id l) (:language-id s))
-                       (or (= path (:root s))
-                           (str/starts-with? path (str (:root s) java.io.File/separator))))
-              (let [v (or (:version b) 0)
-                    seen (get-in s [:docs path])]
-                (cond
-                  (nil? seen)   (did-open! root-id path (str (:text b)) v (:id l))
-                  (not= seen v) (did-change! root-id path (str (:text b)) v))))))))))
+      (let [incremental? (= 2 (sync-kind (:capabilities s)))]
+        (doseq [[_ b] (:bufs state)]
+          (when-let [path (:file b)]
+            (let [l (lang/language-for-file path)]
+              (when (and l
+                         (not (:large-file b))
+                         (= (:id l) (:language-id s))
+                         (or (= path (:root s))
+                             (str/starts-with? path (str (:root s) java.io.File/separator))))
+                (let [v (or (:version b) 0)
+                      seen (get-in s [:docs path])]
+                  (cond
+                    (nil? seen)   (did-open! root-id path (str (:text b)) v (:id l))
+                    (not= seen v) (if incremental?
+                                    (did-change-range! root-id path (str (:text b)) v)
+                                    (did-change! root-id path (str (:text b)) v))))))))))))
 
 (defn close-doc!
   "Notify every server that has `path` open that the document closed."
@@ -189,7 +212,8 @@
           :when (get-in s [:docs path])]
     (notify! root-id "textDocument/didClose"
              {:textDocument {:uri (path->uri path)}})
-    (swap! servers update root-id update :docs dissoc path)))
+    (swap! servers update root-id
+           #(-> % (update :docs dissoc path) (update :texts dissoc path)))))
 
 ;; --- Diagnostics -> props ---
 
@@ -374,11 +398,10 @@
   "Normalize a WorkspaceEdit into [{:path :edits [{:from :to :text}]}], with
    absolute char offsets, sorted descending so applying them in order is safe.
    `text-for` returns the current text of a path (nil if unavailable).
-   File create/rename/delete operations are ignored: xmas does not edit the
-   filesystem behind the user's back.
-   DEBT: edits for unopened files are applied to a newly created in-memory
-   buffer (not the disk file); the user must save it explicitly. This is
-   deliberate — automatic filesystem writes are a privilege escalation."
+   File create/rename/delete operations are ignored: xmas does not create or
+   delete files behind the user's back. Edits for unopened files are returned
+   with their source text so the caller can write them only if the disk is
+   unchanged; see `xmas.ed/apply-workspace-edit!`."
   [edit text-for]
   (when (map? edit)
     (let [pairs (concat (for [[uri edits] (:changes edit)] [uri edits])

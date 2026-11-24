@@ -76,3 +76,17 @@
     (is (some #{[0 3]} rs) "whole defn")
     (is (some #{[1 2]} rs) "let binding and map")
     (is (not-any? (fn [[s e]] (= s e)) rs))))
+
+(deftest a-slow-parse-falls-back-to-the-tokenizer-for-good
+  ;; The budget is measured, not guessed from line count: this binding forces
+  ;; the over-budget branch without needing a huge file.
+  (let [k (str "ts-slow-" (System/nanoTime))]
+    (binding [treesit/*slow-parse-ms* -1]
+      ;; The over-budget parse still returns its spans (the work is done); the
+      ;; next version is what falls back.
+      (treesit/spans k (lang/language :python) "def f():\n    return 1\n" 1)
+      (is (treesit/slow? k)))
+    (testing "the buffer stays on the tokenizer at the next version"
+      (is (nil? (treesit/spans k (lang/language :python) "def f():\n    return 2\n" 2))))
+    (treesit/forget! k)
+    (is (not (treesit/slow? k)) "killing the buffer clears the flag")))

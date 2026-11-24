@@ -76,3 +76,28 @@
   (let [p (testres/parse "Ran 578 tests containing 6299 assertions.\n0 failures, 0 errors.\n")]
     (is (= 578 (:total p)))
     (is (zero? (:failed p)))))
+
+(deftest generic-fallback-finds-file-line-failures
+  ;; A runner with a proprietary format still names the failing location; that
+  ;; is enough for `run-tests` to stay useful.
+  (let [p (testres/parse (str "Running suite\n"
+                              "FAILED tests/test_x.py:12: AssertionError: boom\n"
+                              "1 failed, 4 passed in 0.2s\n"))
+        e (first (:tests p))]
+    (is (= :generic (:kind p)))
+    (is (= 1 (:failed p)))
+    (is (= 5 (:total p)))
+    (is (= {:file "tests/test_x.py" :line 12} (select-keys e [:file :line])))))
+
+(deftest generic-fallback-does-not-duplicate-one-failure
+  (let [p (testres/parse (str "FAILED lib/a.rb:3: expected true\n"
+                              "lib/a.rb:3:in `block': assertion failed\n"))]
+    (is (= 1 (count (:tests p))))))
+
+(deftest a-known-format-with-jumpable-entries-wins
+  (let [p (testres/parse (str "Ran 1 tests\n"
+                              "FAIL in (x) (src/a.clj:9)\n"
+                              "expected\n"
+                              "0 failures, 1 error\n"))]
+    (is (= :text (:kind p)))
+    (is (= "x" (:name (first (:tests p)))) "the known format is not replaced")))

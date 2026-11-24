@@ -192,3 +192,46 @@
            :rows 6 :cols 40}
         out (render-str s)]
     (is (not (.contains out "…")))))
+
+;; --- gutter marks and themes ---
+
+(deftest render-paints-a-gutter-mark-before-the-line
+  (let [b (-> (buf/make "t-gutter" "abcdef" nil)
+              (assoc :gutter {:width 1
+                              :marks {0 {:text "●" :face :breakpoint}}}))
+        s {:buf "t-gutter" :bufs {"t-gutter" b}
+           :windows (win/leaf "t-gutter") :cur-window []
+           :rows 5 :cols 20}
+        out (render-str s)]
+    (is (.contains out "●"))
+    (is (.contains out "abcdef") "the gutter takes a column, it does not hide text")))
+
+(deftest switching-theme-changes-what-the-renderer-emits
+  ;; :default is fg nil in the dark palette, fg 236 in the light one.
+  (let [b (buf/make "t-theme" "plain" nil)
+        s {:buf "t-theme" :bufs {"t-theme" b}
+           :windows (win/leaf "t-theme") :cur-window []
+           :rows 5 :cols 20}]
+    (try
+      (view/use-theme! :light)
+      (is (.contains (render-str s) "38;5;236"))
+      (finally (view/use-theme! :default)))
+    (is (not (.contains (render-str s) "38;5;236"))
+        "switching back restores the shipped palette")))
+
+(deftest use-theme-ignores-unknown-names
+  (is (nil? (view/use-theme! :no-such-theme)))
+  (is (= #{:default :light} (set (view/theme-names)))))
+
+(deftest a-theme-change-invalidates-the-frame-signature
+  ;; The loop repaints only when `:sig` changes, so the theme version must be
+  ;; part of it; otherwise switching palettes would need a keypress to show.
+  (let [b (buf/make "t-sig" "x" nil)
+        s {:buf "t-sig" :bufs {"t-sig" b}
+           :windows (win/leaf "t-sig") :cur-window []
+           :rows 5 :cols 20}]
+    (try
+      (let [before (:sig (render-result s))]
+        (view/use-theme! :light)
+        (is (not= before (:sig (render-result s)))))
+      (finally (view/use-theme! :default)))))

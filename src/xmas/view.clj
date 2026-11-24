@@ -9,7 +9,7 @@
             [xmas.treesit :as treesit]
             [xmas.window :as win]))
 
-(def faces
+(def default-faces
   {:default   {:fg nil :bg nil :bold false}
    :modeline  {:fg 235 :bg 108 :bold true}
    :inactive  {:fg 241 :bg 236 :bold false}
@@ -34,7 +34,74 @@
    :diff-add     {:fg 120 :bg nil :bold false}
    :diff-del     {:fg 167 :bg nil :bold false}
    :diff-hunk    {:fg 67  :bg nil :bold true}
-   :diff-meta    {:fg 244 :bg nil :bold false}})
+   :diff-meta    {:fg 244 :bg nil :bold false}
+   :breakpoint   {:fg 196 :bg nil :bold true}
+   :debug-stop   {:fg 226 :bg nil :bold true}})
+
+(def light-faces
+  (assoc default-faces
+         :default   {:fg 236 :bg nil :bold false}
+         :modeline  {:fg 255 :bg 31 :bold true}
+         :inactive  {:fg 245 :bg 253 :bold false}
+         :prompt    {:fg 25 :bg nil :bold true}
+         :region    {:fg nil :bg 195 :bold false}
+         :divider   {:fg 250 :bg nil :bold false}
+         :comment   {:fg 245 :bg nil :bold false}
+         :string    {:fg 28 :bg nil :bold false}
+         :keyword   {:fg 90 :bg nil :bold false}
+         :builtin   {:fg 25 :bg nil :bold true}
+         :function  {:fg 25 :bg nil :bold false}
+         :type      {:fg 130 :bg nil :bold false}
+         :variable  {:fg 238 :bg nil :bold false}
+         :number    {:fg 166 :bg nil :bold false}
+         :constant  {:fg 130 :bg nil :bold false}
+         :operator  {:fg 95 :bg nil :bold false}
+         :match     {:fg 232 :bg 222 :bold false}
+         :diag-warning {:fg 232 :bg 222 :bold false}
+         :diag-info    {:fg 232 :bg 195 :bold false}
+         :diff-add     {:fg 28 :bg nil :bold false}
+         :diff-del     {:fg 124 :bg nil :bold false}
+         :diff-hunk    {:fg 25 :bg nil :bold true}
+         :diff-meta    {:fg 245 :bg nil :bold false}
+         :breakpoint   {:fg 160 :bg nil :bold true}
+         :debug-stop   {:fg 94 :bg nil :bold true}))
+
+(def themes
+  "Named palettes for `use-theme!`. :default is the shipped dark palette."
+  {:default default-faces :light light-faces})
+
+(def faces
+  "The active face map, read by every painter. Changed only through
+   `use-theme!` and `set-face-attr!`, which also bump `theme-version` so the
+   next frame repaints."
+  default-faces)
+
+(defonce ^:private theme-version (atom 0))
+(defonce ^:private applied-theme (atom nil))
+
+(defn theme-names [] (vec (keys themes)))
+
+(defn use-theme!
+  "Switch to a named palette; unknown names are ignored. Called every tick from
+   the editor loop, so it no-ops unless the theme actually changed."
+  [theme]
+  (when-let [f (get themes theme)]
+    ;; The identity check re-applies the palette after a `require :reload`
+    ;; redefines `faces`; `applied-theme` alone would leave it at the default.
+    (when (or (not= theme @applied-theme) (not (identical? f faces)))
+      (reset! applied-theme theme)
+      (alter-var-root #'faces (constantly f))
+      (swap! theme-version inc))
+    theme))
+
+(defn set-face-attr!
+  "Merge `attrs` ({:fg :bg :bold}) into one face. For ad-hoc tweaks in init.clj;
+   :default keeps its nil fg/bg."
+  [face attrs]
+  (alter-var-root #'faces update face
+                  #(merge (or % (get faces :default)) attrs))
+  (swap! theme-version inc)
+  nil)
 
 (defn- ensure-visible [content point scroll rows folds]
   ;; A pane with body-rows <= 0 (e.g. a 1-row split that gets 0 body rows
@@ -120,6 +187,19 @@
     (set-face! face)
     (t/tw (pad-spaces width))
     (t/reset-sg)))
+
+(defn- paint-gutter!
+  "Draw the left gutter for one body row in `gw` columns: the line's mark (if
+   any) plus padding. Marks are buffer data (`:gutter`), not a second overlay."
+  [screen-row screen-col gw mark]
+  (when (pos? gw)
+    (t/move screen-row screen-col)
+    (let [txt (or (:text mark) "")
+          shown (subs txt 0 (min (long gw) (count txt)))]
+      (set-face! (if mark (:face mark) :divider))
+      (t/tw shown)
+      (t/reset-sg)
+      (t/tw (pad-spaces (- (long gw) (count shown)))))))
 
 (defn apply-face-range
   "Split `spans` at [from, to), painting that slice with `paint-face`.
@@ -235,10 +315,15 @@
    props for performance; the region still paints because it is a render-time
    prop. `folds` are the collapsed ranges to skip; `collapsed` marks the lines
    that show an ellipsis. `hl-spans` are whole-buffer Tree-sitter spans (nil
-   falls back to the line tokenizer)."
+   falls back to the line tokenizer). `gutter` is {:width n :marks {line mark}}
+   drawn to the left of the text, taking its columns from `cols`."
   [rect content mode props region scroll hscroll font-lock window large-file?
-   folds collapsed hl-spans]
+   folds collapsed hl-spans gutter]
   (let [{:keys [row col rows cols]} rect
+        gw (long (:width gutter 0))
+        tcol (+ (long col) gw)
+        tcols (- (long cols) gw)
+        marks (:marks gutter)
         body-rows (dec rows)
         start-line  (fold/visible-start folds (gap/line-of content scroll))
         total-lines (gap/line-count content)
@@ -264,7 +349,8 @@
               (if (fold/hidden? folds ln)
                 (recur (inc ln) r nxt-state font-lock' last-line)
                 (do
-                  (write-spans! (+ row r) col cols line spans hscroll
+                  (paint-gutter! (+ row r) col gw (get marks ln))
+                  (write-spans! (+ row r) tcol tcols line spans hscroll
                                 (contains? collapsed ln))
                   (recur (inc ln) (inc r) nxt-state font-lock' (inc ln)))))
             {:r r :font-lock font-lock :last last-line}))]
@@ -330,7 +416,9 @@
                                            (fold/visible-start folds
                                                                (gap/line-of content scroll))))
         cursor-col (text/display-width content (gap/nth-line-start content point-line) point)
-        hscroll (if current? (ensure-hvisible hscroll-in cursor-col cols) hscroll-in)
+        gutter (:gutter buf)
+        gw (long (:width gutter 0))
+        hscroll (if current? (ensure-hvisible hscroll-in cursor-col (- (long cols) gw)) hscroll-in)
         [r-lo r-hi] (when (and mark current?) (sort [(long mark) (long point)]))
         region (when (and r-lo (< r-lo r-hi))
                  (props/make r-lo r-hi :region {:owner :region :priority 100}))
@@ -340,12 +428,12 @@
         {:keys [font-lock font-lock-window]}
         (render-window-body rect content mode props region scroll hscroll
                             (:font-lock buf) (:font-lock-window buf) large-file?
-                            folds collapsed hl-spans)]
+                            folds collapsed hl-spans gutter)]
     (render-window-modeline rect (or (:title buf) (:name buf)) (:modified buf) mode (:minor-modes buf)
                             point-line cursor-col current?)
     {:window (assoc window :scroll scroll :hscroll hscroll
                            :point-line point-line :cursor-col cursor-col
-                           :cursor-row cursor-row)
+                           :cursor-row cursor-row :gutter-width gw)
      :buf-name buf-name
      :version version
      :font-lock font-lock
@@ -439,7 +527,8 @@
   (let [buf (get (:bufs state) (:buffer window))]
     [(:buffer window) (:version buf) (:point buf) (:mark buf)
      (:mode buf) (:minor-modes buf) (:modified buf) (:name buf) (:title buf)
-     (:props buf) (:scroll window) (:hscroll window) (:collapsed buf) current?]))
+     (:props buf) (:scroll window) (:hscroll window) (:collapsed buf)
+     (:gutter buf) current?]))
 
 (defn- echo-sig [state]
   (cond
@@ -452,7 +541,7 @@
     :else [:msg (:msg state)]))
 
 (defn- frame-sig [state layouts cur-path]
-  [(:rows state) (:cols state) layouts cur-path
+  [(:rows state) (:cols state) layouts cur-path @theme-version
    (into {} (for [[path _] layouts]
               [path (window-sig state (get-in (:windows state) path)
                                 (= path cur-path))]))
@@ -506,7 +595,9 @@
               (when (and rect win (> (:rows rect) 1) (pos? (:cols rect)))
                 (let [body-rows (dec (:rows rect))
                       row-in-win (max 0 (min (long (:cursor-row win)) (dec body-rows)))
-                      col-in-win (cond-> (- (:cursor-col win) (:hscroll win))
+                      col-in-win (cond-> (+ (long (:gutter-width win 0))
+                                            (- (long (:cursor-col win))
+                                               (long (:hscroll win))))
                                          (pos? (:hscroll win)) inc)]
                   (t/move (+ (:row rect) row-in-win) (+ (:col rect) col-in-win))))))
           (t/show-cur))

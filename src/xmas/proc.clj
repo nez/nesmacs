@@ -145,6 +145,28 @@
   (doseq [[_ h] @procs] (kill! h))
   (reset! procs {}))
 
+(defn executable?
+  "True when the first element of `argv` resolves to an executable file: an
+   absolute/relative path that runs, or a bare name found on PATH."
+  [argv]
+  (when-let [^String bin (first argv)]
+    (let [f (java.io.File. bin)]
+      (boolean
+       (if (or (.isAbsolute f) (str/includes? bin java.io.File/separator))
+         (.canExecute f)
+         (some (fn [dir]
+                 (let [c (java.io.File. ^String (str dir) bin)]
+                   (and (.isFile c) (.canExecute c))))
+               (str/split (or (System/getenv "PATH") "")
+                          (re-pattern java.io.File/pathSeparator))))))))
+
+(defn free-port
+  "An unused local TCP port, for adapters that listen instead of using stdio.
+   Racy by nature: the caller binds it right after."
+  []
+  (with-open [s (java.net.ServerSocket. 0)]
+    (.getLocalPort s)))
+
 (defonce ^:private hook-installed? (atom false))
 
 (defn install-shutdown-hook!

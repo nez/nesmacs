@@ -1,10 +1,9 @@
 (ns xmas.testres
-  "Test-run output parsing: TAP or JUnit XML into a list buffer of failures.
+  "Test-run output parsing: TAP, JUnit XML, the clojure.test/pytest summaries,
+   or a generic file:line scan, into a list buffer of failures.
 
    `run-tests` starts the project's test command as a normal job. When the job
-   finishes, `tick!` parses its output once and opens *Test Results*; the
-   command is the user's, so it must print TAP or JUnit XML for failures to be
-   extracted (a summary line is still shown)."
+   finishes, `tick!` parses its output once and opens *Test Results*."
   (:require [clojure.string :as str]
             [xmas.cmd :as cmd]
             [xmas.job :as job]
@@ -85,6 +84,44 @@
       {:kind :text :tests tests :total total
        :failed (or failed (count tests))})))
 
+(defn- count-of
+  "First `N` immediately before one of the `words` (regex alternation)."
+  [^String text words]
+  (some->> (re-find (re-pattern (str "(?i)(\\d+)\\s+(?:" words ")\\b")) text)
+           second Long/parseLong))
+
+(defn- generic-failures
+  "Lines that name a file:line and read like a failure. Deduplicated by
+   location, so a runner that prints both a summary line and a traceback does
+   not list the same failure twice."
+  [^String text]
+  (->> (str/split-lines text)
+       (keep (fn [line]
+               (when (re-find #"(?i)\b(fail(?:ed|ure|ing)?|error|exception|panic|assert)" line)
+                 (when-let [[_ f l] (re-find #"([\w./-]+\.\w+):(\d+)" line)]
+                   {:ok false :name (str/trim line)
+                    :file f :line (Long/parseLong l)}))))
+       (reduce (fn [acc e]
+                 (if (some #(and (= (:file %) (:file e)) (= (:line %) (:line e))) acc)
+                   acc (conj acc e)))
+               [])))
+
+(defn parse-generic
+  "Last-resort parser for runners that print neither TAP, JUnit nor a known
+   summary: any `file:line` line that mentions a failure, plus counts from a
+   `N failed / N passed / N errors` summary. Keeps `run-tests` useful for an
+   arbitrary command; the named entries are what the user can jump to."
+  [^String text]
+  (let [fails  (generic-failures text)
+        failed (max (long (or (count-of text "failed|failures|errors?|failing") 0))
+                    (count fails))
+        passed (long (or (count-of text "passed|ok|succeeded") 0))]
+    (when (pos? failed)
+      {:kind :generic
+       :tests fails
+       :total (if (pos? passed) (+ passed failed) failed)
+       :failed failed})))
+
 (defn parse
   "Parse test output. Returns {:kind :tests :total :failed} or nil."
   [^String text]
@@ -101,7 +138,13 @@
        :total (count tests)
        :failed (count (remove :ok tests))})
 
-    :else (parse-text text)))
+    :else (let [known (parse-text text)
+                generic (parse-generic text)]
+            ;; Prefer the known format, but when it found counts and no
+            ;; jumpable entries the generic scan still has file:line targets.
+            (if (and known (seq (:tests known)))
+              known
+              (or generic known)))))
 
 (defn- file-line
   "First file:line in a failure message, for jumping.
@@ -155,7 +198,7 @@
         (if (and parsed (pos? (:total parsed)))
           (swap! editor show-results parsed (:test-root b))
           (swap! editor cmd/msg
-                 "Test output not recognized; set :test-command to one that prints TAP, JUnit XML or clojure.test/pytest summaries"))))))
+                 "Test output not recognized (looked for TAP, JUnit, clojure.test, pytest, or file:line failures)"))))))
 
 ;; --- Command ---
 

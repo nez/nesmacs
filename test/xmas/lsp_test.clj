@@ -138,3 +138,22 @@
   ;; outside PATH still counts.
   (is (lsp/on-path? [(str (System/getProperty "java.home") "/bin/java")]))
   (is (not (lsp/on-path? []))))
+
+(deftest change-range-is-the-smallest-single-edit
+  (is (nil? (lsp/change-range "abc" "abc")))
+  (testing "insertion at a point"
+    (is (= {:range {:start {:line 0 :character 6} :end {:line 0 :character 6}}
+            :text "brave "}
+           (lsp/change-range "hello world" "hello brave world"))))
+  (testing "deletion of a range"
+    (is (= {:range {:start {:line 0 :character 6} :end {:line 0 :character 12}}
+            :text ""}
+           (lsp/change-range "hello brave world" "hello world"))))
+  (testing "a new line: positions are UTF-16 offsets, not bytes"
+    (is (= {:range {:start {:line 1 :character 0} :end {:line 1 :character 0}}
+            :text "ñ\n"}
+           (lsp/change-range "a\nb" "a\nñ\nb"))))
+  (testing "changing the last character"
+    (is (= {:range {:start {:line 0 :character 2} :end {:line 0 :character 3}}
+            :text "z"}
+           (lsp/change-range "abc" "abz")))))

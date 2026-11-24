@@ -19,8 +19,9 @@ back to another tool for this loop:
 8. edit Clojure/EDN, Python, TypeScript and JavaScript with syntax
    highlighting and LSP breadth (references, rename, code actions, format).
 
-M8 closes item 8; M9 closes the daily workflow around it. Debugging and the
-remaining platform extras (M10) are explicitly post-v1.0.
+M8 closes item 8; M9 closes the daily workflow around it. M10's editor side
+(the DAP debugger, themes and the agent CLI) is implemented too; its one
+non-editor platform app is the remaining open experiment.
 
 One non-editor application must exist on the same primitives (git status is
 the first; see M5), because "the editor is the first app" is the platform
@@ -39,11 +40,11 @@ claim this project is testing.
 
 ## Status
 
-Milestones M0-M9 are implemented to the scope described below. M10 (debugging
-and platform extras) is post-v1.0. v1.0 is not declared yet: it requires a full
-week as the primary editor (see [Definition of v1.0](#definition-of-v10)). Current features, test counts and
-benchmarks live in [README.md](README.md); this file keeps the milestone record
-and the settled decisions.
+Milestones M0-M10 are implemented to the scope described below, except M10's
+non-editor platform app. v1.0 is not declared yet: it requires a full week as
+the primary editor (see [Definition of v1.0](#definition-of-v10)). Current
+features, test counts and benchmarks live in [README.md](README.md); this file
+keeps the milestone record and the settled decisions.
 
 The plan started from an editor with the Emacs editing primitives already in
 place. The gaps it set out to close — clipboard and bracketed paste, undo
@@ -278,7 +279,7 @@ protocol client.
   stays MIT.
 - Languages: Clojure/EDN, Python, TypeScript, JavaScript. Emacs Lisp keeps its
   existing mode; unknown extensions open as plain text.
-- Debugging is post-v1.0 (M10).
+- Debugging is M10: DAP adapters are data next to the LSP command.
 
 **Scope**
 
@@ -357,27 +358,46 @@ system.
 
 Size M. Risk low-medium.
 
-## M10 — Debugging and platform extras (post-v1.0, optional)
+## M10 — Debugger, themes and the agent CLI (shipped)
 
-Only after v1.0, and only with a concrete use:
+Python, TypeScript and JavaScript are first-class here, so a debugger is a
+daily need the LSP surface cannot cover. Clojure keeps nREPL/CIDER.
 
-- A DAP client on a JSON-RPC transport generalized from `xmas.lsp`; adapters
-  are reused (`debugpy`, `delve`, `lldb-dap`, `java-debug`). Breakpoints,
-  stack, variables, evaluate and output reuse list buffers and the minibuffer.
-- One non-editor app beyond git (HTTP client or feed reader — `http-kit` is
-  already a dependency), to test the platform claim.
-- Themes, tabs, multiple cursors, semantic tokens, inlay hints.
-- An external agent CLI in a terminal buffer for AI assistance; no API client
-  in the editor.
+**Scope**
 
-Nothing in this milestone is promised.
+1. A DAP client on `xmas.rpc`: the content-length framing LSP already used,
+   extracted so both protocols share it, over a child's stdio or a TCP socket.
+   Adapter configuration is data in `xmas.lang` (`:dap`: `:transport`, `:argv`,
+   `:launch`) with `{port}` and `{env:NAME}` expansion, so no adapter path is
+   hard-coded. Shipped configs: debugpy (stdio) and vscode-js-debug (TCP, server
+   path from `$JS_DEBUG_DAP`). `make dap` is the live adapter test.
+2. Breakpoints, stack, locals and adapter output reuse existing primitives: the
+   buffer's gutter is `{:width n :marks {line mark}}` painted by the renderer,
+   frames/locals/output are read-only list buffers, and evaluate uses the
+   minibuffer. No gutter, panel or widget subsystem. Breakpoints persist with
+   the session.
+3. Themes: the face map became a named palette (`:default`, `:light`) applied
+   through `use-theme!`, included in the frame signature so a switch repaints on
+   the next tick, and stored in the session. `api/set-face!` covers one-off
+   tweaks.
+4. An external agent CLI in a terminal buffer (`M-x agent`; `$XMAS_AGENT` or
+   `claude`, configurable through `api/configure-agent!`). No API client in the
+   editor.
+
+**Not here:** tabs, multiple cursors, semantic tokens, inlay hints. Considered
+and dropped: tabs duplicate the window tree, multicursor needs a second
+edit/undo model, and semantic tokens/inlay hints would compete with the
+Tree-sitter paint path for marginal gain. Not planned.
+
+**Still open (platform experiment):** one non-editor app beyond git (HTTP client
+or feed reader — `http-kit` is already a dependency).
 
 ---
 
 ## Order and cut line (historical)
 
-This is the original sequencing; M0-M9 are implemented. M10 is post-v1.0 and
-not promised.
+This is the original sequencing; M0-M10 are implemented except M10's
+non-editor app.
 Dependencies: M1 ← nothing; M2 ← nothing; M3 ← M2; M4 ← M3; M5 ← M2 (+M1 for
 diff faces); M6 ← M1, M2, M4; M7 ← all; M8 ← M1, M4, M6; M9 ← M2, M5;
 M10 ← v1.0.
@@ -398,6 +418,9 @@ navigation.
 - A second extension runtime or arbitrary native modules. A vetted native
   library behind an optional backend (Tree-sitter) is allowed.
 - Collaborative editing, multi-user sessions, Windows terminal support.
+- Tabs, multiple cursors, semantic tokens and inlay hints: each duplicates
+  machinery the window tree, the undo model or the Tree-sitter paint path
+  already owns.
 - Plugin sandboxing: configuration is the user's own code, trusted like any
   `init` file.
 

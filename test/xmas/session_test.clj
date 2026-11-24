@@ -6,7 +6,8 @@
             [xmas.persist :as persist]
             [xmas.window :as win]
             [xmas.cmd :as cmd]
-            [xmas.complete :as complete]))
+            [xmas.complete :as complete]
+            [xmas.dap :as dap]))
 
 (defn- temp-dir []
   (doto (java.io.File/createTempFile "xmas-session-dir" "")
@@ -244,3 +245,16 @@
     (let [shrunk (#'xmas.session/data->buffer
                    (assoc snap :text "a\nb\n" :collapsed [0 9]))]
       (is (= #{0} (:collapsed shrunk))))))
+
+(deftest theme-and-breakpoints-survive-a-session-round-trip
+  (let [state (assoc (make-state) :theme :light)]
+    (dap/set-breakpoints! "/tmp/xmas-session-bp.py" [4 1])
+    (try
+      (session/save-session! state)
+      (let [sess (session/load-session!)]
+        (is (= :light (:theme sess)))
+        (is (= {"/tmp/xmas-session-bp.py" #{1 4}} (:breakpoints sess)))
+        (let [[restored ok] (session/restore-session state sess)]
+          (is ok)
+          (is (= :light (:theme restored)))))
+      (finally (dap/restore-breakpoints! {})))))

@@ -6,6 +6,7 @@
             [xmas.cmd :as cmd]
             [xmas.complete :as complete]
             [xmas.deferred :as deferred]
+            [xmas.dap :as dap]
             [xmas.dired :as dired]
             [xmas.fold :as fold]
             [xmas.forge :as forge]
@@ -273,6 +274,15 @@
   "M-x terminal: a terminal buffer running $SHELL in the current directory."
   [s]
   (terminal/open s))
+
+(defn agent-cli
+  "M-x agent: a terminal buffer running the configured AI CLI (default
+   $XMAS_AGENT, else `claude`). Set it with (api/configure-agent! [\"aider\"])."
+  [s]
+  (terminal/open s (or (:agent-command s)
+                       (some-> (System/getenv "XMAS_AGENT")
+                               (str/trim) (not-empty) (str/split #"\s+"))
+                       ["claude"])))
 
 (defn- auto-save-due
   "Pure: return [[buf-name file text version] ...] for every buffer at or above the
@@ -1390,13 +1400,14 @@
 ;; --- Workspace edits (rename, code actions, formatting) ---
 
 (defn- text-for-path
-  "Current text of `path`: the open buffer, else the file on disk."
+  "Current text of `path` as a `gap/Text` (what LSP offset conversion needs):
+   the open buffer, else the file on disk."
   [s path]
   (if-let [b (some (fn [[_ b]] (when (= path (:file b)) b)) (:bufs s))]
-    (str (:text b))
+    (:text b)
     (let [f (java.io.File. ^String path)]
       (when (.exists f)
-        (try (slurp f :encoding "UTF-8") (catch Exception _ nil))))))
+        (try (gap/of (slurp f :encoding "UTF-8")) (catch Exception _ nil))))))
 
 (defn- apply-edit-group
   [s {:keys [path edits]}]
@@ -1408,15 +1419,64 @@
                                  b edits)))
       s)))
 
+(defn- canonical-path
+  "Buffers are keyed by canonical path (`file-info`), LSP edits carry the raw
+   one; compare and store with this so a symlink cannot miss a buffer."
+  ^String [^String p]
+  (try (.getCanonicalPath (java.io.File. p)) (catch Exception _ p)))
+
+(defn- write-edited-file!
+  "Write a file the edit created in memory (it was not open before). Writes only
+   while the disk still holds the text the edit was computed from: a concurrent
+   external change wins and the buffer stays modified for review. Returns true
+   when the file was written."
+  [path ^String original]
+  (let [p (canonical-path path)
+        b (get-in @editor [:bufs p])
+        f (java.io.File. p)
+        disk (try (slurp f :encoding "UTF-8") (catch Exception _ nil))]
+    (cond
+      (nil? b)
+      (do (log/log "workspace edit: no buffer for" p) false)
+
+      (not= disk original)
+      (do (log/log "workspace edit: disk changed, left in buffer:" p) false)
+
+      :else
+      (try
+        (spit f (str (:text b)) :encoding "UTF-8")
+        (session/note-saved! p (:version b))
+        (swap! editor assoc-in [:bufs p :modified] false)
+        true
+        (catch Exception e
+          (log/log "workspace edit write failed:" p (.getMessage e))
+          false)))))
+
 (defn apply-workspace-edit!
-  "Apply a WorkspaceEdit to open buffers (opening files as needed). Runs on
-   the editor loop; returns the message shown."
+  "Apply a WorkspaceEdit to open buffers (opening files as needed). Files that
+   were not open are written to disk, like every other IDE's multi-file rename;
+   open buffers keep their edits in memory so the user saves them."
   [edit]
-  (let [groups (lsp/workspace-edits edit (fn [path] (text-for-path @editor path)))]
+  (let [originals (atom {})
+        groups (->> (lsp/workspace-edits
+                      edit
+                      (fn [path]
+                        (let [p (canonical-path path)
+                              t (text-for-path @editor p)]
+                          (swap! originals assoc p (some-> t str))
+                          t)))
+                    (mapv (fn [g] (update g :path canonical-path))))
+        open-before (into #{} (keep :file) (vals (:bufs @editor)))]
     (if (empty? groups)
       (swap! editor msg "No edits to apply")
-      (do (swap! editor (fn [s] (reduce apply-edit-group s groups)))
-          (swap! editor msg (str "Applied edits in " (count groups) " file(s)"))))))
+      (do
+        (swap! editor (fn [s] (reduce apply-edit-group s groups)))
+        (let [written (count (filter (fn [{:keys [path]}]
+                                       (and (not (contains? open-before path))
+                                            (write-edited-file! path (get @originals path))))
+                                     groups))]
+          (swap! editor msg (str "Applied edits in " (count groups) " file(s)"
+                                 (when (pos? written) (str ", " written " written)")))))))))
 
 (defn- apply-code-action!
   [sess action]
@@ -1699,6 +1759,82 @@
             (goto-line (str line)))
       s)))
 
+;; --- Debugger (DAP) ---
+;; A session at a time. Breakpoints are gutter marks, frames/locals open in list
+;; buffers, and every adapter round trip is async, so a stopped debuggee cannot
+;; freeze the editor.
+
+(defn- debug-jump
+  "Move to the frame the debugger stopped at: that is the point of stopping.
+   The *Debug* buffer keeps the stack for moving around afterwards."
+  [s {:keys [file line]}]
+  (if (and file (.exists (java.io.File. ^String file)))
+    (cond-> (find-file s file)
+      (some? line) (goto-line (str (inc (long line)))))
+    s))
+
+(defn debug-start
+  "C-c d d: start the language's debug adapter for the current buffer."
+  [s]
+  (let [b (cur s)
+        file (:file b)
+        l (when file (lang/language-for-file file))
+        cfg (:dap l)]
+    (msg s
+         (cond
+           (nil? file) "Save the buffer first"
+           (nil? l) "No language for this buffer"
+           (nil? cfg) (str "No debug adapter for " (:id l) " (see xmas.lang :dap)")
+           (not (dap/available? l))
+           (str "Debug adapter not installed: " (first (:argv cfg)))
+           :else
+           (dap/start! {:editor editor
+                        :root (or (project/root file)
+                                  (.getParent (java.io.File. ^String file)))
+                        :file file :language l :on-stop debug-jump})))))
+
+(defn debug-breakpoint
+  "C-c d b: toggle a breakpoint on this line."
+  [s]
+  (let [file (:file (cur s))]
+    (if file
+      (let [line (cmd/line-idx s)
+            lines (dap/toggle-breakpoint! file line)]
+        (msg s (format "%s:%d — %d breakpoint(s)" file (inc line) (count lines))))
+      (msg s "Buffer has no file"))))
+
+(defn- debug-result [s result]
+  (if result (msg s result) s))
+
+(defn debug-continue [s] (debug-result s (dap/continue-run!)))
+(defn debug-next     [s] (debug-result s (dap/next!)))
+(defn debug-step-in  [s] (debug-result s (dap/step-in!)))
+(defn debug-step-out [s] (debug-result s (dap/step-out!)))
+
+(defn debug-quit
+  "C-c d q: disconnect and terminate the debuggee."
+  [s]
+  (dap/stop!)
+  (msg s "Debug session stopped"))
+
+(defn debug-stack
+  "C-c d s: show the frames of the last stop."
+  [s]
+  (if (contains? (:bufs s) dap/stack-buffer-name)
+    (cmd/set-cur-buffer s dap/stack-buffer-name)
+    (msg s "No stack yet")))
+
+(defn debug-variables
+  "C-c d v: re-fetch the locals of the stopped frame."
+  [s]
+  (debug-result s (dap/variables!)))
+
+(defn debug-eval
+  "C-c d e: evaluate an expression in the stopped frame."
+  [_s]
+  (prompt "Debug eval: "
+          (fn [s expr] (debug-result s (dap/evaluate! expr)))))
+
 (defn- occur [s input]
   (if (str/blank? input)
     s
@@ -1733,6 +1869,16 @@
    \R lsp-rename
    \g lsp-signature-help
    \m lsp-document-symbols
+   \d {\d debug-start
+       \b debug-breakpoint
+       \c debug-continue
+       \n debug-next
+       \i debug-step-in
+       \o debug-step-out
+       \s debug-stack
+       \v debug-variables
+       \e debug-eval
+       \q debug-quit}
    :tab toggle-fold})
 
 (def ^:private cx-v-map
@@ -1809,6 +1955,20 @@
     (if (and sess (not (:large-file (cur s))) (lsp/on-path? (:argv sess)))
       (lsp-format s)
       (cli-format s))))
+
+(defn load-theme
+  "M-x load-theme: switch palette (:default or :light) and keep it in the
+   session, so a restart shows the same colours."
+  [s]
+  (mini-start s "Theme: "
+    (fn [s input]
+      (let [t (keyword (str/trim input))]
+        (if (view/use-theme! t)
+          (assoc s :theme t :msg (str "Theme: " (clojure.core/name t)))
+          (msg s (str "Unknown theme. Available: "
+                      (str/join ", " (view/theme-names)))))))
+    (fn [input _] {:completed input
+                   :candidates (mapv clojure.core/name (view/theme-names))})))
 
 ;; --- Config reload ---
 
@@ -1932,6 +2092,18 @@
    "imenu"                       (cmd-entry imenu "List definitions in the current buffer.")
    "reload-config"               (cmd-entry reload-config "Re-run ~/.xmas/init.clj.")
    "terminal"                    (cmd-entry terminal-open "Open a terminal buffer running $SHELL.")
+   "agent"                       (cmd-entry agent-cli "Open a terminal running the AI CLI ($XMAS_AGENT or claude).")
+   "debug"                       (cmd-entry debug-start "Start the language's debug adapter for this file.")
+   "debug-breakpoint"            (cmd-entry debug-breakpoint "Toggle a breakpoint on this line.")
+   "debug-continue"              (cmd-entry debug-continue "Resume the debuggee.")
+   "debug-next"                  (cmd-entry debug-next "Step over the next line.")
+   "debug-step-in"               (cmd-entry debug-step-in "Step into the call on this line.")
+   "debug-step-out"              (cmd-entry debug-step-out "Run until the current frame returns.")
+   "debug-stack"                 (cmd-entry debug-stack "Show the frames of the last stop.")
+   "debug-variables"             (cmd-entry debug-variables "Show the locals of the stopped frame.")
+   "debug-eval"                  (cmd-entry debug-eval "Evaluate an expression in the stopped frame.")
+   "debug-quit"                  (cmd-entry debug-quit "Disconnect the debug session.")
+   "load-theme"                  (cmd-entry load-theme "Switch the colour palette (default, light).")
    "complete-symbol-at-point"    (cmd-entry complete-symbol-at-point "Complete the symbol at point.")
    "git-status"                  (cmd-entry git-status "Show git status for the current project.")
    "git-commit"                  (cmd-entry gitcommit/commit-at-point "Commit staged changes.")
@@ -2334,7 +2506,9 @@
       (session/save-tick! editor)
       (lsp/tick! editor)
       (testres/tick! editor)
+      (dap/tick! editor)
       (deferred/tick! editor comp-cache)
+      (view/use-theme! (:theme @editor))
       (when (:exit @editor)
         ;; Clean exit: the final snapshot includes every edit, so the journal
         ;; is only deleted after that write succeeds.
@@ -2379,6 +2553,7 @@
        :kill [] :msg nil :mini nil :mini-history []
        :windows (win/leaf "*scratch*") :cur-window []
        :rows rows :cols cols
+       :theme :default
        :completion-sources
        (into {:default [complete/buffers complete/buffer-symbols]}
              (for [[_ l] lang/languages
@@ -2435,6 +2610,7 @@
 
 (defn- stop-services! [{:keys [nrepl web dev]}]
   (run-all [#(terminal/shutdown-all! tmux/backend)
+            dap/shutdown-all!
             #(dev/stop-watcher! dev)
             #(web/stop! web editor)
             #(nrepl/stop-server nrepl)]))
@@ -2453,7 +2629,9 @@
       ;; Load session before init.clj so user config can override
       (when-let [sess (session/load-session!)]
         (let [[restored ok] (session/restore-session @editor sess)]
-          (when ok (reset! editor (session/recover-journal! restored)))))
+          (when ok
+            (reset! editor (session/recover-journal! restored))
+            (dap/restore-breakpoints! (:breakpoints sess)))))
       (load-init-files!)
       (swap! editor recover-ask (pending-recoveries))
       ;; Baseline snapshot: the journal needs a version to replay from even if

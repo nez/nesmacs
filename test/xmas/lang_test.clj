@@ -28,3 +28,11 @@
 (deftest mode-for-file-returns-nil-for-unknown
   (is (= :clojure-mode (lang/mode-for-file "x.clj")))
   (is (nil? (lang/mode-for-file "x.unknown"))))
+(deftest debug-adapters-are-data-like-everything-else
+  (testing "languages with an interactive debugger carry an adapter config"
+    (doseq [id [:python :javascript :typescript :tsx]]
+      (let [d (:dap (lang/language id))]
+        (is (vector? (:argv d)) (str id))
+        (is (contains? #{:stdio :tcp} (:transport d)) (str id)))))
+  (testing "Clojure debugs through nREPL, not DAP"
+    (is (nil? (:dap (lang/language :clojure))))))

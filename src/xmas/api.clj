@@ -8,7 +8,8 @@
   (:require [xmas.cmd :as cmd]
             [xmas.keymap :as keymap]
             [xmas.mode :as mode]
-            [xmas.props :as props]))
+            [xmas.props :as props]
+            [xmas.view :as view]))
 
 (def ^:dynamic *state* nil)
 
@@ -61,6 +62,24 @@
   "Set the argv used to start language servers from now on."
   [argv]
   (apply! assoc :lsp-command (mapv str argv)))
+
+(defn configure-agent!
+  "Set the argv opened by `M-x agent` (the AI CLI lives in a terminal buffer;
+   the editor has no API client)."
+  [argv]
+  (apply! assoc :agent-command (mapv str argv)))
+
+(defn use-theme!
+  "Switch to a named palette (:default or :light). The editor loop applies it,
+   so this also works from init.clj and persists with the session."
+  [theme]
+  (apply! assoc :theme (keyword theme)))
+
+(defn set-face!
+  "Merge {:fg n :bg n :bold bool} into one face for ad-hoc tweaks. A later
+   `use-theme!` replaces the whole palette, so prefer a theme for broad changes."
+  [face attrs]
+  (view/set-face-attr! (keyword face) attrs))
 
 (defn- clamp-range
   "Clamp [from to) to the buffer text, the way buf/edit does."

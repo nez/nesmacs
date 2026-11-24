@@ -6,10 +6,13 @@
             [xmas.buf :as buf]
             [xmas.ed :as ed]
             [xmas.job :as job]
+            [xmas.lsp :as lsp]
             [xmas.nav :as nav]
             [xmas.persist :as persist]
             [xmas.rect :as rect]
             [xmas.session :as session]
+            [xmas.dap :as dap]
+            [xmas.view :as view]
             [xmas.spec :as spec]
             [xmas.window :as win]))
 
@@ -1835,3 +1838,80 @@
     (is (not= (session/signature s)
               (session/signature
                 (update-in s [:bufs "*test*"] #(buf/edit % 0 0 "x")))))))
+
+;; --- Themes and the debugger commands ---
+
+(deftest load-theme-switches-and-persists-the-palette
+  (try
+    (let [s (ed/load-theme (make-state "x" 0))
+          s1 (-> s (ed/handle-key \l) (ed/handle-key \i) (ed/handle-key \g)
+                 (ed/handle-key \h) (ed/handle-key \t))
+          s2 (ed/handle-key s1 :return)]
+      (is (= :light (:theme s2)))
+      (is (= 236 (get-in view/faces [:default :fg]))
+          "the palette is applied immediately, not only on the next tick"))
+    (finally (xmas.view/use-theme! :default))))
+
+(deftest load-theme-rejects-an-unknown-name
+  (let [s (ed/load-theme (make-state "x" 0))
+        s1 (-> s (ed/handle-key \n) (ed/handle-key \o) (ed/handle-key \p)
+               (ed/handle-key \e))
+        s2 (ed/handle-key s1 :return)]
+    (is (= (:theme s) (:theme s2)) "the theme is left alone")
+    (is (re-find #"Unknown theme" (:msg s2)))))
+
+(deftest debug-breakpoint-toggles-the-current-line
+  (try
+    (let [f (str (System/getProperty "java.io.tmpdir") "/xmas-ed-bp-"
+                 (System/nanoTime) ".py")
+          s (assoc-in (make-state "a\nb\nc" 0) [:bufs "*test*" :file] f)
+          s1 (ed/debug-breakpoint s)]
+      (is (= 1 (count (dap/breakpoints-for f))))
+      (is (re-find #"1 breakpoint" (:msg s1)))
+      (let [s2 (ed/debug-breakpoint s1)]
+        (is (= 0 (count (dap/breakpoints-for f))))
+        (is (re-find #"0 breakpoint" (:msg s2)))))
+    (finally (dap/restore-breakpoints! {}))))
+
+(deftest debug-start-explains-missing-adapters
+  (let [s (ed/debug-start (make-state "(defn f [])" 0))
+        s1 (assoc-in s [:bufs "*test*" :file] "/tmp/x.clj")]
+    (is (re-find #"Save the buffer first" (:msg s)))
+    (is (re-find #"No debug adapter for clojure" (:msg (ed/debug-start s1))))))
+
+(deftest debug-commands-without-a-session-report-it
+  (let [s (make-state "x" 0)]
+    (is (= "No debug session" (:msg (ed/debug-continue s))))
+    (is (= "No stack yet" (:msg (ed/debug-stack s))))
+    (is (= "No debug session" (:msg (ed/debug-variables s)))))
+  (is (re-find #"debug: off" (dap/status-line))))
+
+(deftest workspace-edit-writes-only-unopened-files
+  ;; Multi-file rename must reach disk for files the user never opened, while an
+  ;; open buffer keeps its edits in memory for the user to save or undo.
+  (let [dir (doto (java.io.File/createTempFile "xmas-ws" "") (.delete) (.mkdirs))]
+    (try
+      (binding [persist/*dir* dir]
+        (let [open-f (java.io.File. dir "open.py")
+              shut-f (java.io.File. dir "shut.py")
+              _ (spit open-f "aaa\n")
+              _ (spit shut-f "bbb\n")
+              open-path (.getCanonicalPath open-f)
+              shut-path (.getCanonicalPath shut-f)
+              range (fn [] {:start {:line 0 :character 0} :end {:line 0 :character 3}})]
+          (reset! ed/editor
+                  {:bufs {open-path (assoc (buf/make "open.py" "aaa\n" open-path)
+                                           :modified true)}
+                   :msg nil :mini nil :windows (win/leaf "open.py")
+                   :cur-window [] :rows 24 :cols 80})
+          (ed/apply-workspace-edit!
+            {:changes {(lsp/path->uri open-path) [{:range (range) :newText "AAA"}]
+                       (lsp/path->uri shut-path) [{:range (range) :newText "BBB"}]}})
+          (is (= "aaa\n" (slurp open-f)) "the open buffer is not written")
+          (is (true? (get-in @ed/editor [:bufs open-path :modified])))
+          (is (= "AAA\n" (str (get-in @ed/editor [:bufs open-path :text]))))
+          (is (= "BBB\n" (slurp shut-f)) "the unopened file is written")
+          (is (false? (get-in @ed/editor [:bufs shut-path :modified])))))
+      (finally
+        (reset! ed/editor nil)
+        (doseq [f (reverse (file-seq dir))] (.delete f))))))

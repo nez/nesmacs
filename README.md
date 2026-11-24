@@ -110,12 +110,23 @@ The rest follows from the same decision:
   `C-c R` rename, `C-c a` code actions, `C-c g` signature help, `C-c m`
   document symbols, `C-c f`/`C-c F` format buffer/region. One server per
   project root and language; servers start on demand.
+- **Debugging** — `C-c d d` starts the language's DAP adapter (debugpy,
+  vscode-js-debug; Clojure keeps nREPL). `C-c d b` toggles a gutter
+  breakpoint, `c`/`n`/`i`/`o` resume and step, `s`/`v` show frames and locals,
+  `e` evaluates in the stopped frame, `q` disconnects. Adapters are data in
+  `xmas.lang`; `make dap` runs the live debugpy test.
 - **Tests** — `M-x run-tests` runs the project's command as a job and parses
-  JUnit XML or TAP into `*Test Results*`; RET jumps to a failure.
+  JUnit XML or TAP into `*Test Results*`; RET jumps to a failure. Runners with
+  their own format still yield jumpable entries from `file:line` lines.
 - **Durability** — session restore for buffers, windows, points and props;
   per-command journal; auto-save with a recovery prompt; safe quit dialog.
-- **Rendering** — one named face map, durable props, incremental font-lock,
-  large-file mode above 1 MB or 100k lines (the region still paints there).
+- **Rendering** — one named face map with two palettes (`M-x load-theme`:
+  `default`, `light`) plus `api/set-face!` for one-off tweaks; durable props,
+  incremental font-lock, a one-column gutter for breakpoints and the stopped
+  line, large-file mode above 1 MB or 100k lines (the region still paints
+  there).
+- **AI assistance** — `M-x agent` opens the configured CLI (`$XMAS_AGENT`, or
+  `claude`) in a normal terminal buffer. The editor has no API client.
 
 Packages are Clojure libraries on `deps.edn`; there is no package manager yet.
 
@@ -178,11 +189,12 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 578 tests / 6,299 assertions
+make test    # 630 tests / 6,444 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # integration tests against a real clojure-lsp
 make term    # terminal session test against a real tmux
+make dap     # debugger test against a real debugpy adapter
 ```
 
 The pty scripts start the editor in a real terminal, drive it with keys and
@@ -200,8 +212,9 @@ navigation, git, LSP, completion and tmux-backed terminals have working slices.
 The language platform (M8: Tree-sitter highlighting and folding, with queries
 vendored from nvim-treesitter under Apache-2.0, plus LSP breadth for Clojure/EDN,
 Python, TypeScript and JavaScript) and the IDE workflow (M9: blame, hunk
-staging, forge, test results, snippets) are implemented. Debugging (M10) is
-post-1.0.
+staging, forge, test results, snippets) are implemented. M10 adds the DAP
+debugger, themes and the agent CLI; its non-editor platform app is the only
+open milestone item.
 [ROADMAP.md](ROADMAP.md) tracks the rest and defines 1.0: a full week as the
 primary editor without falling back to another tool.
 

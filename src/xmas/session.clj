@@ -2,6 +2,7 @@
   "Session persistence: save/restore buffers, windows, and editor state.
    Undo history is explicitly NOT persisted (per roadmap)."
   (:require [xmas.buf :as buf]
+            [xmas.dap :as dap]
             [xmas.gap :as gap]
             [xmas.lang :as lang]
             [xmas.log :as log]
@@ -157,7 +158,8 @@
                  [name (:version b) (:point b) (:modified b)])
                (:bufs s))
          (:windows s) (:cur-window s)
-         (:recentf s) (:bookmarks s) (:mini-history s)]))
+         (:recentf s) (:bookmarks s) (:mini-history s)
+         (dap/snapshot-breakpoints)]))
 
 (defn- structure-signature
   "The part of the session that must reach disk soon: which buffers exist and
@@ -176,7 +178,9 @@
      :cur-window (:cur-window state)
      :recentf (:recentf state [])
      :bookmarks (:bookmarks state {})
-     :mini-history (:mini-history state [])}))
+     :mini-history (:mini-history state [])
+     :theme (:theme state :default)
+     :breakpoints (dap/snapshot-breakpoints)}))
 
 (defn- trim-journal!
   "Drop journal records already covered by the snapshot just written, so the
@@ -359,6 +363,8 @@
        :cur-window cur-window
        :recentf (sanitize-strings (:recentf data))
        :bookmarks (sanitize-bookmarks (:bookmarks data))
+       :theme (when (keyword? (:theme data)) (:theme data))
+       :breakpoints (when (map? (:breakpoints data)) (:breakpoints data))
        :mini-history (sanitize-strings (:mini-history data))})))
 
 (defn load-session!
@@ -378,6 +384,7 @@
           recentf (:recentf session-data)
           bookmarks (:bookmarks session-data)
           mini-history (:mini-history session-data)
+          theme (:theme session-data)
 
           ;; Rebuild buffers from saved data
           rebuilt-bufs (update-vals bufs data->buffer)
@@ -426,6 +433,7 @@
                         (assoc :recentf recentf)
                         (assoc :bookmarks bookmarks)
                         (assoc :mini-history mini-history)
+                        (assoc :theme (or theme (:theme state :default)))
                         ;; Point current window to its buffer
                         (update-in (conj valid-cur-window :buffer)
                                    (fn [_] (get-in rebuilt-windows valid-cur-window :buffer))))]

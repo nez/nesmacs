@@ -20,6 +20,12 @@
 (defonce ^:private queries (atom {}))    ; [queries kind] -> TSQuery | ::failed
 (defonce ^:private states (atom {}))     ; buffer key -> parser/tree/spans cache
 
+(def ^:dynamic *slow-parse-ms*
+  "Latency budget for one parse, in milliseconds. Over budget the buffer stops
+   parsing (tokenizer fallback) instead of freezing the editor. Dynamic so tests
+   can force the fallback without a huge file."
+  50)
+
 ;; --- Loading ---
 
 (defn- instantiate
@@ -240,13 +246,22 @@
     (try
       (let [^String text (str text)
             old (:tree (parse-state key))
+            t0 (System/nanoTime)
             tree (.parseString ^TSParser parser old text)
             spans (run-query l "highlights" tree text)
-            folds (run-query l "folds" tree text)]
+            folds (run-query l "folds" tree text)
+            ms (/ (- (System/nanoTime) t0) 1e6)]
         (when old (try (.close ^TSTree old) (catch Throwable _)))
         (let [st (assoc (parse-state key) :tree tree :version version
                         :spans spans :folds folds)]
           (swap! states assoc key st)
+          ;; Self-measured latency: once a parse costs more than the budget,
+          ;; this buffer stops parsing and the tokenizer takes over for good
+          ;; (like large-file mode). Measured, not guessed from line counts.
+          (when (> ms (double *slow-parse-ms*))
+            (log/log "tree-sitter slow parse:" (:id l) (str (long ms) "ms")
+                     "- falling back to the tokenizer for" (str key))
+            (swap! states update key assoc :slow? true :slow-ms (long ms)))
           st))
       (catch Throwable e
         ;; A native failure must not take the editor down; remember that this
@@ -256,18 +271,27 @@
         (swap! states dissoc key)
         nil))
     nil)
-  ; DEBT: parsing runs on the editor thread between keystrokes. For files with
-  ; tens of thousands of lines this adds measurable latency; move to a worker
-  ; with incremental parsing (or a sidecar process) before v2.)
-)
+  ; DEBT: parsing runs on the editor thread between keystrokes. A parse slower
+  ; than *slow-parse-ms* permanently falls back to the line tokenizer instead of
+  ; freezing the editor; move to a worker with incremental parsing before v2 if
+  ; a large buffer needs real highlighting.
+  )
 
 (defn state-for
-  "Parsed state for `key` at `version`, parsing only when the version moved."
+  "Parsed state for `key` at `version`, parsing only when the version moved.
+   nil once this buffer was marked slow, or when no grammar is available."
   [key l text version]
   (let [st (parse-state key)]
-    (if (and st (= version (:version st)) (= (:lang-id st) (:id l)))
-      st
-      (compute key l text version))))
+    (cond
+      (:slow? st) nil
+      (and st (= version (:version st)) (= (:lang-id st) (:id l))) st
+      :else (compute key l text version))))
+
+(defn slow?
+  "True when parses for `key` exceeded the latency budget and the buffer fell
+   back to the tokenizer. Cleared by `forget!` (buffer killed)."
+  [key]
+  (boolean (:slow? (parse-state key))))
 
 (defn spans
   "Highlight spans {:from :to :face :priority} for the whole buffer, or nil."
