@@ -17,7 +17,7 @@ is something you can inspect, change and debug while it is running.
 
 ## Run it
 
-Needs Java 11+, the [Clojure CLI](https://clojure.org/guides/install_clojure)
+Needs Java 17+, the [Clojure CLI](https://clojure.org/guides/install_clojure)
 and a POSIX terminal. Terminals inside the editor need `tmux` 3.0+ on `PATH`.
 
 ```sh
@@ -186,6 +186,10 @@ generative tests for buffers, props and text.
 
 Pre-1.0. Solid editing and text properties are done; async jobs, project
 navigation, git, LSP, completion and tmux-backed terminals have working slices.
+The language platform (M8: Tree-sitter highlighting plus LSP breadth for
+Clojure/EDN, Python, TypeScript and JavaScript) and the IDE workflow (M9: git
+history and staging, forge, test results, snippets) are accepted and gate 1.0;
+debugging (M10) is post-1.0.
 [ROADMAP.md](ROADMAP.md) tracks the rest and defines 1.0: a full week as the
 primary editor without falling back to another tool.
 
@@ -193,7 +197,8 @@ If you need org-mode, Magit, a GUI, or your existing `~/.emacs.d` today, use
 Emacs — it is 40 years of work and this is not. xmas is for the opposite itch:
 an editor small enough to read, where extending it means writing a function and
 the running editor is debuggable from the REPL. No Elisp, no GUI frames, no
-native modules.
+user native extension modules; a vetted library such as Tree-sitter sits behind
+an optional backend.
 
 Contributions are welcome. Read the milestone in [ROADMAP.md](ROADMAP.md), keep
 commands pure and reach new behavior through `xmas.api`; data structures need

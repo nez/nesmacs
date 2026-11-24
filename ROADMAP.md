@@ -1,6 +1,6 @@
 # xmas roadmap
 
-Scope for the Clojure-native editor. Product definition, milestones, and the
+Scope for the Clojure-native IDE. Product definition, milestones, and the
 things this project deliberately will not build. See [PRD.md](PRD.md) for the
 principles behind it and [README.md](README.md) for the current code.
 
@@ -15,7 +15,12 @@ back to another tool for this loop:
 4. stage, diff and commit in git,
 5. run the project's tests and read the output,
 6. reload configuration without restarting,
-7. survive `kill -9` with no lost buffer content.
+7. survive `kill -9` with no lost buffer content,
+8. edit Clojure/EDN, Python, TypeScript and JavaScript with syntax
+   highlighting and LSP breadth (references, rename, code actions, format).
+
+M8 closes item 8; M9 closes the daily workflow around it. Debugging and the
+remaining platform extras (M10) are explicitly post-v1.0.
 
 One non-editor application must exist on the same primitives (git status is
 the first; see M5), because "the editor is the first app" is the platform
@@ -34,18 +39,22 @@ claim this project is testing.
 
 ## Status
 
-Milestones M0-M7 are implemented to the scope described below. v1.0 is not
-declared yet because it requires a full week as the primary editor (see
+Milestones M0-M7 are implemented to the scope described below. M8 (language
+platform) and M9 (IDE workflow) are accepted and must ship before v1.0; M10
+(debugging and platform extras) is post-v1.0. v1.0 is not declared yet: it
+requires M8/M9 plus a full week as the primary editor (see
 [Definition of v1.0](#definition-of-v10)). Current features, test counts and
 benchmarks live in [README.md](README.md); this file keeps the milestone record
-and the remaining decisions.
+and the settled decisions.
 
 The plan started from an editor with the Emacs editing primitives already in
 place. The gaps it set out to close — clipboard and bracketed paste, undo
 grouping, crash recovery, async jobs, project navigation, completion, git and
-LSP — are now closed. tmux-backed terminals ship as core infrastructure: the
-editor paints snapshots from a backend protocol, so a polling or pty4j backend
-could replace tmux without touching the editor side.
+LSP — are now closed. M8-M9 extend the same primitives into a language platform
+and the daily IDE loop instead of adding a second renderer, parser or process
+model. tmux-backed terminals ship as core infrastructure: the editor paints
+snapshots from a backend protocol, so a polling or pty4j backend could replace
+tmux without touching the editor side.
 
 ---
 
@@ -101,7 +110,8 @@ search matches and the region use the same mechanism, and the overlay
 namespace is gone. All three hold, and `init.clj` can add and remove props
 through `xmas.api`.
 
-**Not here:** tree-sitter, semantic highlighting, folds.
+**Not here:** tree-sitter, semantic highlighting, folds. Tree-sitter and folds
+are revisited in M8 as an optional backend; semantic highlighting stays out.
 
 Size M. Risk medium: property adjustment is the classic off-by-one graveyard;
 property tests are the exit criterion. Covered by targeted boundary tests and
@@ -249,13 +259,95 @@ usable, and no failure mode leaves a broken terminal.
 
 Size M. Risk medium.
 
-## M8 — Platform extras (optional, after v1.0)
+## M8 — Language platform (accepted, before v1.0)
+
+**Goal:** edit the four supported languages as first-class languages without
+writing parsers, language servers or per-language code. Everything
+language-specific is data; the editor supplies one parser backend and one
+protocol client.
+
+**Settled decisions**
+
+- Java floor is 17, enforced by `install.sh`; `deps.edn` pins Clojure 1.12.4.
+- Tree-sitter is an optional runtime backend: `io.github.bonede/tree-sitter`
+  plus per-grammar Maven artifacts. That binding supports JDK 8+, so Java 17
+  leaves room to move to the official binding later.
+- Queries come from nvim-treesitter (Apache-2.0) or the grammar repositories
+  (MIT), with attribution. GNU Emacs `treesit` queries are GPLv3 and are not
+  copied while xmas stays MIT.
+- Languages: Clojure/EDN, Python, TypeScript, JavaScript. Emacs Lisp keeps its
+  existing mode; unknown extensions open as plain text.
+- Debugging is post-v1.0 (M10).
+
+**Scope**
+
+1. Mode registry as data: extension -> mode, comment syntax, formatter, LSP
+   command, grammar, query set, indentation. Adding a language is data.
+2. A `:parser` per buffer behind a small interface: incremental edit,
+   byte->char offset conversion, parsing outside the render loop, skipped in
+   large-file mode. A missing grammar or native library falls back to the
+   tokenizer or plain text.
+3. Highlighting for the four languages by mapping query captures to
+   `xmas.view/faces`.
+4. LSP breadth on the existing client: references, rename, code actions,
+   signature help, document symbols, formatting and range formatting, and
+   workspace edits for multi-file changes.
+5. Format-on-save: LSP formatting first, per-mode CLI fallback (`cljfmt`,
+   `ruff format`, `prettier`).
+6. Folding and imenu from the Tree-sitter tree once highlighting is stable.
+7. Tests: parser and offset unit tests, query mapping, a pty highlighting
+   smoke, and `make lsp` coverage for each supported server. A missing grammar
+   or server is a covered path, never a crash.
+
+**Done when:** `.clj`, `.py`, `.ts` and `.js` open with correct highlighting;
+references, rename, code actions and format work through the LSP client;
+removing a grammar or server degrades to plain text without breaking startup;
+large files stay inside the M7 keystroke budget.
+
+**Not here:** debugging, semantic tokens, inlay hints, tree-sitter for every
+language, writing grammars or queries from scratch, GPL query sets.
+
+Size L. Risk high: native code can end the JVM, and offset conversion is a
+classic off-by-one source. The journal bounds text loss; a grammar crash is an
+accepted, documented risk until a sidecar proves necessary.
+
+## M9 — IDE workflow (accepted, before v1.0)
+
+**Goal:** close the daily IDE loop around the language platform without
+building a second UI or a second process model.
+
+**Scope**
+
+1. Git history and staging: blame, hunk-level staging through
+   `git apply --cached`, and forge actions from `gh`/`glab` CLI output. No API
+   clients.
+2. Test results: run the project's test command as a job and parse JUnit XML
+   or TAP into a list buffer that jumps to failures. One parser, not one per
+   framework.
+3. Snippets: advertise LSP `snippetSupport` and expand server-provided
+   snippets with a minimal expander; no snippet library of our own.
+4. Reuse the existing list buffer, minibuffer and props for every panel.
+
+**Done when:** blame, stage-by-hunk, a PR list and a failing test run are
+usable without leaving xmas, and none of them blocks typing.
+
+**Not here:** debug adapter, magit parity, a test framework, a second widget
+system.
+
+Size M. Risk low-medium.
+
+## M10 — Debugging and platform extras (post-v1.0, optional)
 
 Only after v1.0, and only with a concrete use:
 
+- A DAP client on a JSON-RPC transport generalized from `xmas.lsp`; adapters
+  are reused (`debugpy`, `delve`, `lldb-dap`, `java-debug`). Breakpoints,
+  stack, variables, evaluate and output reuse list buffers and the minibuffer.
 - One non-editor app beyond git (HTTP client or feed reader — `http-kit` is
   already a dependency), to test the platform claim.
-- Themes, tabs, multiple cursors, tree-sitter, folding.
+- Themes, tabs, multiple cursors, semantic tokens, inlay hints.
+- An external agent CLI in a terminal buffer for AI assistance; no API client
+  in the editor.
 
 Nothing in this milestone is promised.
 
@@ -263,38 +355,56 @@ Nothing in this milestone is promised.
 
 ## Order and cut line (historical)
 
-This is the original sequencing; all milestones through M7 are implemented.
+This is the original sequencing; M0-M7 are implemented. M8 and M9 are the
+accepted additions that gate v1.0; M10 is post-v1.0 and not promised.
 Dependencies: M1 ← nothing; M2 ← nothing; M3 ← M2; M4 ← M3; M5 ← M2 (+M1 for
-diff faces); M6 ← M1, M2, M4; M7 ← all; M8 ← v1.0.
+diff faces); M6 ← M1, M2, M4; M7 ← all; M8 ← M1, M4, M6; M9 ← M2, M5;
+M10 ← v1.0.
 
-If time runs out, cut from the bottom: **M8 → M6 → M5 → M4**. The irreducible
-core is **M0–M3**: correct editing, one painting mechanism, non-blocking
-processes, and project navigation. That alone is a usable editor.
+If time runs out before v1.0, cut in this order: **M9's forge/tests/snippets,
+then M8's folding/imenu**. Keep M8's mode registry, highlighting and LSP
+breadth: they are the language bar. The irreducible core is still **M0-M3**:
+correct editing, one painting mechanism, non-blocking processes, and project
+navigation.
 
 ## Permanent non-goals
 
 - Emacs Lisp, GNU `lisp/*.el`, `~/.emacs.d`, `package.el`, magit/org parity.
-- GUI frames, email/IRC/feed clients (except as the single M8 experiment).
+- GUI frames, email/IRC/feed clients (except as the single M10 experiment).
 - A VT emulator of our own: terminals run under tmux and the editor paints
   captures. A different backend must still fit the `xmas.terminal/Backend`
   protocol.
+- A second extension runtime or arbitrary native modules. A vetted native
+  library behind an optional backend (Tree-sitter) is allowed.
 - Collaborative editing, multi-user sessions, Windows terminal support.
 - Plugin sandboxing: configuration is the user's own code, trusted like any
   `init` file.
 
-## Open decisions
+## Decisions
 
 The props/overlay, completion-UI, job-write and LSP-implementation questions
-are settled in their milestones. One decision remains:
+were settled in their milestones. The language milestone settled the rest:
 
-1. **Clojure floor** — Java 11+ is enforced in `install.sh`; `deps.edn` does
-   not pin a Clojure version. Pin the minimum before packaging.
+- **Java 17** is the floor (`install.sh`); **Clojure 1.12.4** is pinned in
+  `deps.edn`.
+- **Tree-sitter** is an optional backend, not a foundation. Binding:
+  `io.github.bonede/tree-sitter`; queries: nvim-treesitter (Apache-2.0) or
+  grammar repositories (MIT); no GNU Emacs GPLv3 queries while xmas is MIT.
+- **Supported languages**: Clojure/EDN, Python, TypeScript, JavaScript;
+  unknown extensions fall back to plain text.
+- **Debugging** (DAP) is post-v1.0.
+
+No decisions block v1.0. Grammar pins and DAP adapter coverage are maintenance,
+not architecture.
 
 ## Measurement
 
 - Tests: `make check` stays green at every commit; new data structures get
   property tests.
-- Interactive: scripted pty smoke for startup, config errors, and clean exit.
+- Interactive: scripted pty smoke for startup, config errors, clean exit and
+  language highlighting.
+- Languages: `make lsp` covers each supported server; a missing grammar or
+  server is a tested fallback path.
 - Performance: the M7 targets, measured on the user's machine, not synthetic
   hardware.
 - Product: the seven-day v1.0 loop, with zero data-loss incidents.

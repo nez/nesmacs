@@ -2,7 +2,7 @@
 set -e
 
 XMAS_DIR="$(cd "$(dirname "$0")" && pwd)"
-MIN_JAVA=11
+MIN_JAVA=17
 
 echo "=== xmas setup ==="
 
