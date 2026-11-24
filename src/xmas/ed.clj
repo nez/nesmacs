@@ -429,8 +429,13 @@
     ;; switch into " *mini*" would wedge the minibuffer machinery on the
     ;; next prompt.
     (.startsWith ^String name " ") (msg s (str "Reserved buffer name: " name))
-    (cmd/buf s name) (cmd/set-cur-buffer s name)
-    :else (-> s (assoc-in [:bufs name] (buf/make name)) (cmd/set-cur-buffer name))))
+    :else
+    ;; find-file keys buffers by path; the mode line shows the file name, so
+    ;; accept either and never create a second empty buffer for a real one.
+    (if-let [k (or (when (contains? (:bufs s) name) name)
+                   (some (fn [[k b]] (when (= name (:name b)) k)) (:bufs s)))]
+      (cmd/set-cur-buffer s k)
+      (-> s (assoc-in [:bufs name] (buf/make name)) (cmd/set-cur-buffer name)))))
 
 (defn kill-buffer
   "Remove `name` (defaults to current). Refuses to kill the last buffer.
@@ -2663,4 +2668,5 @@
         (try (command-loop)
              (finally (stop-services! services)))))
     (finally
-      (run-all [#(log/log "xmas exiting") lsp/shutdown-all! proc/kill-all! log/close! t/teardown!]))))
+      (run-all [#(log/log "xmas exiting") lsp/shutdown-all! proc/kill-all!
+                log/close! t/teardown! shutdown-agents]))))

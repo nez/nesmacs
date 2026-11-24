@@ -247,6 +247,14 @@
 (deftest switch-buffer-existing
   (is (= "*test*" (:buf (ed/switch-buffer (make-state "abc" 0) "*test*")))))
 
+(deftest switch-buffer-finds-a-file-buffer-by-display-name
+  ;; find-file keys a buffer by absolute path while the mode line shows the
+  ;; file name; typing that name must not create a second, empty buffer.
+  (let [path "/tmp/demo.txt"
+        s (assoc-in (make-state "abc" 0) [:bufs path]
+                    (assoc (buf/make "demo.txt" "file text" path) :journal? false))]
+    (is (= path (:buf (ed/switch-buffer s "demo.txt"))))))
+
 (deftest switch-buffer-new
   (let [s' (ed/switch-buffer (make-state "abc" 0) "*new*")]
     (is (= "*new*" (:buf s')))
