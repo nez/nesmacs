@@ -3,8 +3,8 @@
 
 Drives the real editor in a pty against a temp git project. `gh` is a stub that
 prints the same JSON the real CLI emits: the test has no GitHub credentials,
-but it still exercises xmas.forge's parse and list buffer. Run with `make pty`.
-Uses a temp HOME (and -Duser.home) so it never touches the real ~/.xmas.
+but it still exercises nesmacs.forge's parse and list buffer. Run with `make pty`.
+Uses a temp HOME (and -Duser.home) so it never touches the real ~/.nesmacs.
 """
 import fcntl
 import os
@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TIMEOUT = 60
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]")
 
-home = Path(tempfile.mkdtemp(prefix="xmas-lists-"))
+home = Path(tempfile.mkdtemp(prefix="nesmacs-lists-"))
 proj = home / "proj"
 proj.mkdir()
 doc = proj / "doc.txt"
@@ -77,7 +77,7 @@ if pid == 0:
     os.chdir(ROOT)
     os.environ["HOME"] = str(home)
     os.environ["PATH"] = str(bin_dir) + ":" + os.environ["PATH"]
-    os.environ["XMAS_NREPL_PORT"] = "0"
+    os.environ["NESMACS_NREPL_PORT"] = "0"
     os.execvp("clojure", ["clojure", "-J-Duser.home=" + str(home), "-M:run"])
 
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
@@ -187,11 +187,11 @@ finally:
         pass
 
 log = ""
-logfile = home / ".xmas" / "debug.log"
+logfile = home / ".nesmacs" / "debug.log"
 if logfile.exists():
     log = logfile.read_text(errors="replace")
-ok &= "xmas exiting" in log
-checks.append(("debug.log clean exit", "xmas exiting" in log))
+ok &= "nesmacs exiting" in log
+checks.append(("debug.log clean exit", "nesmacs exiting" in log))
 ok &= "Exception" not in log and "Uncaught" not in log
 
 for name, passed in checks:

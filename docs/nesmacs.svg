@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="691" height="366" viewBox="0 0 691 366" role="img" aria-label="nesmacs editing a Clojure buffer">
+<rect width="100%" height="100%" rx="10" fill="#14151c"/>
+<rect x="0" y="0" width="691" height="44" rx="10" fill="#1b1d27"/>
+<rect x="0" y="34" width="691" height="10" fill="#1b1d27"/>
+<circle cx="18" cy="22" r="5.5" fill="#ff5f57"/>
+<circle cx="38" cy="22" r="5.5" fill="#febc2e"/>
+<circle cx="58" cy="22" r="5.5" fill="#28c840"/>
+<text x="346" y="26" fill="#7d7f93" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" text-anchor="middle">nesmacs — src/nesmacs/hello.clj</text>
+<text x="18.0" y="57.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">(</text>
+<text x="25.8" y="57.5" fill="#5f87af" font-weight="600" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">ns</text>
+<text x="41.4" y="57.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13"> nesmacs.hello                                                                      </text>
+<text x="18.0" y="76.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">  (</text>
+<text x="41.4" y="76.5" fill="#d7af87" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">:require</text>
+<text x="103.8" y="76.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13"> [nesmacs.api </text>
+<text x="189.6" y="76.5" fill="#d7af87" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">:as</text>
+<text x="213.0" y="76.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13"> api]))                                                    </text>
+<text x="18.0" y="114.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">(</text>
+<text x="25.8" y="114.5" fill="#5f87af" font-weight="600" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">defn</text>
+<text x="57.0" y="114.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13"> greet                                                                         </text>
+<text x="33.6" y="133.5" fill="#87af5f" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">&quot;Say hello in the echo area.&quot;</text>
+<text x="18.0" y="152.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">  [s]                                                                               </text>
+<text x="18.0" y="171.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">  (assoc s </text>
+<text x="103.8" y="171.5" fill="#d7af87" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">:msg</text>
+<text x="142.8" y="171.5" fill="#87af5f" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">&quot;hello from init.clj&quot;</text>
+<text x="306.6" y="171.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">))                                             </text>
+<text x="18.0" y="209.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">(api/bind! </text>
+<text x="103.8" y="209.5" fill="#87af5f" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">&quot;C-c g&quot;</text>
+<text x="158.4" y="209.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13"> #&#x27;greet)                                                         </text>
+<text x="18.0" y="228.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">(api/add-hook! </text>
+<text x="135.0" y="228.5" fill="#d7af87" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">:clojure-mode-hook</text>
+<text x="275.4" y="228.5" fill="#c8c8d4" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13"> identity)                                         </text>
+<rect x="18.0" y="310.0" width="655.2" height="19" fill="#87af87"/>
+<text x="18.0" y="323.5" fill="#262626" font-weight="600" xml:space="preserve" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13"> -- src/nesmacs/hello.clj   L7 C20  (clojure-mode)                                     </text>
+</svg>

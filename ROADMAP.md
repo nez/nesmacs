@@ -1,4 +1,4 @@
-# xmas roadmap
+# nesmacs roadmap
 
 Scope for the Clojure-native IDE. Product definition, milestones, and the
 things this project deliberately will not build. See [PRD.md](PRD.md) for the
@@ -6,7 +6,7 @@ principles behind it and [README.md](README.md) for the current code.
 
 ## Definition of v1.0
 
-xmas is 1.0 when it can be the primary editor for a full week without falling
+nesmacs is 1.0 when it can be the primary editor for a full week without falling
 back to another tool for this loop:
 
 1. open and edit files in a project (including a 100k-line file),
@@ -88,10 +88,10 @@ diagnostics and diffs.
 
 **Built**
 
-- `xmas.props` holds durable `{:from :to :face :priority :owner}` annotations
+- `nesmacs.props` holds durable `{:from :to :face :priority :owner}` annotations
   on the buffer and adjusts them on every edit; search, query-replace, LSP
   diagnostics and diff faces all write props. Extensions use
-  `xmas.api/add-prop!`, `set-prop!` and `remove-prop!`.
+  `nesmacs.api/add-prop!`, `set-prop!` and `remove-prop!`.
 - The region is a render-time prop (`:owner :region`, high priority), so it
   goes through the same painter without being stored or adjusted. It still
   paints in large-file mode, where buffer props are skipped.
@@ -101,12 +101,12 @@ diagnostics and diffs.
   lines outside the viewport are pruned on scroll, keeping only the cheap lexer
   states; large-file mode skips the cache entirely. This is the same span
   painter, not a second overlay system.
-- `xmas.view/faces` is the single named face map; terminal and web share it.
+- `nesmacs.view/faces` is the single named face map; terminal and web share it.
 
 **Done when:** deleting text inside a highlighted range leaves correct props,
 search matches and the region use the same mechanism, and the overlay
 namespace is gone. All three hold, and `init.clj` can add and remove props
-through `xmas.api`.
+through `nesmacs.api`.
 
 **Not here:** tree-sitter, semantic highlighting, folds. Tree-sitter and folds
 are revisited in M8 as an optional backend; semantic highlighting stays out.
@@ -121,10 +121,10 @@ property tests are the exit criterion. Covered by targeted boundary tests and
 
 **Scope**
 
-- `xmas.proc`: `ProcessBuilder` with argv vectors (never a shell string),
+- `nesmacs.proc`: `ProcessBuilder` with argv vectors (never a shell string),
   cwd/env, stdout/stderr filters, exit sentinel, kill, reaping on exit.
 - Background writes go through pure `swap!` functions; a job owns its buffer.
-- `xmas.job`: a process-backed buffer (listbuf pattern) with streaming append,
+- `nesmacs.job`: a process-backed buffer (listbuf pattern) with streaming append,
   `C-c C-k` kill, `g` rerun, and a mode keymap.
 - Convert long shell commands to jobs; keep blocking only for region filters
   whose output replaces the region.
@@ -193,7 +193,7 @@ Size M. Risk low–medium.
 - Document the app recipe (buffer + mode + keymap + job) in the README.
 
 **Done when:** a full commit (inspect, stage, message, commit) happens without
-leaving xmas, and refresh does not block input.
+leaving nesmacs, and refresh does not block input.
 
 **Not here:** magit parity, rebase UI, hunk-level staging (until asked),
 blame, forge/PR integration.
@@ -206,7 +206,7 @@ Size M. Risk low.
 
 **Scope**
 
-- JSON-RPC 2.0 over stdio on top of `xmas.proc`; document sync; server
+- JSON-RPC 2.0 over stdio on top of `nesmacs.proc`; document sync; server
   lifecycle (start on project open, restart on crash, shutdown on exit).
 - Diagnostics as M1 props; hover in the echo area; `M-.` definition;
   completion as an M4 source.
@@ -215,7 +215,7 @@ Size M. Risk low.
 - `make lsp` runs the end-to-end check against the real `clojure-lsp` binary
   (diagnostics, hover, completion, definition, crash restart); it is excluded
   from `make test` because it needs the server and its indexing time.
-- The protocol layer is hand-rolled on `xmas.proc`; there is no LSP library
+- The protocol layer is hand-rolled on `nesmacs.proc`; there is no LSP library
   dependency.
 
 **Done when:** clojure-lsp shows squiggles and completions, `M-.` jumps,
@@ -238,7 +238,7 @@ Size L. Risk high.
 
 - Session restore: buffers, windows, points, recent files (undo history is
   explicitly not persisted).
-- Edit journal: each command appends its text edits to `~/.xmas/journal.edn`,
+- Edit journal: each command appends its text edits to `~/.nesmacs/journal.edn`,
   so `kill -9` loses at most the command in flight. On restart the journal
   replays over the last snapshot (trimmed to keep it small) and is then folded
   into a new snapshot. A save also records a marker, so edits already in the
@@ -274,7 +274,7 @@ protocol client.
   folds. Locals, injections and indents are not consumed yet: indentation is
   the formatter's job, and no feature needs the other two. Grammar
   repositories (MIT) supply only what nvim-treesitter lacks and the grammar
-  pins. GNU Emacs `treesit` queries are GPLv3 and are not copied while xmas
+  pins. GNU Emacs `treesit` queries are GPLv3 and are not copied while nesmacs
   stays MIT.
 - Languages: Clojure/EDN, Python, TypeScript, JavaScript. Emacs Lisp keeps its
   existing mode; unknown extensions open as plain text.
@@ -289,7 +289,7 @@ protocol client.
    conversion, skipped in large-file mode. A missing grammar or native library
    falls back to the tokenizer or plain text.
 3. Highlighting for the four languages by mapping query captures to
-   `xmas.view/faces`.
+   `nesmacs.view/faces`.
 4. LSP breadth on the existing client: references, rename, code actions,
    signature help, document symbols, formatting and range formatting, and
    workspace edits for multi-file changes.
@@ -312,8 +312,8 @@ protocol client.
   `#lua-match?` to `#match?` and drop `#set!`, which the binding rejects at a
   variable arity. `#any-of?` and `#eq?` are supported natively.
 - Map captures by prefix (`@keyword.*` -> `:keyword`, `@string.*` ->
-  `:string`, ...) onto the xmas face palette. Adding a face is one line in
-  `xmas.view/faces`, and the palette, not the query source, is what limits how
+  `:string`, ...) onto the nesmacs face palette. Adding a face is one line in
+  `nesmacs.view/faces`, and the palette, not the query source, is what limits how
   much of a query set is visible.
 - Record the grammar revision next to each vendored query set; revisions come
   from nvim-treesitter's parser list (`lua/nvim-treesitter/parsers.lua`).
@@ -350,7 +350,7 @@ building a second UI or a second process model.
 4. Reuse the existing list buffer, minibuffer and props for every panel.
 
 **Done when:** blame, stage-by-hunk, a PR list and a failing test run are
-usable without leaving xmas, and none of them blocks typing.
+usable without leaving nesmacs, and none of them blocks typing.
 
 **Not here:** debug adapter, magit parity, a test framework, a second widget
 system.
@@ -364,9 +364,9 @@ daily need the LSP surface cannot cover. Clojure keeps nREPL/CIDER.
 
 **Scope**
 
-1. A DAP client on `xmas.rpc`: the content-length framing LSP already used,
+1. A DAP client on `nesmacs.rpc`: the content-length framing LSP already used,
    extracted so both protocols share it, over a child's stdio or a TCP socket.
-   Adapter configuration is data in `xmas.lang` (`:dap`: `:transport`, `:argv`,
+   Adapter configuration is data in `nesmacs.lang` (`:dap`: `:transport`, `:argv`,
    `:launch`) with `{port}` and `{env:NAME}` expansion, so no adapter path is
    hard-coded. Shipped configs: debugpy (stdio) and vscode-js-debug (TCP, server
    path from `$JS_DEBUG_DAP`). `make dap` is the live adapter test. js-debug
@@ -382,10 +382,10 @@ daily need the LSP surface cannot cover. Clojure keeps nREPL/CIDER.
    through `use-theme!`, included in the frame signature so a switch repaints on
    the next tick, and stored in the session. `api/set-face!` covers one-off
    tweaks.
-4. An external agent CLI in a terminal buffer (`M-x agent`; `$XMAS_AGENT` or
+4. An external agent CLI in a terminal buffer (`M-x agent`; `$NESMACS_AGENT` or
    `claude`, configurable through `api/configure-agent!`). No API client in the
    editor.
-5. A second non-editor app, `xmas.http`: `M-x http` opens `*HTTP*` with the
+5. A second non-editor app, `nesmacs.http`: `M-x http` opens `*HTTP*` with the
    request above the first blank line, `C-c C-c` sends it from a future and
    writes the response below. No widget, no second process model — it is a
    buffer, a mode keymap and a command. Request bodies are not supported;
@@ -419,7 +419,7 @@ navigation.
 - Emacs Lisp, GNU `lisp/*.el`, `~/.emacs.d`, `package.el`, magit/org parity.
 - GUI frames, email/IRC/feed clients (except as the single M10 experiment).
 - A VT emulator of our own: terminals run under tmux and the editor paints
-  captures. A different backend must still fit the `xmas.terminal/Backend`
+  captures. A different backend must still fit the `nesmacs.terminal/Backend`
   protocol.
 - A second extension runtime or arbitrary native modules. A vetted native
   library behind an optional backend (Tree-sitter) is allowed.
@@ -441,7 +441,7 @@ were settled in their milestones. The language milestone settled the rest:
   `io.github.bonede/tree-sitter`; queries are vendored from nvim-treesitter
   (Apache-2.0) with grammar pins from its parser list; grammar repositories
   are only the fallback for anything it lacks. No GNU Emacs GPLv3 queries
-  while xmas is MIT.
+  while nesmacs is MIT.
 - **Supported languages**: Clojure/EDN, Python, TypeScript, JavaScript;
   unknown extensions fall back to plain text.
 - **Debugging** (DAP) shipped in M10; Clojure keeps nREPL.
@@ -469,7 +469,7 @@ not architecture.
 - `run-tests` also parses the human output of `clojure -M:test` (cognitect
   test-runner) and `pytest -q --tb=line`; the default command for Python now
   emits line numbers, so failures are jumpable without extra plugins.
-- Blame, hunks and forge listings run as background jobs via `xmas.deferred`,
+- Blame, hunks and forge listings run as background jobs via `nesmacs.deferred`,
   so opening them never blocks the editor. Staging/unstaging still uses a
   synchronous `git apply --cached` call; a huge patch would stall — acceptable
   for typical hunk sizes.

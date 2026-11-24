@@ -1,4 +1,4 @@
-# xmas — Clojure-native IDE with the Emacs paradigm
+# nesmacs — Clojure-native IDE with the Emacs paradigm
 
 ## Goal
 
@@ -36,14 +36,14 @@ workflow (blame, hunk staging, forge, test reports, snippets), and M10
 the current feature list, test counts and benchmarks. v1.0 is still pending a
 full week of primary-editor use.
 
-Terminals are core, not an experiment. `xmas.terminal` keeps the editor side
+Terminals are core, not an experiment. `nesmacs.terminal` keeps the editor side
 pure — screen text, props and an input queue — behind a `Backend` protocol;
-`xmas.terminal.tmux` runs each shell in a private tmux server. tmux owns the
+`nesmacs.terminal.tmux` runs each shell in a private tmux server. tmux owns the
 PTY and VT emulation and the editor paints `capture-pane` snapshots, so there
 is no second terminal emulator in this codebase. Sessions outlive the editor
 and reattach on the next start.
 
-Configuration is `~/.xmas/init.clj` via `xmas.api` (`bind!`, `add-hook!`,
+Configuration is `~/.nesmacs/init.clj` via `nesmacs.api` (`bind!`, `add-hook!`,
 `register-mode!`, `add-prop!`, `set-prop!`, `remove-prop!`); `M-:` evaluates
 Clojure in the same context.
 

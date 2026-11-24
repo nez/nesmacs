@@ -2,7 +2,7 @@
 """kill -9 recovery: edit a file, SIGKILL the editor before the 5s snapshot,
 restart with the same HOME, and require the edit to be back on screen.
 
-Run with `make crash`. Uses a temp HOME so it never touches the real ~/.xmas.
+Run with `make crash`. Uses a temp HOME so it never touches the real ~/.nesmacs.
 """
 import fcntl
 import os
@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 TIMEOUT = 180
 MARKER = b"KILL9MARKER"
 
-home = Path(tempfile.mkdtemp(prefix="xmas-crash-"))
-(home / ".xmas").mkdir()
+home = Path(tempfile.mkdtemp(prefix="nesmacs-crash-"))
+(home / ".nesmacs").mkdir()
 doc = home / "doc.txt"
 doc.write_text("needle-line\n")
 
@@ -81,7 +81,7 @@ try:
         raise RuntimeError("marker never rendered")
     kill9(pid)                                     # before the next snapshot
 
-    journal = home / ".xmas" / "journal.edn"
+    journal = home / ".nesmacs" / "journal.edn"
     had_journal = journal.exists()
 
     # 2. restart: the journal must rebuild the unsaved edit.

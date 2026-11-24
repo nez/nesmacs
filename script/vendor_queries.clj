@@ -10,7 +10,7 @@
    - `; inherits:` is resolved here by concatenating the parent files;
    - `#lua-match?` becomes `#match?` with a small Lua-pattern translation;
    - `#set!` directives are dropped (the binding requires a fixed arity that
-     nvim queries do not always follow, and xmas does not use metadata)."
+     nvim queries do not always follow, and nesmacs does not use metadata)."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]))
 
@@ -86,7 +86,7 @@
                   (str/join "\n"))
         header (str "; Vendored from nvim-treesitter " NVIM_REV " (Apache-2.0).\n"
                     "; Sources: " (str/join ", " parents) "/" kind ".scm\n"
-                    "; Normalized for xmas: inherits resolved, #lua-match? -> #match?,\n"
+                    "; Normalized for nesmacs: inherits resolved, #lua-match? -> #match?,\n"
                     "; #set! dropped. Regenerate with script/vendor_queries.clj.\n\n")]
     (str header body "\n")))
 
@@ -108,7 +108,7 @@
                "commit `" NVIM_REV "` (Apache-2.0, see LICENSE.nvim-treesitter).\n"
                "They are generated, not edited: change `script/vendor_queries.clj`\n"
                "and regenerate. `#set!` directives are dropped because the JNI\n"
-               "binding does not accept every arity nvim uses; xmas does not read\n"
+               "binding does not accept every arity nvim uses; nesmacs does not read\n"
                "query metadata.\n")))
   (println "done"))
 

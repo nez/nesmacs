@@ -1,4 +1,4 @@
-# xmas
+# nesmacs
 
 **Emacs' editing model, rebuilt in Clojure — and rewritable while it runs.**
 
@@ -11,26 +11,31 @@ Clojure core. No Elisp runtime and no plugin boundary: configuration, commands
 and fontification are Clojure in the same process as the editor, so the editor
 is something you can inspect, change and debug while it is running.
 
-<img src="docs/xmas.svg" alt="xmas editing a Clojure buffer, rendered by xmas.view" width="691">
+<img src="docs/nesmacs.svg" alt="nesmacs editing a Clojure buffer, rendered by nesmacs.view" width="691">
 
-<p align="center"><sub>Rendered by <code>xmas.view</code> from a real editor state — no mockup.</sub></p>
+<p align="center"><sub>Rendered by <code>nesmacs.view</code> from a real editor state — no mockup.</sub></p>
 
-## Run it
-
-Needs Java 17+, the [Clojure CLI](https://clojure.org/guides/install_clojure)
-and a POSIX terminal. Terminals inside the editor need `tmux` 3.0+ on `PATH`.
+## Install
 
 ```sh
-git clone https://github.com/nez/xmas.git
-cd xmas
-make dev
+curl -fsSL https://raw.githubusercontent.com/nez/nesmacs/main/install.sh | sh
 ```
 
-That is the whole install. `C-x C-c` exits; it asks to save each modified
-buffer. First launch creates `~/.xmas/` for config, session and the crash
-journal. `make run` rebuilds the AOT jar only when sources changed and runs
-it (~1.5 s); `./xmas` runs the existing jar. `make dev` loads source instead,
-so it starts in ~4 s but picks up edits without a restart.
+Needs Java 17+, `tmux` 3.0+, `git` and `ripgrep` on `PATH`. The script checks
+them and installs nothing system-wide; it puts `nesmacs.jar` and a launcher
+under `~/.local` (override with `--prefix DIR`, or pin a release with
+`--version TAG`) and prints the `PATH` line if it is missing. `--uninstall`
+removes the jar and launcher.
+
+`C-x C-c` exits; it asks to save each modified buffer. First launch creates
+`~/.nesmacs/` for config, session and the crash journal. If you have an old
+`~/.xmas/`, the installer renames it once.
+
+From a checkout, `./install.sh` uses `target/nesmacs.jar` or builds it with the
+Clojure CLI. `make setup` is the contributor bootstrap (Clojure CLI, linter,
+dev dependencies). `make run` rebuilds the AOT jar only when sources changed and
+runs it (~1.5 s); `./nesmacs` runs the existing jar. `make dev` loads source
+instead, so it starts in ~4 s but picks up edits without a restart.
 
 Your fingers already work: `C-f C-b C-n C-p C-a C-e`, `C-s`, `M-%`, `C-x C-f`,
 `C-x C-s`, `C-x 2`, `C-x o`, `M-x`, `M-:`. Beyond those: `C-x g` git status,
@@ -52,9 +57,9 @@ next one. That is not an implementation detail — it is the feature:
 
 ```clojure
 ;; nREPL is on :7888. Connect from CIDER/Calva, or from another terminal:
-user=> (require '[xmas.ed :as ed] '[xmas.cmd :as cmd])
+user=> (require '[nesmacs.ed :as ed] '[nesmacs.cmd :as cmd])
 user=> (str (:text (cmd/cur @ed/editor)))
-"(ns xmas.hello\n  (:require [xmas.api :as api]))\n..."
+"(ns nesmacs.hello\n  (:require [nesmacs.api :as api]))\n..."
 user=> (swap! ed/editor cmd/edit 0 0 ";; live from the REPL\n")
 ;; the buffer on screen is now different
 ```
@@ -82,7 +87,7 @@ The rest follows from the same decision:
   line, cached, and pruned to the viewport, so an edit only drops the lines it
   can affect.
 - **No plugin API to learn first.** If the editor can do it, it is a function
-  you can call: `(swap! ed/editor ed/find-file "src/xmas/ed.clj")`.
+  you can call: `(swap! ed/editor ed/find-file "src/nesmacs/ed.clj")`.
 
 ## What is in the box
 
@@ -106,7 +111,7 @@ The rest follows from the same decision:
   log buffers are ordinary buffers with faces and navigation. `C-x v b` blame,
   `C-x v s`/`C-x v u` stage or unstage one hunk through `git apply --cached`,
   `C-x v p` lists pull/merge requests via `gh` or `glab`.
-- **Languages** — one registry (`xmas.lang`) maps extension to mode, comment
+- **Languages** — one registry (`nesmacs.lang`) maps extension to mode, comment
   syntax, formatter, language server, Tree-sitter grammar and query set.
   Clojure/EDN, Python, JavaScript, TypeScript and TSX highlight through
   vendored nvim-treesitter queries, with the line tokenizer as fallback.
@@ -120,7 +125,7 @@ The rest follows from the same decision:
   vscode-js-debug; Clojure keeps nREPL). `C-c d b` toggles a gutter
   breakpoint, `c`/`n`/`i`/`o` resume and step, `s`/`v` show frames and locals,
   `e` evaluates in the stopped frame, `q` disconnects. Adapters are data in
-  `xmas.lang`; `make dap` runs the live debugpy and vscode-js-debug tests.
+  `nesmacs.lang`; `make dap` runs the live debugpy and vscode-js-debug tests.
 - **Tests** — `M-x run-tests` runs the project's command as a job and parses
   JUnit XML or TAP into `*Test Results*`; RET jumps to a failure. Runners with
   their own format still yield jumpable entries from `file:line` lines.
@@ -131,19 +136,19 @@ The rest follows from the same decision:
   incremental font-lock, a one-column gutter for breakpoints and the stopped
   line, large-file mode above 1 MB or 100k lines (the region still paints
   there).
-- **AI assistance** — `M-x agent` opens the configured CLI (`$XMAS_AGENT`, or
+- **AI assistance** — `M-x agent` opens the configured CLI (`$NESMACS_AGENT`, or
   `claude`) in a normal terminal buffer. The editor has no API client.
 
 Packages are Clojure libraries on `deps.edn`; there is no package manager yet.
 
 ## Configure it in Clojure
 
-`~/.xmas/init.clj` runs at startup, after the previous session is restored.
+`~/.nesmacs/init.clj` runs at startup, after the previous session is restored.
 `M-x reload-config` re-evaluates it without restarting.
 
 ```clojure
 (ns my.init
-  (:require [xmas.api :as api]))
+  (:require [nesmacs.api :as api]))
 
 (defn greet
   "Say hello in the echo area."
@@ -176,16 +181,16 @@ tested, replayed from a journal, and rendered by another process.
 
 | Module | Role |
 | --- | --- |
-| `xmas.ed` | editor core: commands, built-in keymap, modes, main loop |
-| `xmas.buf`, `xmas.gap`, `xmas.text` | buffer type, text storage + line index, text primitives |
-| `xmas.window`, `xmas.view` | window tree and layout; the only screen painter |
-| `xmas.props`, `xmas.face` | durable text properties, tokenizer |
-| `xmas.api`, `xmas.keymap`, `xmas.mode` | extension surface, key parsing, modes and hooks |
-| `xmas.proc`, `xmas.job`, `xmas.lsp` | processes, streaming job buffers, language server |
-| `xmas.lang`, `xmas.treesit`, `xmas.fold`, `xmas.format`, `xmas.snippet` | language registry, Tree-sitter backend, folding, CLI formatters, LSP snippets |
-| `xmas.terminal`, `xmas.terminal.tmux` | terminal buffers behind a backend protocol; the tmux control-mode backend |
-| `xmas.git*`, `xmas.githunk`, `xmas.gitblame`, `xmas.forge`, `xmas.testres`, `xmas.project`, `xmas.dired`, `xmas.buflist`, `xmas.nav`, `xmas.complete` | git apps (status, log, hunk staging, blame, forge), test reports, project search, file and buffer navigation, completion |
-| `xmas.session`, `xmas.persist`, `xmas.term` | session and journal, persistence, raw terminal I/O |
+| `nesmacs.ed` | editor core: commands, built-in keymap, modes, main loop |
+| `nesmacs.buf`, `nesmacs.gap`, `nesmacs.text` | buffer type, text storage + line index, text primitives |
+| `nesmacs.window`, `nesmacs.view` | window tree and layout; the only screen painter |
+| `nesmacs.props`, `nesmacs.face` | durable text properties, tokenizer |
+| `nesmacs.api`, `nesmacs.keymap`, `nesmacs.mode` | extension surface, key parsing, modes and hooks |
+| `nesmacs.proc`, `nesmacs.job`, `nesmacs.lsp` | processes, streaming job buffers, language server |
+| `nesmacs.lang`, `nesmacs.treesit`, `nesmacs.fold`, `nesmacs.format`, `nesmacs.snippet` | language registry, Tree-sitter backend, folding, CLI formatters, LSP snippets |
+| `nesmacs.terminal`, `nesmacs.terminal.tmux` | terminal buffers behind a backend protocol; the tmux control-mode backend |
+| `nesmacs.git*`, `nesmacs.githunk`, `nesmacs.gitblame`, `nesmacs.forge`, `nesmacs.testres`, `nesmacs.project`, `nesmacs.dired`, `nesmacs.buflist`, `nesmacs.nav`, `nesmacs.complete` | git apps (status, log, hunk staging, blame, forge), test reports, project search, file and buffer navigation, completion |
+| `nesmacs.session`, `nesmacs.persist`, `nesmacs.term` | session and journal, persistence, raw terminal I/O |
 
 Design rules live in [PRD.md](PRD.md): commands stay pure, one atom, one
 rendering pipeline, one keymap mechanism, no second process model. A shortcut
@@ -195,7 +200,7 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 668 tests / 6,547 assertions
+make test    # 669 tests / 6,549 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # live tests against clojure-lsp, pyright and typescript-language-server
@@ -209,7 +214,7 @@ check the rendered frame, including blame/hunk/test-report/forge list flows.
 Terminal buffers are exercised end-to-end against real tmux by `make term`,
 which is excluded from `make test` like the live `lsp`, `dap` and `grammars`
 targets. A live target skips a server or adapter it cannot find; point
-`XMAS_CLOJURE_LSP`, `XMAS_PYRIGHT`, `XMAS_TSSERVER`, `XMAS_DEBUGPY` or
+`NESMACS_CLOJURE_LSP`, `NESMACS_PYRIGHT`, `NESMACS_TSSERVER`, `NESMACS_DEBUGPY` or
 `JS_DEBUG_DAP` at an install outside `PATH`.
 The benchmark asserts under 50 ms per keystroke on a
 100k-line file and under 2 s to open 10 MB; measured roughly 20 ms and 30 ms on
@@ -229,14 +234,14 @@ debugger, themes, the agent CLI and the HTTP app.
 primary editor without falling back to another tool.
 
 If you need org-mode, Magit, a GUI, or your existing `~/.emacs.d` today, use
-Emacs — it is 40 years of work and this is not. xmas is for the opposite itch:
+Emacs — it is 40 years of work and this is not. nesmacs is for the opposite itch:
 an editor small enough to read, where extending it means writing a function and
 the running editor is debuggable from the REPL. No Elisp, no GUI frames, no
 user native extension modules; a vetted library such as Tree-sitter sits behind
 an optional backend.
 
 Contributions are welcome. Read the milestone in [ROADMAP.md](ROADMAP.md), keep
-commands pure and reach new behavior through `xmas.api`; data structures need
+commands pure and reach new behavior through `nesmacs.api`; data structures need
 tests, terminal behavior needs a pty script.
 
 ## License

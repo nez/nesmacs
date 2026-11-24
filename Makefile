@@ -1,15 +1,15 @@
-JAR := target/xmas.jar
+JAR := target/nesmacs.jar
 
 .PHONY: dev run jar repl test bench lsp term dap grammars pty crash lint check clean setup
 
 setup:
-	./install.sh
+	./script/setup-dev.sh
 
 dev:
 	clojure -M:run
 
 repl:
-	clojure -M -e '(require (quote xmas.ed)) (clojure.main/repl)'
+	clojure -M -e '(require (quote nesmacs.ed)) (clojure.main/repl)'
 
 # Source startup loads ~40 namespaces (~4 s); the AOT jar starts in ~1.5 s.
 # Rebuild only when a source or dependency file changed, so `make run` is the
@@ -27,24 +27,24 @@ test:
 	clojure -M:test -e :benchmark -e :integration
 
 # End-to-end against every configured language server (clojure-lsp, pyright,
-# typescript-language-server); a missing one is a skip. XMAS_CLOJURE_LSP,
-# XMAS_PYRIGHT and XMAS_TSSERVER point at installs outside PATH.
+# typescript-language-server); a missing one is a skip. NESMACS_CLOJURE_LSP,
+# NESMACS_PYRIGHT and NESMACS_TSSERVER point at installs outside PATH.
 lsp:
-	clojure -M:test -n xmas.lsp-live-test
+	clojure -M:test -n nesmacs.lsp-live-test
 
 # End-to-end against debugpy and vscode-js-debug. Needs `pip install debugpy`
-# (XMAS_DEBUGPY points at that Python) and JS_DEBUG_DAP=.../dapDebugServer.js.
+# (NESMACS_DEBUGPY points at that Python) and JS_DEBUG_DAP=.../dapDebugServer.js.
 dap:
-	clojure -M:test -n xmas.dap-live-test
+	clojure -M:test -n nesmacs.dap-live-test
 
 # Resolve every pinned Tree-sitter grammar from an empty local Maven repo, so a
 # warm ~/.m2 cannot hide a missing artifact or native library.
 grammars:
-	clojure -Sdeps '{:mvn/local-repo ".cpcache/m2-check"}' -M:test -n xmas.grammar-live-test
+	clojure -Sdeps '{:mvn/local-repo ".cpcache/m2-check"}' -M:test -n nesmacs.grammar-live-test
 
 # End-to-end terminal session against the real tmux binary; needs tmux on PATH.
 term:
-	clojure -M:test -n xmas.terminal-live-test
+	clojure -M:test -n nesmacs.terminal-live-test
 
 # Timing assertions only; excluded from `test` so a loaded box can't fail CI.
 bench:
@@ -62,7 +62,7 @@ lint:
 	clj-kondo --lint src
 
 check: lint test pty crash
-	clojure -M -e '(require (quote xmas.ed)) (println "ok")'
+	clojure -M -e '(require (quote nesmacs.ed)) (println "ok")'
 
 clean:
 	rm -rf target .cpcache .nrepl-port

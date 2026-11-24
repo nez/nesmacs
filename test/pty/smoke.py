@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Terminal smoke test: start xmas in a pty, load config, run a job, exit.
+"""Terminal smoke test: start nesmacs in a pty, load config, run a job, exit.
 
 Run with `make pty`. Uses a temp HOME (and -Duser.home) so it never touches the
-real ~/.xmas. Asserts the startup log (config loaded, clean exit) and that a
+real ~/.nesmacs. Asserts the startup log (config loaded, clean exit) and that a
 M-! job streams into its buffer while the editor keeps accepting keys.
 """
 import fcntl
@@ -20,10 +20,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 TIMEOUT = 180
 
-home = Path(tempfile.mkdtemp(prefix="xmas-pty-"))
-(home / ".xmas").mkdir()
-(home / ".xmas" / "init.clj").write_text(
-    "(ns smoke.init (:require [xmas.api :as api]))\n"
+home = Path(tempfile.mkdtemp(prefix="nesmacs-pty-"))
+(home / ".nesmacs").mkdir()
+(home / ".nesmacs" / "init.clj").write_text(
+    "(ns smoke.init (:require [nesmacs.api :as api]))\n"
     "(defn hello \"Say hello.\" [s] (assoc s :msg \"hello\"))\n"
     "(api/bind! \"C-c h\" #'hello)\n"
 )
@@ -32,7 +32,7 @@ pid, fd = pty.fork()
 if pid == 0:
     os.chdir(ROOT)
     os.environ["HOME"] = str(home)
-    os.environ["XMAS_NREPL_PORT"] = "0"
+    os.environ["NESMACS_NREPL_PORT"] = "0"
     os.execvp("clojure", ["clojure", "-J-Duser.home=" + str(home), "-M:run"])
 
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
@@ -76,16 +76,16 @@ if alive:
     os.waitpid(pid, 0)
 
 log = ""
-logfile = home / ".xmas" / "debug.log"
+logfile = home / ".nesmacs" / "debug.log"
 if logfile.exists():
     log = logfile.read_text(errors="replace")
 
 ok = (sent_job and job_seen_at is not None and sent_exit and exited
-      and "loaded init.clj" in log and "xmas exiting" in log)
+      and "loaded init.clj" in log and "nesmacs exiting" in log)
 print("rendered=%s job_buffer=%s exited=%s bytes=%d"
       % (b"*scratch*" in out, job_seen_at is not None, exited, len(out)))
 print("config_loaded=%s clean_exit=%s"
-      % ("loaded init.clj" in log, "xmas exiting" in log))
+      % ("loaded init.clj" in log, "nesmacs exiting" in log))
 
 for child in home.rglob("*"):
     if child.is_file():
