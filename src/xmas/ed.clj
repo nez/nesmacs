@@ -2602,17 +2602,23 @@
                      (nrepl/start-server :port preferred-port)
                      (catch java.net.BindException _
                        (nrepl/start-server :port 0)))]
-    (log/log "nrepl:" (:port nrepl-port) " web:1234 dev:watching")
+    (log/log "nrepl:" (:port nrepl-port) " dev:watching")
     (spit ".nrepl-port" (str (:port nrepl-port)))
+    ;; The web client is a demo of "state is a value", not a supported frontend,
+    ;; so a taken port must never keep the editor from starting (a second
+    ;; instance, or a dev instance left running, holds 1234).
     {:nrepl nrepl-port
-     :web   (web/start! editor 1234 handle-key)
+     :web   (try (web/start! editor 1234 handle-key)
+                 (catch java.net.BindException _
+                   (log/log "web: port 1234 in use, web demo disabled")
+                   nil))
      :dev   (dev/start-watcher!)}))
 
 (defn- stop-services! [{:keys [nrepl web dev]}]
   (run-all [#(terminal/shutdown-all! tmux/backend)
             dap/shutdown-all!
             #(dev/stop-watcher! dev)
-            #(web/stop! web editor)
+            #(when web (web/stop! web editor))
             #(nrepl/stop-server nrepl)]))
 
 (defn -main [& _args]
