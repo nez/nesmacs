@@ -37,6 +37,16 @@
 (deftest clipboard-seq-is-osc-52
   (is (= "\u001b]52;c;aGk=\u0007" (term/clipboard-seq "hi"))))
 
+(deftest parses-sgr-mouse-click
+  (is (= {:type :mouse :button 0 :col 11 :row 4 :action :press}
+         (#'term/parse-mouse "<0;12;5" :press)))
+  (is (= :release (:action (#'term/parse-mouse "<0;12;5" :release)))))
+
+(deftest wheel-and-motion-are-not-clicks
+  (is (nil? (:button (#'term/parse-mouse "<64;12;5" :press))))
+  (is (nil? (:button (#'term/parse-mouse "<32;12;5" :press))))
+  (is (nil? (#'term/parse-mouse "<0;12" :press))))
+
 (deftest set-clipboard-skips-oversized
   (let [out (atom "")]
     (binding [term/*out-fn* (fn [s] (swap! out str s))]

@@ -70,7 +70,7 @@ could replace tmux without touching the editor side.
 killing the JVM and restarting restores the buffer, and a bad `init.clj` is
 reported without breaking startup.
 
-**Not here:** clipboard *reads* (terminals cannot), selection/mouse, themes.
+**Not here:** clipboard *reads* (terminals cannot), text selection, themes.
 
 Size S–M. Risk low.
 
@@ -255,7 +255,7 @@ Only after v1.0, and only with a concrete use:
 
 - One non-editor app beyond git (HTTP client or feed reader — `http-kit` is
   already a dependency), to test the platform claim.
-- Themes, mouse support, tabs, multiple cursors, tree-sitter, folding.
+- Themes, tabs, multiple cursors, tree-sitter, folding.
 
 Nothing in this milestone is promised.
 

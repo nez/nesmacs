@@ -40,7 +40,8 @@ Real terminals are core: `C-c t` runs `$SHELL` in a tmux session, so the shell
 (outside the editor) survives an editor exit or crash and reattaches next start.
 `C-c C-c` interrupts, `C-c C-k` kills the buffer and session, `C-c C-r`
 restarts, `C-c M-x` reaches `M-x`, and `C-c C-x` opens the normal `C-x` map
-from inside a terminal.
+from inside a terminal. Clicking a terminal window focuses it; clicks are not
+forwarded to the shell, and the pane's cursor is not selectable text.
 
 ## The part that is different
 
@@ -86,7 +87,8 @@ The rest follows from the same decision:
 - **Editing** — persistent char-array text with a line index, Unicode and
   wide-character aware
   cursor math, undo/redo with adjacent inserts coalesced, bracketed paste as
-  one edit, OSC 52 copy so kills reach the system clipboard (even over SSH).
+  one edit, mouse clicks that move point, OSC 52 copy so kills reach the
+  system clipboard (even over SSH).
 - **Finding** — incremental search, query-replace, occur, imenu, goto-line,
   window tree with splits and resizing, project search via ripgrep streamed
   into a buffer.
@@ -165,7 +167,7 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 534 tests / 6,174 assertions
+make test    # 540 tests / 6,184 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # integration tests against a real clojure-lsp

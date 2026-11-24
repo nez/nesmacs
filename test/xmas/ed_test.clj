@@ -743,6 +743,29 @@
     (is @accepted)
     (is (nil? (:mini s')))))
 
+;; --- Mouse ---
+
+(defn- click [s row col]
+  (ed/handle-key s {:type :mouse :button 0 :action :press :row row :col col}))
+
+(deftest mouse-click-moves-point
+  (is (= 6 (point (click (make-state "abc\ndef\nghi" 0) 1 2)))))
+
+(deftest mouse-click-on-modeline-keeps-point
+  (is (= 1 (point (click (make-state "abc\ndef" 1) 22 0)))))
+
+(deftest mouse-click-focuses-clicked-window
+  (let [s (ed/split-window-right (make-state "abcdefgh\nijkl" 0))
+        s' (click s 0 45)]
+    (is (= [:b] (:cur-window s')))
+    (is (= 4 (point s')))))
+
+(deftest mouse-click-leaves-terminal-point-to-tmux
+  (let [s (-> (make-state "abc\ndef" 2)
+              (assoc-in [:bufs "*test*" :mode] :terminal-mode))
+        s' (click s 0 1)]
+    (is (= 2 (point s')))))
+
 ;; --- Redo ---
 
 (deftest redo-after-undo

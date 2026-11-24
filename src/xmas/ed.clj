@@ -855,6 +855,58 @@
 (defn enlarge-window              [s] (resize s :stacked       1))
 (defn shrink-window               [s] (resize s :stacked      -1))
 
+;; --- Mouse ---
+
+(defn- window-at
+  "Return [path rect] of the window containing screen cell [row col], or nil
+   for a divider or the echo area."
+  [s row col]
+  (let [rows (max 2 (long (:rows s 24)))
+        cols (max 1 (long (:cols s 80)))]
+    (some (fn [[path rect]]
+            (let [{r :row c :col h :rows w :cols} rect]
+              (when (and (<= r row (+ r h -1))
+                         (<= c col (+ c w -1)))
+                [path rect])))
+          (:layout (win/geometry (:windows s) (dec rows) cols)))))
+
+(defn- click-point
+  "Buffer position under a click at `row`/`col` inside `rect`, or nil on the
+   modeline. Clicks below the last line land at end of buffer, like Emacs."
+  [s path rect row col]
+  (let [w (get-in s (into [:windows] path))
+        body-rows (dec (long (:rows rect)))
+        r (- (long row) (long (:row rect)))
+        c (- (long col) (long (:col rect)))
+        content (:text (get-in s [:bufs (:buffer w)]))
+        scroll (:scroll w 0)
+        hscroll (:hscroll w 0)]
+    (when (< r body-rows)
+      (let [line (+ (gap/line-of content scroll) r)
+            glyph-col (if (pos? hscroll) (+ hscroll (max 0 (dec c))) c)]
+        (if (> line (dec (gap/line-count content)))
+          (count content)
+          (text/pos-at-col content
+                           (gap/nth-line-start content line)
+                           (gap/nth-line-end content line)
+                           glyph-col))))))
+
+(defn- mouse-click
+  "Left press: select the clicked window, then put point under the click.
+   Terminal buffers only get focus — their point follows the tmux cursor."
+  [s {:keys [button action row col]}]
+  (if (and (= 0 button) (= :press action) (not (:mini s)))
+    (if-let [[path rect] (window-at s row col)]
+      (let [s (-> (cmd/switch-window s path)
+                  (dissoc :pending :prefix-arg))]
+        (if (= :terminal-mode (:mode (cur s)))
+          s
+          (if-let [p (click-point s path rect row col)]
+            (-> s (cmd/goto-char p) (update-cur #(assoc % :mark nil)))
+            s)))
+      s)
+    s))
+
 ;; --- Query replace (M-%) ---
 
 (defn- regex-find
@@ -1723,6 +1775,11 @@
   (let [s (assoc s :msg nil)
         s (cond-> s (:macro-recording s) (update :macro-recording conj key))
         s' (cond
+             ;; SGR mouse reports arrive as maps from xmas.term; only the left
+             ;; press is a click.
+             (and (map? key) (= :mouse (:type key)))
+             (mouse-click s key)
+
              ;; Bracketed paste is one insert, hence one undo entry. In a
              ;; terminal it belongs to the process, not to the read-only buffer.
              (and (vector? key) (= :paste (first key)))
@@ -1948,7 +2005,7 @@
   (t/install-shutdown-hook!)
   (proc/install-shutdown-hook!)
   (try
-    (t/enter-raw-mode!) (t/enable-bracketed-paste!) (t/cls)
+    (t/enter-raw-mode!) (t/enable-bracketed-paste!) (t/enable-mouse!) (t/cls)
     (t/on-resize!)
     (let [[rows cols] (t/terminal-size)]
       (reset! editor (initial-state rows cols))

@@ -112,6 +112,19 @@
 
 (defn- read-paste [] (read-paste-from #(read-byte-timeout 200)))
 
+(defn- parse-mouse
+  "SGR mouse report params `<b;x;y` (without the leading `<`). b packs the
+   button, modifiers, motion (32) and wheel (64) bits; coordinates are
+   1-based. `:button` is nil for wheel and motion, which are not clicks."
+  [params action]
+  (let [[b x y] (mapv #(try (Long/parseLong %) (catch Exception _ nil))
+                      (str/split (subs params 1) #";"))]
+    (when (and b x y)
+      {:type :mouse
+       :button (when (zero? (bit-and b (+ 32 64))) (bit-and b 3))
+       :col (dec x) :row (dec y)
+       :action action})))
+
 (defn- parse-csi []
   (loop [params ""]
     (let [b (read-byte-timeout 50)]
@@ -120,6 +133,8 @@
         (<= 64 b 126)
         (case (char b)
           \A :up, \B :down, \C :right, \D :left, \H :home, \F :end
+          \M (when (str/starts-with? params "<") (parse-mouse params :press))
+          \m (when (str/starts-with? params "<") (parse-mouse params :release))
           \~ (case params
                "2"   :insert
                "3"   :delete
@@ -180,6 +195,11 @@
 (defn enable-bracketed-paste! [] (tw "\033[?2004h"))
 (defn- disable-bracketed-paste! [] (tw "\033[?2004l"))
 
+;; SGR mouse reporting: press/release only (1000), extended coordinates
+;; (1006). No drag or motion reports — clicks move point, selections do not.
+(defn enable-mouse! [] (tw "\033[?1000h\033[?1006h"))
+(defn- disable-mouse! [] (tw "\033[?1000l\033[?1006l"))
+
 ;; --- Clipboard (OSC 52) ---
 
 (defn clipboard-seq
@@ -235,12 +255,14 @@
    outside swap! so the state atom isn't held while suspended."
   []
   (try
+    (disable-mouse!)
     (exit-raw-mode!)
     (Signal/handle (Signal. "TSTP") SignalHandler/SIG_DFL)
     (Signal/raise (Signal. "TSTP"))
     (finally
       (enter-raw-mode!)
       (enable-bracketed-paste!)
+      (enable-mouse!)
       (cls))))
 
 (defn teardown!
@@ -248,7 +270,7 @@
    in one doesn't abort the rest."
   []
   (doseq [f [reset-sg cls #(move 0 0) show-cur flush!
-             disable-bracketed-paste! exit-raw-mode!]]
+             disable-mouse! disable-bracketed-paste! exit-raw-mode!]]
     (try (f) (catch Exception _))))
 
 (defn install-shutdown-hook!
