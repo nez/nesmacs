@@ -57,8 +57,9 @@ M8/M9 plus a full week of primary-editor use.
 - Commands stay pure; side effects only at the boundary (`save-buffer`, I/O).
 - One atom, `swap!` at the loop boundary; state is a value you can test,
   replay, and render from another process (the web client proves it).
-- Language features come from protocols (LSP, DAP) and existing binaries
-  (git, rg, tmux, formatters), not from new implementations.
+- Language features come from protocols (LSP, DAP), vendored query sets
+  (nvim-treesitter) and existing binaries (git, rg, tmux, formatters), not
+  from new implementations.
 - Per-language behavior is data: one mode registry, not one module per
   language. A new panel is a list buffer, not a new widget system.
 - A shortcut with a known limit gets a `shortcut:` comment.

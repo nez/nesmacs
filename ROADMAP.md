@@ -272,9 +272,10 @@ protocol client.
 - Tree-sitter is an optional runtime backend: `io.github.bonede/tree-sitter`
   plus per-grammar Maven artifacts. That binding supports JDK 8+, so Java 17
   leaves room to move to the official binding later.
-- Queries come from nvim-treesitter (Apache-2.0) or the grammar repositories
-  (MIT), with attribution. GNU Emacs `treesit` queries are GPLv3 and are not
-  copied while xmas stays MIT.
+- Queries are vendored from nvim-treesitter (Apache-2.0): highlights, folds,
+  locals, injections, and indents. Grammar repositories (MIT) supply only what
+  nvim-treesitter lacks and the grammar pins. GNU Emacs `treesit` queries are
+  GPLv3 and are not copied while xmas stays MIT.
 - Languages: Clojure/EDN, Python, TypeScript, JavaScript. Emacs Lisp keeps its
   existing mode; unknown extensions open as plain text.
 - Debugging is post-v1.0 (M10).
@@ -298,6 +299,24 @@ protocol client.
 7. Tests: parser and offset unit tests, query mapping, a pty highlighting
    smoke, and `make lsp` coverage for each supported server. A missing grammar
    or server is a covered path, never a crash.
+
+**Query pipeline**
+
+- Vendor the `.scm` files under `resources/queries/<lang>/` at build time; the
+  editor never clones a query repository at runtime.
+- Resolve `; inherits:` while vendoring: TypeScript inherits `ecma`, and TSX
+  adds the JSX rules.
+- Normalize the Neovim-specific predicates (`#lua-match?`, `#set!`, and
+  `#any-of?` if the binding does not implement it) in the vendoring step, so
+  the runtime only sees predicates the JNI binding supports.
+- Map captures by prefix (`@keyword.*` -> `:keyword`, `@string.*` ->
+  `:string`, ...) onto the xmas face palette. Adding a face is one line in
+  `xmas.view/faces`, and the palette, not the query source, is what limits how
+  much of a query set is visible.
+- Record the grammar revision next to each vendored query set; revisions come
+  from nvim-treesitter's parser list (`lua/nvim-treesitter/parsers.lua`).
+- Clojure has no `indents.scm` in nvim-treesitter; Lisp indentation is
+  paren-based and belongs to the mode registry, not to a query.
 
 **Done when:** `.clj`, `.py`, `.ts` and `.js` open with correct highlighting;
 references, rename, code actions and format work through the LSP client;
@@ -388,8 +407,10 @@ were settled in their milestones. The language milestone settled the rest:
 - **Java 17** is the floor (`install.sh`); **Clojure 1.12.4** is pinned in
   `deps.edn`.
 - **Tree-sitter** is an optional backend, not a foundation. Binding:
-  `io.github.bonede/tree-sitter`; queries: nvim-treesitter (Apache-2.0) or
-  grammar repositories (MIT); no GNU Emacs GPLv3 queries while xmas is MIT.
+  `io.github.bonede/tree-sitter`; queries are vendored from nvim-treesitter
+  (Apache-2.0) with grammar pins from its parser list; grammar repositories
+  are only the fallback for anything it lacks. No GNU Emacs GPLv3 queries
+  while xmas is MIT.
 - **Supported languages**: Clojure/EDN, Python, TypeScript, JavaScript;
   unknown extensions fall back to plain text.
 - **Debugging** (DAP) is post-v1.0.

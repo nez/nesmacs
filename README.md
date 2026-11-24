@@ -186,10 +186,11 @@ generative tests for buffers, props and text.
 
 Pre-1.0. Solid editing and text properties are done; async jobs, project
 navigation, git, LSP, completion and tmux-backed terminals have working slices.
-The language platform (M8: Tree-sitter highlighting plus LSP breadth for
-Clojure/EDN, Python, TypeScript and JavaScript) and the IDE workflow (M9: git
-history and staging, forge, test results, snippets) are accepted and gate 1.0;
-debugging (M10) is post-1.0.
+The language platform (M8: Tree-sitter highlighting, with queries vendored
+from nvim-treesitter under Apache-2.0, plus LSP breadth for Clojure/EDN,
+Python, TypeScript and JavaScript) and the IDE workflow (M9: git history and
+staging, forge, test results, snippets) are accepted and gate 1.0; debugging
+(M10) is post-1.0.
 [ROADMAP.md](ROADMAP.md) tracks the rest and defines 1.0: a full week as the
 primary editor without falling back to another tool.
 
