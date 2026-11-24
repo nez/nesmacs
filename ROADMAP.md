@@ -403,7 +403,7 @@ beyond git; both use only buffers, modes, keymaps and commands.
 This is the original sequencing; M0-M10 are implemented.
 Dependencies: M1 ← nothing; M2 ← nothing; M3 ← M2; M4 ← M3; M5 ← M2 (+M1 for
 diff faces); M6 ← M1, M2, M4; M7 ← all; M8 ← M1, M4, M6; M9 ← M2, M5;
-M10 ← v1.0.
+M10 ← v1.0 (delivered before v1.0 was declared).
 
 If time runs out before v1.0, cut in this order: **M9's forge/tests/snippets,
 then M8's folding/imenu**. Keep M8's mode registry, highlighting and LSP
@@ -441,7 +441,7 @@ were settled in their milestones. The language milestone settled the rest:
   while xmas is MIT.
 - **Supported languages**: Clojure/EDN, Python, TypeScript, JavaScript;
   unknown extensions fall back to plain text.
-- **Debugging** (DAP) is post-v1.0.
+- **Debugging** (DAP) shipped in M10; Clojure keeps nREPL.
 
 No decisions block v1.0. Grammar pins and DAP adapter coverage are maintenance,
 not architecture.
@@ -514,5 +514,6 @@ not architecture.
 **Done when:** every command runs without blocking, lists are jumpable, and
 the pty scripts pass with a real repository and real CLIs.
 
-**Not here:** `git commit`, `git push`, interactive rebase, blame annotations
-in the source margin, workspace symbol search, or a second non-editor app.
+**Not here:** new commit/push UI (commit shipped in M5), interactive rebase,
+blame annotations in the source margin, workspace symbol search, or a second
+non-editor app.
