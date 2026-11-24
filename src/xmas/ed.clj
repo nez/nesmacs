@@ -18,6 +18,7 @@
             [xmas.gitlog :as gitlog]
             [xmas.gitstatus :as gitstatus]
             [xmas.gap :as gap]
+            [xmas.http :as http]
             [xmas.job :as job]
             [xmas.lang :as lang]
             [xmas.listbuf :as listbuf]
@@ -1998,6 +1999,16 @@
   {[:ctrl \c] {[:ctrl \k] job/kill}
    \g         job/rerun})
 
+(defn http-send
+  "C-c C-c in *HTTP*: send the request above the blank line. The response lands
+   in the buffer from a future that swaps the editor atom, so typing continues."
+  [s]
+  (let [[s' message] (http/send! s editor)]
+    (cmd/msg s' message)))
+
+(def http-keymap
+  {[:ctrl \c] {[:ctrl \c] http-send}})
+
 (defn diff-open-at-point [s]
   ;; In a diff buffer, file headers look like "diff --git a/path b/path"
   ;; We don't have listbuf entries; just open the file in the diff if on a header.
@@ -2104,6 +2115,7 @@
    "debug-eval"                  (cmd-entry debug-eval "Evaluate an expression in the stopped frame.")
    "debug-quit"                  (cmd-entry debug-quit "Disconnect the debug session.")
    "load-theme"                  (cmd-entry load-theme "Switch the colour palette (default, light).")
+   "http"                        (cmd-entry http/open "Send HTTP requests from a buffer.")
    "complete-symbol-at-point"    (cmd-entry complete-symbol-at-point "Complete the symbol at point.")
    "git-status"                  (cmd-entry git-status "Show git status for the current project.")
    "git-commit"                  (cmd-entry gitcommit/commit-at-point "Commit staged changes.")
@@ -2545,7 +2557,8 @@
       (mode/register :gitlog-mode :major :keymap gitlog-keymap)
       (mode/register :hunks-mode :major :keymap githunk/hunks-keymap)
       (mode/register :forge-mode :major :keymap forge/forge-keymap)
-      (mode/register :gitcommit-mode :major :keymap gitcommit/gitcommit-keymap)))
+      (mode/register :gitcommit-mode :major :keymap gitcommit/gitcommit-keymap)
+      (mode/register :http-mode :major :keymap http-keymap)))
 
 (defn- initial-state [rows cols]
   (-> {:buf "*scratch*"

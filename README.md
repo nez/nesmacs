@@ -96,6 +96,10 @@ The rest follows from the same decision:
   registers, rectangles, project find-file.
 - **Programs** — `M-!` and `M-|` are jobs: output streams into a buffer while
   typing stays responsive, `C-c C-k` kills, `g` reruns.
+- **HTTP** — `M-x http` opens `*HTTP*`; the request sits above the first
+  blank line, `C-c C-c` sends it and writes the response below. The second
+  non-editor app built from the same primitives: a buffer, a mode keymap and
+  a command.
 - **Git** — `C-x g` status with stage/unstage, diff, log and commit. Diff and
   log buffers are ordinary buffers with faces and navigation. `C-x v b` blame,
   `C-x v s`/`C-x v u` stage or unstage one hunk through `git apply --cached`,
@@ -189,7 +193,7 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 630 tests / 6,444 assertions
+make test    # 641 tests / 6,475 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # integration tests against a real clojure-lsp
@@ -213,8 +217,7 @@ The language platform (M8: Tree-sitter highlighting and folding, with queries
 vendored from nvim-treesitter under Apache-2.0, plus LSP breadth for Clojure/EDN,
 Python, TypeScript and JavaScript) and the IDE workflow (M9: blame, hunk
 staging, forge, test results, snippets) are implemented. M10 adds the DAP
-debugger, themes and the agent CLI; its non-editor platform app is the only
-open milestone item.
+debugger, themes, the agent CLI and the HTTP app.
 [ROADMAP.md](ROADMAP.md) tracks the rest and defines 1.0: a full week as the
 primary editor without falling back to another tool.
 

@@ -19,13 +19,12 @@ back to another tool for this loop:
 8. edit Clojure/EDN, Python, TypeScript and JavaScript with syntax
    highlighting and LSP breadth (references, rename, code actions, format).
 
-M8 closes item 8; M9 closes the daily workflow around it. M10's editor side
-(the DAP debugger, themes and the agent CLI) is implemented too; its one
-non-editor platform app is the remaining open experiment.
+M8 closes item 8; M9 closes the daily workflow around it. M10 (the DAP
+debugger, themes, the agent CLI and an HTTP client) is implemented too.
 
-One non-editor application must exist on the same primitives (git status is
-the first; see M5), because "the editor is the first app" is the platform
-claim this project is testing.
+Two non-editor applications exist on the same primitives (git status and the
+HTTP client; see M5 and M10), because "the editor is the first app" is the
+platform claim this project is testing.
 
 ## Scope rules
 
@@ -40,9 +39,9 @@ claim this project is testing.
 
 ## Status
 
-Milestones M0-M10 are implemented to the scope described below, except M10's
-non-editor platform app. v1.0 is not declared yet: it requires a full week as
-the primary editor (see [Definition of v1.0](#definition-of-v10)). Current
+Milestones M0-M10 are implemented to the scope described below. v1.0 is not
+declared yet: it requires a full week as the primary editor (see
+[Definition of v1.0](#definition-of-v10)). Current
 features, test counts and benchmarks live in [README.md](README.md); this file
 keeps the milestone record and the settled decisions.
 
@@ -383,21 +382,25 @@ daily need the LSP surface cannot cover. Clojure keeps nREPL/CIDER.
 4. An external agent CLI in a terminal buffer (`M-x agent`; `$XMAS_AGENT` or
    `claude`, configurable through `api/configure-agent!`). No API client in the
    editor.
+5. A second non-editor app, `xmas.http`: `M-x http` opens `*HTTP*` with the
+   request above the first blank line, `C-c C-c` sends it from a future and
+   writes the response below. No widget, no second process model — it is a
+   buffer, a mode keymap and a command. Request bodies are not supported;
+   this is the platform experiment, not a REST client.
 
 **Not here:** tabs, multiple cursors, semantic tokens, inlay hints. Considered
 and dropped: tabs duplicate the window tree, multicursor needs a second
 edit/undo model, and semantic tokens/inlay hints would compete with the
 Tree-sitter paint path for marginal gain. Not planned.
 
-**Still open (platform experiment):** one non-editor app beyond git (HTTP client
-or feed reader — `http-kit` is already a dependency).
+**Platform experiment:** the HTTP client above is the second non-editor app
+beyond git; both use only buffers, modes, keymaps and commands.
 
 ---
 
 ## Order and cut line (historical)
 
-This is the original sequencing; M0-M10 are implemented except M10's
-non-editor app.
+This is the original sequencing; M0-M10 are implemented.
 Dependencies: M1 ← nothing; M2 ← nothing; M3 ← M2; M4 ← M3; M5 ← M2 (+M1 for
 diff faces); M6 ← M1, M2, M4; M7 ← all; M8 ← M1, M4, M6; M9 ← M2, M5;
 M10 ← v1.0.
