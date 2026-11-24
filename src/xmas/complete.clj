@@ -38,7 +38,7 @@
        vec))
 
 (defn- project-root [state]
-  (project/root (or (:file (cmd/cur state)) (System/getProperty "user.dir"))))
+  (project/root-for (:file (cmd/cur state))))
 
 ;; --- Cache ---
 
@@ -144,13 +144,20 @@
   [editor]
   (let [s @editor
         m (:mini s)]
+    (when-not (and m (map? (:completer m)))
+      ;; A cancelled prompt leaves its in-flight request (and every candidate
+      ;; it collected) behind forever.
+      (when (seq @inflight) (reset! inflight {})))
     (when (and m (map? (:completer m)))
       (let [prefix (or (:input m) "")]
         (if (not= prefix (:for m))
-          (let [id (start! s prefix (sources-of (:completer m) s))]
-            (swap! editor #(-> % (assoc-in [:mini :for] prefix)
-                                 (assoc-in [:mini :request] id)
-                                 (assoc-in [:mini :sel] -1))))
+          (do
+            ;; The previous prefix's request can no longer be shown.
+            (swap! inflight dissoc (:request m))
+            (let [id (start! s prefix (sources-of (:completer m) s))]
+              (swap! editor #(-> % (assoc-in [:mini :for] prefix)
+                                   (assoc-in [:mini :request] id)
+                                   (assoc-in [:mini :sel] -1)))))
           (when-let [r (and (:request m) (finished (:request m)))]
             (swap! editor #(-> % (assoc-in [:mini :candidates] (:candidates r))
                                  (assoc-in [:mini :request] nil)))))))))

@@ -34,9 +34,6 @@
     s))
 
 (defn refresh [s]
-  (let [b (cmd/cur s)
-        dir (git/current-dir b)]
-    (if (git/is-repo? dir)
-      (listbuf/refresh s gitlog-name (spec dir))
-      (-> s (assoc-in [:bufs gitlog-name] (listbuf/make (spec dir)))
-          (cmd/msg "Not a git repository")))))
+  (let [dir (git/current-dir (cmd/cur s))]
+    (listbuf/reload s gitlog-name (spec dir) (git/is-repo? dir)
+                    "Not a git repository")))

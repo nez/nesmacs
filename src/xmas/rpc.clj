@@ -8,7 +8,7 @@
             [clojure.string :as str]
             [xmas.log :as log]
             [xmas.proc :as proc])
-  (:import [java.io InputStream OutputStream]
+  (:import [java.io ByteArrayOutputStream InputStream OutputStream]
            [java.net InetSocketAddress Socket]))
 
 ;; --- Wire format ---
@@ -90,29 +90,59 @@
           {:kind :tcp :socket s
            :out (.getOutputStream ^Socket s)
            :in (.getInputStream ^Socket s)
+           :raw (ByteArrayOutputStream.)
            :inbox (atom "")})))))
 
 (defn send!
   "Write one message. Small writes to a pipe; callers are protocol clients that
-   send a few hundred bytes per request, never bulk data."
+   send a few hundred bytes per request, never bulk data. The lock keeps two
+   senders (editor tick and an async callback) from interleaving frames."
   [{:keys [^OutputStream out]} msg]
-  (.write out (.getBytes (encode-msg msg) "UTF-8"))
-  (.flush out))
+  (locking out
+    (.write out (.getBytes (encode-msg msg) "UTF-8"))
+    (.flush out)))
 
-(defn- read-tcp [^InputStream in]
+(defn- complete-utf8
+  "Length of the longest prefix of `bs[0,len)` that does not end inside a
+   multibyte UTF-8 sequence."
+  ^long [^bytes bs ^long len]
+  (loop [i (dec len) cont 0]
+    (cond
+      (neg? i) len
+      (> cont 3) len
+      (<= 0x80 (bit-and (int (aget bs i)) 0xff) 0xBF) (recur (dec i) (inc cont))
+      :else
+      (let [b (bit-and (int (aget bs i)) 0xff)
+            need (cond (< b 0x80) 1 (>= b 0xF0) 4 (>= b 0xE0) 3 (>= b 0xC0) 2
+                       :else 1)]
+        (if (> (+ i need) len) i len)))))
+
+(defn- read-tcp
+  "Decode the complete-UTF-8 prefix of whatever arrived, keeping a character
+   split across two socket reads for the next call. Decoding each chunk on its
+   own turned such a character into U+FFFD and shifted every Content-Length."
+  [{:keys [^ByteArrayOutputStream raw ^InputStream in]}]
   (let [n (.available in)]
-    (if (pos? n)
+    (when (pos? n)
       (let [buf (byte-array n)
             got (.read in buf)]
-        (if (pos? got) (String. buf 0 got "UTF-8") ""))
-      "")))
+        (when (pos? got) (.write raw buf 0 got))))
+    (let [bs  (.toByteArray raw)
+          len (alength bs)
+          cut (complete-utf8 bs len)]
+      (when (pos? cut)
+        (let [text (String. bs 0 cut "UTF-8")
+              rest-bytes (java.util.Arrays/copyOfRange bs cut len)]
+          (.reset raw)
+          (.write raw rest-bytes)
+          text)))))
 
 (defn read!
   "Non-blocking read of every complete message available. Never blocks the
    caller (the editor loop)."
   [{:keys [kind inbox] :as conn}]
   (let [chunk (if (= kind :tcp)
-                (read-tcp (:in conn))
+                (read-tcp conn)
                 (proc/drain! (:handle conn) 100000))]
     (when (seq chunk) (swap! inbox str chunk))
     (let [[msgs rest*] (decode-msgs @inbox)]

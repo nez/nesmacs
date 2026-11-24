@@ -35,6 +35,20 @@
       (is (= "*prev*" (:buf s)))
       (is (not (contains? (:bufs s) "*job*"))))))
 
+(deftest a-finishing-job-does-not-steal-an-open-minibuffer
+  ;; A prompt owns keys while it is open; installing the listing must not move
+  ;; :buf away from the mini buffer mid-typing.
+  (let [job {:name "*job*" :text "x\n" :job-status :done
+             :deferred (fn [_] ["*list*" {:name "*list*" :mode :nav-mode
+                                          :header "" :entries [] :format-entry str}])
+             :deferred-return "*prev*"}
+        s (assoc (state job) :buf " *mini*" :mini {:prompt "M-x: " :input "foo"})
+        editor (atom s)]
+    (deferred/tick! editor)
+    (let [s @editor]
+      (is (contains? (:bufs s) "*list*") "listing exists")
+      (is (= " *mini*" (:buf s)) "focus stays in the prompt"))))
+
 (deftest a-running-job-is-left-alone
   (let [job {:name "*job*" :text "partial" :job-status :running
              :deferred (fn [_] ["*list*" {:name "*list*" :header "" :entries []

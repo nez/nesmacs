@@ -22,6 +22,11 @@
         (.getPath f)
         (recur (.getParentFile f))))))
 
+(defn root-for
+  "Project root of a file path, or of the process cwd when `file` is nil."
+  [file]
+  (root (or file (System/getProperty "user.dir"))))
+
 (defn- ignore-patterns [^File dir]
   (let [f (File. dir ".gitignore")]
     (when (.exists f)

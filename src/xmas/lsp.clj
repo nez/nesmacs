@@ -49,10 +49,14 @@
 
 ;; --- Server handles ---
 
-(defn- send! [h msg]
+(defn- send!
+  "Frames are not atomic writes: a completion future and the editor tick can
+   otherwise interleave two large didChange/completion bodies."
+  [h msg]
   (let [^java.io.OutputStream out (.getOutputStream ^Process (:process h))]
-    (.write out (.getBytes (encode-msg msg) "UTF-8"))
-    (.flush out)))
+    (locking h
+      (.write out (.getBytes (encode-msg msg) "UTF-8"))
+      (.flush out))))
 
 (defn- srv [root-id] (get @servers root-id))
 
@@ -295,47 +299,56 @@
   (when cb
     (swap! servers update root-id update :after-init (fnil conj []) cb)))
 
+(def ^:private start-lock (Object.))
+
 (defn ensure!
   "Start the server for `root-id` if absent and run the initialize handshake.
    `cb` runs once the server is ready — immediately if it already is, otherwise
-   queued behind the handshake. Safe to call repeatedly and concurrently."
+   queued behind the handshake. Safe to call repeatedly and concurrently: the
+   check-then-start runs under a lock, so two callers cannot each spawn a
+   server and leak one."
   ([root-id argv dir cb]
    (ensure! root-id argv dir "clojure" cb))
   ([root-id argv dir language-id cb]
-   (if (ready? root-id)
-     (when cb (cb nil))
-     (if (server-exists? root-id)
-       (queue-init! root-id cb)
-       (do
-         (start! root-id argv dir language-id)
-         (queue-init! root-id cb)
-         (request! root-id "initialize"
-                   {:processId (.pid (ProcessHandle/current))
-                    :rootUri (path->uri dir)
-                    :capabilities
-                    {:textDocument {:synchronization {:dynamicRegistration false}
-                                    :hover {}
-                                    :definition {}
-                                    :references {}
-                                    :rename {:prepareSupport false}
-                                    :codeAction {}
-                                    :signatureHelp {}
-                                    :documentSymbol {}
-                                    :formatting {}
-                                    :rangeFormatting {}
-                                    :completion {:completionItem {:snippetSupport true
-                                                                  :documentationFormat ["plaintext"]}}
-                                    :publishDiagnostics {}}
-                     :workspace {:workspaceEdit {:documentChanges false}}}}
-                   (fn [result]
-                     (swap! servers update root-id
-                            assoc :initialized? true
-                            :capabilities (get-in result [:capabilities]))
-                     (notify! root-id "initialized" {})
-                     (log/log "LSP initialized" root-id)
-                     (let [cbs (:after-init (srv root-id))]
-                       (swap! servers update root-id assoc :after-init [])
-                       (doseq [c cbs] (c result))))))))))
+   (let [ready-now?
+         (locking start-lock
+           (cond
+             (ready? root-id) true
+             (server-exists? root-id) (do (queue-init! root-id cb) false)
+             :else
+             (do
+               (start! root-id argv dir language-id)
+               (queue-init! root-id cb)
+               (request! root-id "initialize"
+                         {:processId (.pid (ProcessHandle/current))
+                          :rootUri (path->uri dir)
+                          :capabilities
+                          {:textDocument
+                           {:synchronization {:dynamicRegistration false}
+                            :hover {}
+                            :definition {}
+                            :references {}
+                            :rename {:prepareSupport false}
+                            :codeAction {}
+                            :signatureHelp {}
+                            :documentSymbol {}
+                            :formatting {}
+                            :rangeFormatting {}
+                            :completion {:completionItem {:snippetSupport true
+                                                          :documentationFormat ["plaintext"]}}
+                            :publishDiagnostics {}}
+                           :workspace {:workspaceEdit {:documentChanges false}}}}
+                         (fn [result]
+                           (swap! servers update root-id
+                                  assoc :initialized? true
+                                  :capabilities (get-in result [:capabilities]))
+                           (notify! root-id "initialized" {})
+                           (log/log "LSP initialized" root-id)
+                           (let [cbs (:after-init (srv root-id))]
+                             (swap! servers update root-id assoc :after-init [])
+                             (doseq [c cbs] (c result)))))
+               false)))]
+     (when (and ready-now? cb) (cb nil)))))
 
 (defn- at-pos
   "Per-request document + position params, shared by hover/definition/completion."
@@ -421,7 +434,15 @@
                                                 {:from f :to t :text (str (or (:newText e) ""))})))
                                       (sort-by :from >)
                                       vec)})))))
-           (vec)))))
+           ;; A server may list the same document more than once (`:changes`
+           ;; plus `:documentChanges`, or two rename entries). Merge before
+           ;; sorting: otherwise the second group's offsets are applied to text
+           ;; the first group already changed.
+           (reduce (fn [by-path {:keys [path edits]}]
+                     (update by-path path (fnil into []) edits))
+                   {})
+           (mapv (fn [[path edits]]
+                   {:path path :edits (vec (sort-by :from > edits))}))))))
 
 (defn tick!
   "Editor-loop step: sync open documents and read server output. Applies

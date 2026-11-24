@@ -1,5 +1,6 @@
 (ns xmas.dap-test
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [xmas.buf :as buf]
             [xmas.dap :as dap]
             [xmas.lang :as lang]
@@ -107,3 +108,13 @@
   (is (= "No debug session" (dap/evaluate! "x")))
   (is (= "debug: off" (dap/status-line)))
   (is (false? (dap/running?))))
+(deftest a-stack-frame-carries-the-one-based-line-nav-jump-uses
+  ;; DAP reports 1-based lines and nav-jump/goto-line also are 1-based. Storing
+  ;; a decremented line made RET on *Debug* land one line above the frame.
+  (let [ed (atom {:bufs {}})
+        entries (#'dap/build-frames! {:editor ed}
+                                      [{:name "main" :line 12
+                                        :source {:path "/tmp/xmas-frame.py"}}])
+        b (get-in @ed [:bufs "*Debug*"])]
+    (is (= 12 (:line (first entries))))
+    (is (str/includes? (str (:text b)) "/tmp/xmas-frame.py:12"))))

@@ -8,7 +8,8 @@
             [clojure.test :refer [deftest is]]
             [xmas.buf :as buf]
             [xmas.dap :as dap]
-            [xmas.lang :as lang]))
+            [xmas.lang :as lang]
+            [xmas.testutil :as tu]))
 
 (defn- python-with-debugpy []
   (let [py (or (System/getenv "XMAS_DEBUGPY") "python3")]
@@ -30,8 +31,7 @@
 
 (deftest debugpy-session-hits-a-breakpoint-and-reports-state
   (if-let [py (python-with-debugpy)]
-    (let [dir (doto (java.io.File/createTempFile "xmas-dap-live" "")
-                (.delete) (.mkdirs))
+    (let [dir (tu/temp-dir "xmas-dap-live")
           prog (java.io.File. dir "prog.py")
           _ (spit prog "def add(a, b):\n    total = a + b\n    return total\n\nprint(add(2, 3))\n")
           path (.getPath prog)
@@ -76,5 +76,5 @@
         (finally
           (dap/stop!)
           (dap/restore-breakpoints! {})
-          (doseq [f (reverse (file-seq dir))] (.delete f)))))
+          (tu/delete-tree dir))))
     (println "debugpy not installed (pip install debugpy); skipping live DAP test")))

@@ -239,7 +239,9 @@
                  (.getMessage e))
         nil))))
 
-(defn- compute
+(defonce ^:private states-lock (Object.))
+
+(defn- compute*
   "Parse `text` for `key` and cache spans/folds for this version."
   [key l text version]
   (if-let [{:keys [parser]} (ensure-state key l)]
@@ -277,6 +279,17 @@
   ; a large buffer needs real highlighting.
   )
 
+(defn- compute
+  "Serialize parse/close: the web demo renders from a watch thread while the
+   command loop renders, and both would otherwise parse for the same key,
+   closing a native tree the other one is using."
+  [key l text version]
+  (locking states-lock
+    (let [st (parse-state key)]
+      (if (and st (= version (:version st)) (= (:lang-id st) (:id l)))
+        st
+        (compute* key l text version)))))
+
 (defn state-for
   "Parsed state for `key` at `version`, parsing only when the version moved.
    nil once this buffer was marked slow, or when no grammar is available."
@@ -310,8 +323,12 @@
    top-level only (Clojure). Nil when there is no parse."
   [key l text version]
   (when-let [st (state-for key l text version)]
-    (when-let [tree (:tree st)]
-      (->> (collect-lit-folds (.getRootNode tree) []) distinct vec))))
+    (locking states-lock
+      ;; Another thread may have parsed a newer version (and closed this tree)
+      ;; between state-for and the lock.
+      (let [tree (:tree (parse-state key))]
+        (when (and tree (= tree (:tree st)))
+          (->> (collect-lit-folds (.getRootNode tree) []) distinct vec))))))
 
 
 (defn line-spans

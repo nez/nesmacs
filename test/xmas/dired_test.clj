@@ -2,18 +2,12 @@
   (:require [clojure.test :refer [deftest is testing]]
             [xmas.cmd :as cmd]
             [xmas.dired :as dired]
-            [xmas.gap :as gap])
+            [xmas.gap :as gap]
+            [xmas.testutil :as tu])
   (:import [java.io File]))
 
-(defn- mktemp-dir []
-  (doto (File/createTempFile "xmas-dired-" "")
-    (.delete)
-    (.mkdir)))
-
-(defn- cleanup-dir [^File d]
-  (when (.isDirectory d)
-    (doseq [^File f (.listFiles d)] (.delete f))
-    (.delete d)))
+(defn- mktemp-dir [] (tu/temp-dir "xmas-dired-"))
+(defn- cleanup-dir [d] (tu/delete-tree d))
 
 (deftest open-creates-dired-buffer
   (let [d (mktemp-dir)]

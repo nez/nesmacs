@@ -1,5 +1,7 @@
 (ns xmas.testres-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [xmas.buf :as buf]
             [xmas.testres :as testres]))
 
 (deftest plain-output-is-not-a-test-report
@@ -101,3 +103,12 @@
                               "0 failures, 1 error\n"))]
     (is (= :text (:kind p)))
     (is (= "x" (:name (first (:tests p)))) "the known format is not replaced")))
+
+(deftest a-passing-run-with-an-unknown-format-is-not-reported-as-unparsed
+  ;; A runner that prints "All good" used to look like a parser failure.
+  (let [ed (atom {:bufs {"*Tests*" (assoc (buf/make "*Tests*" "All good\n" nil)
+                                          :test-report? true
+                                          :job-status :done :job-exit 0)}})]
+    (testres/tick! ed)
+    (is (str/includes? (:msg @ed) "passed"))
+    (is (nil? (get-in @ed [:bufs "*Test Results*"])))))

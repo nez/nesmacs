@@ -157,3 +157,20 @@
     (is (= {:range {:start {:line 0 :character 2} :end {:line 0 :character 3}}
             :text "z"}
            (lsp/change-range "abc" "abz")))))
+
+(deftest workspace-edits-merges-a-document-listed-twice
+  ;; Both groups carry offsets into the original text. Applying the first one
+  ;; would shift the second, so they must be merged and sorted together.
+  (let [edit {:documentChanges
+              [{:textDocument {:uri "file:///tmp/x.clj"}
+                :edits [{:range {:start {:line 0 :character 4}
+                                 :end {:line 0 :character 5}}
+                         :newText "E"}]}
+               {:textDocument {:uri "file:///tmp/x.clj"}
+                :edits [{:range {:start {:line 0 :character 1}
+                                 :end {:line 0 :character 2}}
+                         :newText "B"}]}]}
+        groups (lsp/workspace-edits edit (constantly (gap/of "abcdef\n")))]
+    (is (= 1 (count groups)))
+    (is (= [{:from 4 :to 5 :text "E"} {:from 1 :to 2 :text "B"}]
+           (:edits (first groups))))))

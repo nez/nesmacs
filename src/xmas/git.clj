@@ -2,36 +2,17 @@
   "Git porcelain wrappers. All functions return plain data; they never mutate
    the editor state. Callers are responsible for displaying results.
    Commands are argv vectors; no shell strings."
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str])
-  (:import [java.io File]
-           [java.time Instant ZoneId]
+  (:require [clojure.string :as str]
+            [xmas.proc :as proc])
+  (:import [java.time Instant ZoneId]
            [java.time.format DateTimeFormatter]))
 
-(defn- run [argv dir]
-  (let [pb (ProcessBuilder. (into-array String argv))
-        _ (.directory pb (File. dir))]
-    (try
-      (let [p (.start pb)
-            out (slurp (.getInputStream p) :encoding "UTF-8")
-            _ (.waitFor p)]
-        out)
-      (catch Exception e (str "Error: " (.getMessage e))))))
+(defn- run [argv dir] (proc/run argv dir nil))
 
 (defn- run-stdin
   "Run `argv` feeding `input` on stdin. Used for `git apply`."
-  [argv dir ^String input]
-  (let [pb (ProcessBuilder. (into-array String argv))
-        _ (.directory pb (File. dir))
-        _ (.redirectErrorStream pb true)]
-    (try
-      (let [p (.start pb)]
-        (with-open [w (io/writer (.getOutputStream p) :encoding "UTF-8")]
-          (.write w input))
-        (let [out (slurp (.getInputStream p) :encoding "UTF-8")]
-          (.waitFor p)
-          out))
-      (catch Exception e (str "Error: " (.getMessage e))))))
+  [argv dir input]
+  (proc/run argv dir {:stdin input :merge-stderr? true}))
 
 (defn repo-root [dir]
   (let [out (run ["git" "rev-parse" "--show-toplevel"] dir)]
@@ -45,6 +26,23 @@
       (some-> (:file b) java.io.File. .getParent)
       (System/getProperty "user.dir")))
 
+(defn- status-entry
+  "One porcelain v2 -z record. The leading fields are fixed-width, so a split
+   limit keeps spaces in the path; the XY pair says which side changed. In -z
+   mode a rename's original path arrives as its own NUL chunk and is ignored."
+  [line]
+  (let [xy-staged? (fn [xy] (not= \. (first xy)))
+        entry (fn [xy path]
+                (let [staged? (xy-staged? xy)]
+                  {:path path :status (if staged? :staged :unstaged)
+                   :staged staged?}))]
+    (case (first line)
+      \1 (let [[_ xy _ _ _ _ _ _ path] (str/split line #" " 9)] (entry xy path))
+      \2 (let [[_ xy _ _ _ _ _ _ _ path] (str/split line #" " 10)] (entry xy path))
+      \u (let [[_ xy _ _ _ _ _ _ _ _ path] (str/split line #" " 11)] (entry xy path))
+      \? {:path (subs line 2) :status :untracked :staged false}
+      nil)))
+
 (defn status
   "Porcelain v2 -z status. Returns a vector of maps:
    {:path :status :staged} where :status is :staged :unstaged :untracked
@@ -54,15 +52,7 @@
         out (when root (run ["git" "status" "--porcelain=v2" "-z"] root))]
     (when (and root out)
       (->> (str/split out (re-pattern (str (char 0))))
-           (keep (fn [line]
-                   (let [parts (str/split line #"\s+" 3)
-                         [status staged] (case (first parts)
-                                           "1" [:staged true]
-                                           "2" [:unstaged false]
-                                           "?" [:untracked false]
-                                           nil)]
-                     (when status
-                       {:status status :staged staged :path (second parts)}))))
+           (keep status-entry)
            vec))))
 
 (defn- in-root
@@ -89,11 +79,18 @@
   [dir limit]
   (let [root (repo-root dir)]
     (when root
-      (->> (run ["git" "log" (str "-n" limit) (str "--pretty=format:%H" (char 0) "%s" (char 0) "%an" (char 0) "%ad") "--date=short"] root)
+      ;; A literal NUL byte cannot appear in argv (`invalid null character in
+      ;; command`), so the format asks git for the unit separator instead.
+      (->> (run ["git" "log" (str "-n" limit)
+                 "--pretty=format:%H%x1f%s%x1f%an%x1f%ad" "--date=short"] root)
            (str/split-lines)
-           (map #(str/split % (re-pattern (str (char 0))) 4))
-           (map (fn [[hash subject author date]]
-                {:hash hash :abbrev (subs hash 0 7) :subject subject :author author :date date}))
+           ;; An empty repository prints its fatal message on stderr and
+           ;; nothing on stdout, so there is no hash to abbreviate.
+           (keep #(str/split % (re-pattern (str (char 31))) 4))
+           (keep (fn [[hash subject author date]]
+                   (when (and hash (>= (count hash) 7))
+                     {:hash hash :abbrev (subs hash 0 7) :subject subject
+                      :author author :date date})))
            vec))))
 
 (defn branch-name [dir]

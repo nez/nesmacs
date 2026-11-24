@@ -67,12 +67,16 @@
      :cols (max 1 (long (if (int? (:cols t)) (:cols t) 80)))
      :rows (max 1 (long (if (int? (:rows t)) (:rows t) 24)))}))
 
+(defn- safe-int [x] (if (integer? x) x 0))
+
 (defn- data->buffer
   "Deserialize a buffer from session data. Returns nil if its file-backed text
    is missing from the session and can no longer be read from disk."
   [d]
-  (let [file (:file d)
-        saved (:text d)
+  ;; A hand-edited or truncated session file must not crash startup: coerce
+  ;; every field a later `long`/`File` call would choke on.
+  (let [file (when (string? (:file d)) (:file d))
+        saved (when (string? (:text d)) (:text d))
         term (sanitize-terminal (:terminal d))
         text (or saved (some-> file file-text))]
     (when (or text (nil? file))
@@ -84,11 +88,13 @@
       (let [b (-> (buf/make (:name d) (or text "") file)
                   (assoc :modified (:modified d)
                          :mode (:mode d)
-                         :version (:version d)
-                         :edit-count (:edit-count d)
+                         :version (safe-int (:version d))
+                         :edit-count (safe-int (:edit-count d))
                          :journal-from-disk? (and (some? file) (nil? saved))
-                         :font-lock (if saved (or (:font-lock d) []) [])
-                         :props (if saved (:props d) [])
+                         :font-lock (if (and saved (coll? (:font-lock d)))
+                                      (vec (:font-lock d)) [])
+                         :props (if (and saved (coll? (:props d)))
+                                  (vec (:props d)) [])
                          :large-file (:large-file d)))]
         ;; A terminal's text is a capture, not a document: start empty and let
         ;; the backend reattach and paint it. `:create?` is true because the
@@ -104,9 +110,10 @@
                                       :in [] :dirty? true :last-capture 0)))
           ;; A file reloaded from disk may have shrunk, so the saved offsets can
           ;; point past the end.
-          (cond-> (assoc b :point (buf/clamp-pos b (:point d)))
-            (some? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d)))
-            (seq (:collapsed d))
+          (cond-> (assoc b :point (buf/clamp-pos b
+                                                   (when (integer? (:point d)) (:point d))))
+            (integer? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d)))
+            (coll? (:collapsed d))
             (assoc :collapsed
                    (into #{} (filter #(and (integer? %)
                                            (< -1 (long %) (gap/line-count (:text b)))))
@@ -293,7 +300,10 @@
         current (or (:version b) 0)]
     (cond
       (or (nil? b) save) state
-      (not (string? repl)) state
+      ;; A torn or hand-edited record must not throw inside buf/edit.
+      (not (and (string? repl) (integer? from) (integer? to)
+                (<= 0 (long from) (long to))))
+      (do (log/log "journal record ignored for" buf) state)
       ;; Already part of the snapshot: the edit happened before it was written.
       (<= v current) state
       (= v (inc current))
@@ -353,13 +363,28 @@
   [xs]
   (if (sequential? xs) (filterv string? xs) []))
 
+(defn- window-tree?
+  "A structurally valid window tree: leaves name a buffer, splits have both
+   children. `win/leaves` recurses forever on a nil child, so a corrupt session
+   file would otherwise hang startup."
+  [node]
+  (cond
+    (win/leaf? node) (string? (:buffer node))
+    (and (map? node) (= :split (:type node)))
+    (and (window-tree? (:a node)) (window-tree? (:b node)))
+    :else false))
+
 (defn- sanitize-session
   "Validate and clean loaded session data."
   [data]
   (when (and (map? data)
              (= session-version (:version data)))
-    (let [bufs (:bufs data)
-          windows (:windows data)
+    (let [bufs (into {}
+                     (filter (fn [[name b]] (and (string? name) (map? b))))
+                     (when (map? (:bufs data)) (:bufs data)))
+          windows (if (window-tree? (:windows data))
+                    (:windows data)
+                    (win/leaf (or (first (keys bufs)) "*scratch*")))
           cur-window (:cur-window data)]
       {:bufs bufs
        :windows windows
@@ -393,18 +418,25 @@
           rebuilt-bufs (update-vals bufs data->buffer)
 
           ;; Filter out buffers that no longer exist on disk (optional)
-          valid-bufs (into {}
+          existing-bufs (into {}
                           (filter (fn [[_ b]]
                                     (and b
                                          (or (:modified b)
                                              (nil? (:file b))
-                                             (.exists (java.io.File. (:file b))))))
+                                             (.exists (java.io.File. ^String (:file b))))))
                                 rebuilt-bufs))
+          ;; Every restored window leaf needs a buffer that exists. If all
+          ;; files vanished (and *scratch* was killed), the renderer would
+          ;; dereference nil before the first frame.
+          valid-bufs (if (seq existing-bufs)
+                       existing-bufs
+                       {"*scratch*" (buf/make "*scratch*" "" nil)})
+          ;; A leaf whose buffer vanished is rebuilt on some buffer that exists.
+          fallback-buf (first (keys valid-bufs))
 
-          ;; Ensure cur-window points to an existing buffer
+          ;; Ensure cur-window names a leaf that still exists.
           leaf-paths (win/leaves windows)
-          valid-cur-window (if (and cur-window
-                                    (get-in windows cur-window))
+          valid-cur-window (if (some #(= cur-window %) leaf-paths)
                              cur-window
                              (first leaf-paths))
 
@@ -415,18 +447,24 @@
                                         (if (contains? valid-bufs buf-name)
                                           (let [b (get valid-bufs buf-name)
                                                 w (win/leaf buf-name
-                                                            (buf/clamp-pos b (:scroll node 0))
-                                                            (max 0 (long (or (:hscroll node) 0))))]
+                                                            (buf/clamp-pos b (when (integer? (:scroll node))
+                                                                               (:scroll node)))
+                                                            (max 0 (long (if (integer? (:hscroll node))
+                                                                           (:hscroll node)
+                                                                           0))))]
                                             (cond-> w
-                                              (some? (:point node))
+                                              (integer? (:point node))
                                               (assoc :point (buf/clamp-pos b (:point node)))
-                                              (some? (:mark node))
+                                              (integer? (:mark node))
                                               (assoc :mark (buf/clamp-pos b (:mark node)))))
-                                          (win/leaf "*scratch*")))
+                                          (win/leaf fallback-buf)))
                                       (assoc (win/split-node (:dir node)
                                                              (walk (:a node))
                                                              (walk (:b node)))
-                                             :ratio (:ratio node 0.5))))]
+                                             :ratio (if (number? (:ratio node))
+                                                      (-> (double (:ratio node))
+                                                          (max 0.1) (min 0.9))
+                                                      0.5))))]
                             (walk windows))
 
           new-state (-> state
@@ -445,5 +483,5 @@
                                                     (conj valid-cur-window :buffer))]
                                       (if (contains? valid-bufs b)
                                         b
-                                        (or (first (keys valid-bufs)) "*scratch*")))))]
+                                        fallback-buf))))]
       [new-state true])))

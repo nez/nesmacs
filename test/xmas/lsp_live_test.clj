@@ -5,7 +5,8 @@
             [clojure.test :refer [deftest is]]
             [xmas.buf :as buf]
             [xmas.lsp :as lsp]
-            [xmas.proc :as proc]))
+            [xmas.proc :as proc]
+            [xmas.testutil :as tu]))
 
 (defn- lsp-on-path? []
   (some (fn [dir]
@@ -49,8 +50,7 @@
 (deftest ^:integration clojure-lsp-end-to-end
   (if-not (lsp-on-path?)
     (println "clojure-lsp not on PATH; skipping live LSP test")
-    (let [dir  (doto (java.io.File/createTempFile "xmas-lsp-live" "")
-                 (.delete) (.mkdirs))
+    (let [dir  (tu/temp-dir "xmas-lsp-live")
           src  (java.io.File. dir "demo.clj")
           text (str "(ns demo)\n\n"
                     "(defn add [a b]\n  (+ a b))\n\n"
@@ -107,4 +107,4 @@
         (is (pump! editor #(deref ready) 60000) "server restarted")
         (finally
           (lsp/shutdown-all!)
-          (doseq [f (reverse (file-seq dir))] (.delete f)))))))
+          (tu/delete-tree dir))))))

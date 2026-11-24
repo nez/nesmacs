@@ -44,3 +44,10 @@
         [msgs rest*] (rpc/decode-msgs framed)]
     (is (= [{:seq 3}] msgs))
     (is (= "" rest*))))
+(deftest a-multibyte-character-split-across-reads-is-not-corrupted
+  ;; read-tcp decodes complete chunks and keeps the partial character.
+  (let [bs (.getBytes "añ€𝄞" "UTF-8")
+        cut (#'rpc/complete-utf8 bs (dec (alength bs)))]
+    (is (< cut (alength bs)) "the last character is incomplete, so kept")
+    (is (= "añ€" (String. bs 0 cut "UTF-8")))
+    (is (= (alength bs) (#'rpc/complete-utf8 bs (alength bs))))))

@@ -216,18 +216,7 @@
   "Run `cmd` via /bin/sh -c. If `stdin` is given, pipes it in. Returns combined
    stdout + stderr."
   [^String cmd & [^String stdin]]
-  (try
-    (let [pb (doto (ProcessBuilder. ["sh" "-c" cmd])
-               (.redirectErrorStream true))
-          p  (.start pb)]
-      (if stdin
-        (with-open [os (.getOutputStream p)]
-          (.write os (.getBytes stdin "UTF-8")))
-        (.close (.getOutputStream p)))
-      (let [out (slurp (.getInputStream p) :encoding "UTF-8")]
-        (.waitFor p)
-        out))
-    (catch Exception e (str "Error: " (.getMessage e)))))
+  (proc/run ["sh" "-c" cmd] nil {:stdin stdin :merge-stderr? true}))
 
 (defn shell-command-on-region
   "Pipe the current region through `cmd` and replace it with the command's
@@ -814,10 +803,11 @@
   "`!` answer: save every modified file buffer, discard the rest, then quit.
    A failed save cancels the quit rather than losing the buffer."
   [s names]
-  (let [s (reduce (fn [s n]
-                    (if (:file (cmd/buf s n)) (save-buffer-named s n) s))
-                  s names)]
-    (if (some #(:modified (cmd/buf s %)) names)
+  (let [files (filter #(:file (cmd/buf s %)) names)
+        s     (reduce (fn [s n] (save-buffer-named s n)) s files)]
+    ;; Bufferless buffers are discarded by `!`; only a failed file save
+    ;; cancels the quit.
+    (if (some #(:modified (cmd/buf s %)) files)
       (msg s "Quit canceled: a buffer could not be saved")
       (quit-finish s))))
 
@@ -1188,7 +1178,7 @@
 ;; --- Projects, occur, imenu ---
 
 (defn- project-root [s]
-  (project/root (or (:file (cur s)) (System/getProperty "user.dir"))))
+  (project/root-for (:file (cur s))))
 
 (defn- project-find-file
   "C-x p f: pick a file anywhere in the project by fuzzy name.
@@ -1214,6 +1204,12 @@
 (defn- symbol-prefix [^String text p]
   (let [before (gap/substr text 0 p)]
     (or (second (re-find #"[$\w\-\*\+!\?\./#]*$" before)) "")))
+
+(defn- offset->pos
+  "LSP position {:line :character} (both 0-based) for char offset `i`."
+  [text i]
+  (let [l (gap/line-of text i)]
+    {:line l :character (- i (gap/nth-line-start text l))}))
 
 (defn- lsp-range-offsets
   "Char offsets for an LSP range within `text`."
@@ -1246,8 +1242,8 @@
   (let [b (cur s) p (:point b)
         path (:file b) version (:version b)
         prefix (symbol-prefix (str (:text b)) p)
-        line (gap/line-of (:text b) p)
-        ch   (- p (gap/nth-line-start (:text b) line))]
+        {:keys [line character]} (offset->pos (:text b) p)
+        ch character]
     (mini-start s "Complete: "
       (fn [s chosen]
         (let [b (cur s)
@@ -1297,11 +1293,8 @@
 (defn- char-col
   "0-based UTF-16 character index of point within its line — what LSP wants."
   [s]
-  (let [b  (cur s)
-        t  (:text b)
-        p  (:point b)
-        ln (gap/line-of t p)]
-    (- p (gap/nth-line-start t ln))))
+  (let [b (cur s)]
+    (:character (offset->pos (:text b) (:point b)))))
 
 (defn- lsp-request-at-point
   "Run `(f state session)` once the language server for the current buffer is
@@ -1378,16 +1371,14 @@
            (fn [s]
              (if (empty? entries)
                (msg s "No references")
-               (-> s (assoc-in [:bufs "*References*"]
-                               (listbuf/make
-                                 {:name "*References*"
-                                  :mode :nav-mode
-                                  :header (str (count entries) " references")
-                                  :entries entries
-                                  :format-entry (fn [{:keys [file line]}]
-                                                  (format "%s:%d" file line))
-                                  :extras {:nav-root nil}}))
-                     (cmd/set-cur-buffer "*References*")))))))
+               (listbuf/open s "*References*"
+                             {:name "*References*"
+                              :mode :nav-mode
+                              :header (str (count entries) " references")
+                              :entries entries
+                              :format-entry (fn [{:keys [file line]}]
+                                              (format "%s:%d" file line))
+                              :extras {:nav-root nil}}))))))
 
 (defn lsp-references [s]
   (lsp-request-at-point s
@@ -1506,8 +1497,7 @@
             ln (cmd/line-idx state)
             [lo hi] (or (cmd/region-bounds state)
                         [(gap/nth-line-start t ln) (gap/nth-line-end t ln)])
-            pos (fn [i] (let [l (gap/line-of t i)]
-                          {:line l :character (- i (gap/nth-line-start t l))}))
+            pos (fn [i] (offset->pos t i))
             range {:start (pos lo) :end (pos hi)}
             diags (diags-in-range (cur state) lo hi pos)]
         (lsp/code-action (:root-id sess) (:file (cur state)) range diags
@@ -1569,17 +1559,15 @@
                                       (fn [s]
                                         (if (empty? entries)
                                           (msg s "No symbols")
-                                          (-> s
-                                              (assoc-in [:bufs "*Imenu*"]
-                                                        (listbuf/make
-                                                          {:name "*Imenu*"
-                                                           :mode :nav-mode
-                                                           :header (str (count entries) " symbols")
-                                                           :entries (mapv #(assoc % :buf (:file (cur state))) entries)
-                                                           :format-entry (fn [{:keys [line name]}]
-                                                                           (format "%5d  %s" line name))
-                                                           :extras {:nav-root nil}}))
-                                              (cmd/set-cur-buffer "*Imenu*"))))))))
+                                          (listbuf/open
+                                            s "*Imenu*"
+                                            {:name "*Imenu*"
+                                             :mode :nav-mode
+                                             :header (str (count entries) " symbols")
+                                             :entries (mapv #(assoc % :buf (:file (cur state))) entries)
+                                             :format-entry (fn [{:keys [line name]}]
+                                                             (format "%5d  %s" line name))
+                                             :extras {:nav-root nil}})))))))
       state)))
 
 (defn- format-options [s] {:tabSize (or (:indent (:language (cur s))) 2)
@@ -1602,12 +1590,7 @@
       (fn [state sess]
         (let [path (:file (cur state))
               t (:text (cur state))
-              ln-lo (gap/line-of t lo)
-              ln-hi (gap/line-of t hi)
-              start-col (- lo (gap/nth-line-start t ln-lo))
-              end-col (- hi (gap/nth-line-start t ln-hi))
-              range {:start {:line ln-lo :character start-col}
-                     :end {:line ln-hi :character end-col}}]
+              range {:start (offset->pos t lo) :end (offset->pos t hi)}]
           (lsp/range-formatting (:root-id sess) path range (format-options state)
                                 (fn [edits]
                                   (if (seq edits)
@@ -1841,8 +1824,7 @@
       (let [src     (:buf s)
             entries (nav/occur-entries (:text (cur s)) input)
             name    (str "*Occur " input "*")]
-        (-> s (assoc-in [:bufs name] (nav/occur-buffer name src input entries))
-              (cmd/set-cur-buffer name)))
+        (listbuf/show s name (nav/occur-buffer name src input entries)))
       (catch Exception e (msg-error s "Bad regexp" e)))))
 
 (defn- imenu [s]
@@ -1851,8 +1833,7 @@
     (if (empty? syms)
       (msg s "No symbols")
       (let [name "*Imenu*"]
-        (-> s (assoc-in [:bufs name] (nav/imenu-buffer name (:buf s) syms))
-              (cmd/set-cur-buffer name))))))
+        (listbuf/show s name (nav/imenu-buffer name (:buf s) syms))))))
 
 (declare format-buffer toggle-fold fold-all unfold-all git-blame git-stage-hunk
          git-unstage-hunk forge-prs)
@@ -2514,8 +2495,10 @@
         (swap! editor dissoc :suspend-requested)
         (t/suspend!))
       ;; Pump on every tick, including idle, so jobs stream while nothing is
-      ;; being typed — and only from this thread.
-      (swap! editor job/pump!)
+      ;; being typed — and only from this thread. Draining is not pure, so it
+      ;; happens before the swap: a CAS retry must not lose a chunk.
+      (let [drained (job/drain! (:bufs @editor))]
+        (when (seq drained) (swap! editor job/apply-drain drained)))
       (terminal/tick! editor tmux/backend)
       (complete/tick! editor)
       (auto-save-tick! editor)
@@ -2658,12 +2641,18 @@
       (reset! editor (initial-state rows cols))
       ;; nREPL and any other out-of-band caller can use xmas.api directly.
       (alter-var-root #'api/*state* (constantly editor))
-      ;; Load session before init.clj so user config can override
-      (when-let [sess (session/load-session!)]
-        (let [[restored ok] (session/restore-session @editor sess)]
-          (when ok
-            (reset! editor (session/recover-journal! restored))
-            (dap/restore-breakpoints! (:breakpoints sess)))))
+      ;; Load session before init.clj so user config can override. A damaged
+      ;; session or journal must never keep the editor from starting: fall back
+      ;; to a fresh state and say so in the log.
+      (try
+        (when-let [sess (session/load-session!)]
+          (let [[restored ok] (session/restore-session @editor sess)]
+            (when ok
+              (reset! editor (session/recover-journal! restored))
+              (dap/restore-breakpoints! (:breakpoints sess)))))
+        (catch Exception e
+          (log/log "session restore failed:" (.getMessage e))
+          (reset! editor (initial-state rows cols))))
       (load-init-files!)
       (swap! editor recover-ask (pending-recoveries))
       ;; Baseline snapshot: the journal needs a version to replay from even if

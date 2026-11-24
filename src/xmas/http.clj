@@ -25,6 +25,10 @@
 
 (def ^:private max-body 200000)
 
+;; Only the newest request may write a response: a slow first reply must not
+;; land on top of a request the user sent afterwards.
+(defonce ^:private request-seq (atom 0))
+
 ;; --- Request ---
 
 (defn parse-request
@@ -35,7 +39,10 @@
   (let [head (first (str/split text #"\r?\n\r?\n" 2))
         [first-line & header-lines] (str/split-lines head)
         [method url] (str/split (str/trim first-line) #"\s+" 2)]
-    (when (and url (re-matches #"(?i)https?://\S+" url))
+    ;; A method is an HTTP token; anything else would reach http-kit as a bad
+    ;; keyword. Only http(s) keeps the request from using another transport.
+    (when (and method (re-matches #"[A-Za-z][A-Za-z-]*" method)
+               url (re-matches #"(?i)https?://\S+" url))
       {:method (str/upper-case method)
        :url url
        :headers (into {}
@@ -70,23 +77,36 @@
 
 ;; --- Buffers ---
 
-(defn- with-request
-  "State with the request on top and `response` below it. Point stays where the
-   user had it while it was inside the request."
-  [s name req response]
+(defn- response-cut
+  "Index just after the request's blank line, or the end of the text when the
+   user removed it."
+  ^long [^String text]
+  (if-let [i (str/index-of text "\n\n")]
+    (+ i 2)
+    (count text)))
+
+(defn- with-response
+  "State with `response` in the buffer's response area and `request-id` still
+   the current one. Only that area is rewritten: a request edited while the
+   reply was in flight stays as the user typed it. A reply for an older send
+   is ignored so it cannot overwrite a newer one."
+  [s name response request-id]
   (if-let [b (get-in s [:bufs name])]
-    (let [old (str (:text b))
-          point (long (:point b))
-          tail (str/index-of old "\n\n")
-          request (str (:method req) " " (:url req) "\n"
-                       (apply str (for [[k v] (sort-by key (:headers req))]
-                                    (str k ": " v "\n")))
-                       "\n")
-          new-point (if (and tail (<= point (inc (long tail)))) point (count request))]
-      (assoc-in s [:bufs name]
-                (-> (buf/edit b 0 (count old) (str request response))
-                    (assoc :modified false)
-                    (buf/set-point (constantly new-point)))))
+    (if (not= request-id (:http-request b))
+      s
+      (let [old (str (:text b))
+            cut (response-cut old)
+            ;; Keep the blank line that separates request from response.
+            sep (if (= cut (count old))
+                  (cond (str/ends-with? old "\n\n") ""
+                        (str/ends-with? old "\n") "\n"
+                        :else "\n\n")
+                  "")
+            text (str (subs old 0 cut) sep response)]
+        (assoc-in s [:bufs name]
+                  (-> (buf/edit b 0 (count old) text)
+                      (assoc :modified false)
+                      (buf/set-point (constantly (min (long (:point b)) (count text))))))))
     s))
 
 (defn open
@@ -104,6 +124,11 @@
 
 ;; --- Sending ---
 
+(defn- finish!
+  "Apply one reply from the future to the buffer that asked for it."
+  [editor-atom name request-id render-args]
+  (swap! editor-atom with-response name (render render-args) request-id))
+
 (defn send!
   "Send the request in `name`. Returns [state' message]: the state already says
    \"sending…\" and the response lands in the buffer later, from a future that
@@ -113,7 +138,8 @@
    (let [req (parse-request (str (get-in state [:bufs name :text])))]
      (if-not req
        [state "No http(s) request line (expected: GET https://host/path)"]
-       (do
+       (let [id (swap! request-seq inc)
+             pending (assoc-in state [:bufs name :http-request] id)]
          (future
            (try
              (let [{:keys [status headers body error]}
@@ -121,12 +147,12 @@
                                    :method (keyword (str/lower-case (:method req)))
                                    :headers (:headers req)
                                    :timeout 15000})]
-               (swap! editor-atom with-request name req
-                      (render {:status status :headers headers :body body
-                               :error error :url (:url req) :method (:method req)})))
+               (finish! editor-atom name id
+                        {:status status :headers headers :body body
+                         :error error :url (:url req) :method (:method req)}))
              (catch Exception e
                (log/log "http:" (.getMessage e))
-               (swap! editor-atom with-request name req
-                      (render {:error e :url (:url req) :method (:method req)})))))
-         [(with-request state name req "sending…\n")
+               (finish! editor-atom name id
+                        {:error e :url (:url req) :method (:method req)}))))
+         [(with-response pending name "sending…\n" id)
           (str (:method req) " " (:url req) " …")])))))

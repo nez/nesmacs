@@ -52,28 +52,51 @@
                           (assoc :modified false)))
             (cmd/set-cur-buffer buf-name))))))
 
+(defn drain!
+  "Take every available chunk and the finished state out of the processes,
+   without touching editor state. A swap! that retries must not re-run this:
+   the chunks were already removed from the queue and a discarded state would
+   lose them."
+  [bufs]
+  (proc/kill-orphans! :job (set (keep :job-proc (vals bufs))))
+  (reduce-kv
+    (fn [acc nm b]
+      (if-let [h (some-> (:job-proc b) proc/by-id)]
+        (let [chunk (proc/drain! h pump-limit)
+              done? (proc/finished? h)
+              code  (when done? (long (or (proc/exit-code h) 0)))]
+          (when done? (proc/forget! h))
+          (cond-> acc
+            (seq chunk) (assoc-in [nm :text] chunk)
+            done? (assoc-in [nm :exit] code)
+            true (assoc-in [nm :proc-id] (:job-proc b))))
+        acc))
+    {} bufs))
+
+(defn apply-drain
+  "Pure counterpart of `drain!`. `:proc-id` guards against a rerun that replaced
+   the buffer's process between the drain and this swap."
+  [s drained]
+  (reduce-kv
+    (fn [s nm {:keys [text exit proc-id]}]
+      (let [b (get-in s [:bufs nm])]
+        (if-not (and b (= proc-id (:job-proc b)))
+          s
+          (let [s (cond-> s (seq text) (update-in [:bufs nm] append-text text))]
+            (if (some? exit)
+              (let [s (update-in s [:bufs nm]
+                                 assoc :job-status :done :job-proc nil :job-exit exit)]
+                (if (zero? (long exit))
+                  s
+                  (update-in s [:bufs nm] append-text (str "\n[exit " exit "]\n"))))
+              s)))))
+    s drained))
+
 (defn pump!
   "Drain live job output into their buffers and reap finished processes.
    Call from the editor loop only: it is the single writer for job text."
   [s]
-  (proc/kill-orphans! :job (set (keep :job-proc (vals (:bufs s)))))
-  (reduce-kv
-    (fn [s nm b]
-      (if-let [h (some-> (:job-proc b) proc/by-id)]
-        (let [chunk (proc/drain! h pump-limit)
-              s     (cond-> s (seq chunk) (update-in [:bufs nm] append-text chunk))]
-          (if (proc/finished? h)
-            (let [code (long (or (proc/exit-code h) 0))
-                  b    (-> (get-in s [:bufs nm])
-                           (assoc :job-status :done :job-proc nil))
-                  s    (assoc-in s [:bufs nm] b)]
-              (proc/forget! h)
-              (if (zero? code)
-                s
-                (update-in s [:bufs nm] append-text (str "\n[exit " code "]\n"))))
-            s))
-        s))
-    s (:bufs s)))
+  (apply-drain s (drain! (:bufs s))))
 
 (defn kill
   "C-c C-k: kill the process behind the current job buffer."

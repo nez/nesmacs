@@ -1,6 +1,7 @@
 (ns xmas.git-test
   (:require [clojure.test :refer [deftest is]]
-            [xmas.git :as git]))
+            [xmas.git :as git]
+            [xmas.testutil :as tu]))
 
 (deftest current-dir-precedence
   (is (= "/tmp/explicit" (git/current-dir {:git-dir "/tmp/explicit"
@@ -23,8 +24,7 @@
     (is (not (clojure.string/includes? (:patch (first hunks)) "-c")))))
 
 (deftest blame-parses-line-porcelain
-  (let [dir (.toFile (java.nio.file.Files/createTempDirectory
-                       "xmas-blame" (make-array java.nio.file.attribute.FileAttribute 0)))
+  (let [dir (tu/temp-dir "xmas-blame")
         git (fn [& args]
               (let [pb (doto (ProcessBuilder. (into-array String (cons "git" args)))
                          (.directory dir) (.redirectErrorStream true))
@@ -42,4 +42,23 @@
         (is (= {:line 1 :author "Tester" :text "alpha"}
                (select-keys (first rows) [:line :author :text])))
         (is (= (:hash (first rows)) (:hash (second rows)))))
-      (finally (doseq [f (reverse (file-seq dir))] (.delete f))))))
+      (finally (tu/delete-tree dir)))))
+
+(deftest status-parses-the-fields-not-the-record-type
+  ;; Porcelain v2 puts XY first and the path last; the old parser used the
+  ;; record type as status and XY as the file name.
+  (let [entry #'git/status-entry]
+    (is (= {:path "src/a b.clj" :status :unstaged :staged false}
+           (entry "1 .M N... 100644 100644 100644 abc def src/a b.clj")))
+    (is (= {:path "b.clj" :status :staged :staged true}
+           (entry "1 M. N... 100644 100644 100644 abc def b.clj")))
+    (is (= {:path "new.txt" :status :untracked :staged false}
+           (entry "? new.txt")))
+    (is (nil? (entry "orig-name.txt")) "a rename's origin arrives as its own chunk")))
+
+(deftest log-survives-an-empty-repository
+  (let [dir (tu/temp-dir "xmas-empty")]
+    (try
+      (is (= "" (#'xmas.git/run ["git" "init" "-q"] dir)))
+      (is (= [] (git/log dir 5)))
+      (finally (tu/delete-tree dir)))))

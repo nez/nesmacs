@@ -1,5 +1,5 @@
 (ns xmas.ed-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -14,7 +14,16 @@
             [xmas.dap :as dap]
             [xmas.view :as view]
             [xmas.spec :as spec]
+            [xmas.testutil :as tu]
             [xmas.window :as win]))
+
+;; The quit/save tests call commands that append to the journal and recentf;
+;; keep every write inside a temp directory instead of the real ~/.xmas.
+(use-fixtures :each
+  (fn [f]
+    (let [dir (tu/temp-dir "xmas-ed-test")]
+      (try (binding [persist/*dir* dir] (f))
+           (finally (tu/delete-tree dir))))))
 
 ;; --- Test helpers ---
 
@@ -1019,9 +1028,7 @@
 ;; --- Crash recovery ---
 
 (deftest recover-file-restores-backup-text
-  (let [dir (.toFile (java.nio.file.Files/createTempDirectory
-                       "xmas-rec"
-                       (into-array java.nio.file.attribute.FileAttribute [])))
+  (let [dir (tu/temp-dir "xmas-rec")
         f   (java.io.File. dir "notes.txt")]
     (try
       (spit f "saved")
@@ -1032,16 +1039,12 @@
           (is (= "unsaved" (str (:text (ed/cur s)))))
           (is (:modified (ed/cur s)))
           (is (clojure.string/includes? (:msg s) "Recovered"))))
-      (finally
-        (doseq [x (.listFiles dir)] (.delete x))
-        (.delete dir)))))
+      (finally (tu/delete-tree dir)))))
 
 (deftest recover-file-drops-state-derived-from-the-old-text
   ;; The backup replaces the text, so cached spans, props and undo steps that
   ;; describe the on-disk version must not survive.
-  (let [dir (.toFile (java.nio.file.Files/createTempDirectory
-                       "xmas-rec"
-                       (into-array java.nio.file.attribute.FileAttribute [])))
+  (let [dir (tu/temp-dir "xmas-rec")
         f   (java.io.File. dir "notes.txt")]
     (try
       (spit f "saved")
@@ -1060,9 +1063,7 @@
           (is (< (long v) (long (:version b))) "version bumps so render caches invalidate")
           (is (= [] (:font-lock b) (:props b) (:undo b)))
           (is (nil? (:font-lock-window b)))))
-      (finally
-        (doseq [x (.listFiles dir)] (.delete x))
-        (.delete dir)))))
+      (finally (tu/delete-tree dir)))))
 
 ;; --- Minibuffer history ---
 
@@ -1732,9 +1733,7 @@
 ;; --- Projects, occur, imenu, reload-config ---
 
 (defn- project-fixture []
-  (let [root (.toFile (java.nio.file.Files/createTempDirectory
-                        "xmas-ed-proj"
-                        (into-array java.nio.file.attribute.FileAttribute [])))]
+  (let [root (tu/temp-dir "xmas-ed-proj")]
     (doseq [[rel content] [[".git/HEAD" ""]
                            ["src/a.clj" "(ns a)\n(defn needle-fn [] 1)\n"]
                            ["src/b.clj" "needle\n"]]]
@@ -1743,9 +1742,7 @@
         (spit f content)))
     root))
 
-(defn- rm-rf [d]
-  (when (.isDirectory d) (doseq [c (.listFiles d)] (rm-rf c)))
-  (.delete d))
+(defn- rm-rf [d] (tu/delete-tree d))
 
 (defn- with-modes [s] (#'xmas.ed/register-builtin-modes s))
 
@@ -1804,9 +1801,7 @@
       (finally (rm-rf root)))))
 
 (deftest reload-config-runs-init-clj
-  (let [home (.toFile (java.nio.file.Files/createTempDirectory
-                        "xmas-home"
-                        (into-array java.nio.file.attribute.FileAttribute [])))
+  (let [home (tu/temp-dir "xmas-home")
         original (System/getProperty "user.home")]
     (try
       (.mkdirs (java.io.File. home ".xmas"))
@@ -1889,7 +1884,7 @@
 (deftest workspace-edit-writes-only-unopened-files
   ;; Multi-file rename must reach disk for files the user never opened, while an
   ;; open buffer keeps its edits in memory for the user to save or undo.
-  (let [dir (doto (java.io.File/createTempFile "xmas-ws" "") (.delete) (.mkdirs))]
+  (let [dir (tu/temp-dir "xmas-ws")]
     (try
       (binding [persist/*dir* dir]
         (let [open-f (java.io.File. dir "open.py")
@@ -1914,4 +1909,19 @@
           (is (false? (get-in @ed/editor [:bufs shut-path :modified])))))
       (finally
         (reset! ed/editor nil)
-        (doseq [f (reverse (file-seq dir))] (.delete f))))))
+        (tu/delete-tree dir)))))
+
+(deftest exit-bang-discards-a-modified-scratch-buffer
+  ;; `!` saves every file buffer and discards the rest. The old check looked at
+  ;; all modified buffers, so a dirty *scratch* cancelled the quit.
+  (let [f (java.io.File/createTempFile "xmas-quit-dirty" ".txt")
+        path (.getCanonicalPath f)]
+    (try
+      (spit f "abc")
+      (let [s (-> (make-state "scratch!" 0) (ed/edit 0 0 "x")
+                  (ed/find-file path) (ed/edit 0 0 "y"))
+            s1 (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))
+            s2 (answer-mini s1 "!")]
+        (is (:exit s2))
+        (is (= "yabc" (slurp path))))
+      (finally (.delete f)))))

@@ -3,6 +3,8 @@
    with keys to switch, kill, or refresh."
   (:require [xmas.cmd :as cmd]
             [xmas.listbuf :as listbuf]
+            [xmas.lsp :as lsp]
+            [xmas.treesit :as treesit]
             [xmas.window :as win]))
 
 (def ^:private buflist-name "*Buffer List*")
@@ -50,6 +52,10 @@
   [s]
   (if-let [b (listbuf/entry-at-point s)]
     (let [target (:key b)
+          ;; Same cleanup as ed/kill-buffer: a killed file buffer must close
+          ;; its LSP document and drop the native parse state.
+          _ (when-let [f (:file (get-in s [:bufs target]))] (lsp/close-doc! f))
+          _ (treesit/forget! target)
           s' (-> s
                  (update :bufs dissoc target)
                  ;; windows showing the killed buffer fall back to the buflist

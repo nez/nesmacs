@@ -35,12 +35,9 @@
   (git/repo-root (git/current-dir (cmd/cur s))))
 
 (defn refresh [s]
-  (let [b (cmd/cur s)
-        dir (git/current-dir b)]
-    (if (git/is-repo? dir)
-      (listbuf/refresh s gitstatus-name (spec dir))
-      (-> s (assoc-in [:bufs gitstatus-name] (listbuf/make (spec dir)))
-          (cmd/msg "Not a git repository")))))
+  (let [dir (git/current-dir (cmd/cur s))]
+    (listbuf/reload s gitstatus-name (spec dir) (git/is-repo? dir)
+                    "Not a git repository")))
 
 (defn- alter-index
   "Run `git-fn` on the entry at point, then refresh and report `label`."

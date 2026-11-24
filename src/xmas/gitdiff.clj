@@ -8,7 +8,9 @@
 
 (defn open [s dir path staged?]
   (let [name (diff-name path staged?)]
-    (job/start s {:argv ["git" "diff" (when staged? "--cached") "--" path]
+    (job/start s {:argv (cond-> ["git" "diff"]
+                          staged? (conj "--cached")
+                          true    (conj "--" path))
                   :dir dir
                   :buf-name name
                   :mode :gitdiff-mode})))

@@ -168,18 +168,15 @@
 (defn show-results
   [s parsed root]
   (let [entries (failure-entries parsed)]
-    (-> s
-        (assoc-in [:bufs results-name]
-                  (listbuf/make
-                    {:name results-name
-                     :mode :nav-mode
-                     :header (str (:failed parsed) " failed / " (:total parsed)
-                                  " tests (" (name (:kind parsed)) ")")
-                     :entries entries
-                     :format-entry (fn [{:keys [name message]}]
-                                     (format "%s  %s" name (str/replace message #"\s+" " ")))
-                     :extras {:nav-root root}}))
-        (cmd/set-cur-buffer results-name)
+    (-> (listbuf/open s results-name
+                      {:name results-name
+                       :mode :nav-mode
+                       :header (str (:failed parsed) " failed / " (:total parsed)
+                                    " tests (" (name (:kind parsed)) ")")
+                       :entries entries
+                       :format-entry (fn [{:keys [name message]}]
+                                       (format "%s  %s" name (str/replace message #"\s+" " ")))
+                       :extras {:nav-root root}})
         (cmd/msg (str (:failed parsed) " failed / " (:total parsed) " tests")))))
 
 (defn tick!
@@ -198,7 +195,9 @@
         (if (and parsed (pos? (:total parsed)))
           (swap! editor show-results parsed (:test-root b))
           (swap! editor cmd/msg
-                 "Test output not recognized (looked for TAP, JUnit, clojure.test, pytest, or file:line failures)"))))))
+                 (if (zero? (long (or (:job-exit b) -1)))
+                   "Tests passed (exit 0); the output format had no failure lines"
+                   "Test output not recognized (looked for TAP, JUnit, clojure.test, pytest, or file:line failures)")))))))
 
 ;; --- Command ---
 
@@ -215,7 +214,7 @@
   (if (str/blank? cmd)
     (cmd/msg s "No test command")
     (let [b (cmd/cur s)
-          root (or (project/root (or (:file b) (System/getProperty "user.dir")))
+          root (or (project/root-for (:file b))
                    (System/getProperty "user.dir"))
           name "*Tests*"]
       (-> (job/start s {:argv ["sh" "-c" cmd] :dir root :buf-name name})

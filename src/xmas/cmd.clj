@@ -49,13 +49,17 @@
             (assoc-in (conj wp :mark)  (:mark b))))))
 
 (defn load-window-point
-  "If the current window has a saved :point/:mark, copy them onto its buffer."
+  "If the current window has a saved :point/:mark, copy them onto its buffer.
+   Clamp: two windows can share a buffer, and an edit in the other one may have
+   shrunk the text since this window saved its point."
   [s]
   (let [w (get-in s (cur-window-path s))
-        b-name (:buf s)]
+        b (cur s)]
     (cond-> s
-      (contains? w :point) (assoc-in [:bufs b-name :point] (:point w))
-      (contains? w :mark)  (assoc-in [:bufs b-name :mark]  (:mark w)))))
+      (and b (contains? w :point)) (assoc-in [:bufs (:buf s) :point]
+                                             (buf/clamp-pos b (:point w)))
+      (and b (contains? w :mark))  (assoc-in [:bufs (:buf s) :mark]
+                                             (buf/clamp-pos b (:mark w))))))
 
 (defn switch-window
   "Save current point, swap `:cur-window` to `path`, load that window's point,
@@ -108,9 +112,11 @@
         ;; Now the cursor is on the new line (ln+1), compute indent
         new-ln (inc ln)
         indent (indent/indent-line b new-ln)]
-    (if (str/blank? indent)
-      s
-      (edit s p p indent))))
+    ;; `indent` is whitespace: `str/blank?` would always be true. Insert it on
+    ;; the new line, one past the newline, not at the end of the old line.
+    (if (seq indent)
+      (edit s (inc p) (inc p) indent)
+      s)))
 
 (defn delete-char [s]
   (let [b (cur s) p (:point b) t (:text b)]

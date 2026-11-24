@@ -33,7 +33,7 @@
                            :dir root
                            :job-name "*git-blame*"
                            :build (fn [out]
-                                    (let [entries (mapv #(assoc % :buf (:name b) :path path)
+                                    (let [entries (mapv #(assoc % :file path :path path)
                                                         (git/parse-blame out))]
                                       (if (empty? entries)
                                         "No blame (untracked or empty file)"

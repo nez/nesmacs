@@ -1,12 +1,12 @@
 (ns xmas.project-test
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
-            [xmas.project :as project])
+            [xmas.project :as project]
+            [xmas.testutil :as tu])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
 
-(defn- tmp-dir []
-  (.toFile (Files/createTempDirectory "xmas-proj" (into-array FileAttribute []))))
+(defn- tmp-dir [] (tu/temp-dir "xmas-proj"))
 
 (defn- write! [root rel content]
   (let [f (io/file root rel)]
@@ -14,10 +14,7 @@
     (spit f content)
     f))
 
-(defn- rm-rf [f]
-  (when (.isDirectory f)
-    (doseq [c (.listFiles f)] (rm-rf c)))
-  (.delete f))
+(defn- rm-rf [f] (tu/delete-tree f))
 
 (deftest root-walks-up-to-a-marker
   (let [root (tmp-dir)]

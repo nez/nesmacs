@@ -7,7 +7,8 @@
 
    Never call this with a shell string: pass argv and let the caller decide
    whether that means [\"sh\" \"-c\" ...]."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [xmas.log :as log])
   (:import [java.io InputStreamReader]
            [java.util.concurrent CountDownLatch LinkedBlockingQueue]))
@@ -15,6 +16,26 @@
 (defonce ^:private procs (atom {}))
 (defonce ^:private next-id (atom 0))
 (def ^:private queue-depth 256)
+
+(defn run
+  "Run `argv` synchronously and return its output. `opts` may set `:stdin`
+   (text written to the child), `:merge-stderr?` and `:dir`. Failure comes
+   back as \"Error: ...\" instead of throwing, because callers parse the
+   string."
+  [argv dir {:keys [stdin merge-stderr?]}]
+  (try
+    (let [pb (doto (ProcessBuilder. (into-array String argv))
+               (.redirectErrorStream (boolean merge-stderr?)))
+          _  (when dir (.directory pb (java.io.File. (str dir))))
+          p  (.start pb)]
+      (if stdin
+        (with-open [w (io/writer (.getOutputStream p) :encoding "UTF-8")]
+          (.write w ^String stdin))
+        (.close (.getOutputStream p)))
+      (let [out (slurp (.getInputStream p) :encoding "UTF-8")]
+        (.waitFor p)
+        out))
+    (catch Exception e (str "Error: " (.getMessage e)))))
 
 (defn- pump
   "Read chunks from `r` and hand each decoded string to `consume` until EOF."

@@ -50,7 +50,10 @@
             text (str "GET http://127.0.0.1:" port "/x\nAccept: */*\n\n")
             state {:bufs {"*HTTP*" (buf/make "*HTTP*" text nil)}}
             ed (atom state)
-            [_ message] (http/send! state ed)]
+            [sent message] (http/send! state ed)]
+        ;; The command's return value is what the editor stores; the reply only
+        ;; applies while that state still carries this request's id.
+        (reset! ed sent)
         (is (= (str "GET http://127.0.0.1:" port "/x …") message))
         (loop [n 0]
           (let [t (str (get-in @ed [:bufs "*HTTP*" :text]))]
@@ -72,3 +75,32 @@
   ;; print: an invalid buffer only produces a minibuffer message and no future.
   (let [state {:bufs {"*HTTP*" (buf/make "*HTTP*" "not a request\n\n" nil)}}]
     (is (str/starts-with? (:msg (ed/http-send state)) "No http(s) request line"))))
+
+(deftest an-edited-request-survives-the-reply
+  ;; A reply must only own the response area; the request is the user's text.
+  (let [b (-> (buf/make "*HTTP*" "GET http://x/\nX: 1\n\nold\n" nil)
+              (assoc :http-request 7 :point 5))
+        s (#'http/with-response {:bufs {"*HTTP*" b}} "*HTTP*"
+                                "HTTP 200\n\nok\n" 7)
+        t (str (get-in s [:bufs "*HTTP*" :text]))]
+    (is (str/starts-with? t "GET http://x/\nX: 1\n\n"))
+    (is (str/ends-with? t "HTTP 200\n\nok\n"))
+    (is (not (str/includes? t "old")))
+    (is (= 5 (get-in s [:bufs "*HTTP*" :point])))))
+
+(deftest a-stale-reply-cannot-overwrite-a-newer-one
+  (let [b (-> (buf/make "*HTTP*" "GET http://x/\n\n" nil)
+              (assoc :http-request 8))
+        s {:bufs {"*HTTP*" b}}]
+    (is (identical? s (#'http/with-response s "*HTTP*" "HTTP 500\n\n" 7)))))
+
+(deftest a-request-without-a-blank-line-still-gets-one
+  (let [b (buf/make "*HTTP*" "GET http://x/" nil)
+        s (#'http/with-response {:bufs {"*HTTP*" b}} "*HTTP*" "HTTP 200\n\nok\n" nil)
+        t (str (get-in s [:bufs "*HTTP*" :text]))]
+    (is (= "GET http://x/\n\nHTTP 200\n\nok\n" t))))
+
+(deftest only-a-real-method-is-accepted
+  (is (nil? (http/parse-request "F@O http://x/\n")))
+  (is (nil? (http/parse-request "http://x/\n")))
+  (is (= "GET" (:method (http/parse-request "GET http://x/\n")))))

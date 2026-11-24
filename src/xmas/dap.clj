@@ -228,8 +228,11 @@
   (let [entries (->> frames
                      (keep (fn [f]
                              (when-let [path (source-path f)]
+                               ;; DAP frame lines are already 1-based, which is
+                               ;; what nav-jump/goto-line expect. The stopped
+                               ;; frame keeps its 0-based line for the gutter.
                                {:file path
-                                :line (dec (long (or (:line f) 1)))
+                                :line (long (or (:line f) 1))
                                 :name (str (:name f))
                                 :frame f})))
                      vec)]
@@ -241,7 +244,7 @@
                       :header (str (count entries) " frames — RET jumps")
                       :entries entries
                       :format-entry (fn [{:keys [name line file]}]
-                                      (format "%-40s %s:%d" name file (inc line)))})))
+                                      (format "%-40s %s:%d" name file line))})))
     entries))
 
 (defn- on-stopped!
@@ -277,11 +280,21 @@
     (bump-markers!)
     (message! s "Debug session ended")))
 
-(defn- append-output! [s body]
+(def ^:private output-limit 200000)
+
+(defn- append-output!
+  "A chatty debuggee would otherwise grow *Debug Output* without bound and
+   re-copy the whole buffer on every event."
+  [s body]
   (let [text (str (:output body))
-        old (:text (get-in @(:editor s) [:bufs output-name]))]
+        old  (str (:text (get-in @(:editor s) [:bufs output-name])))
+        all  (str old text)
+        kept (if (> (count all) output-limit)
+               (str "[earlier output truncated]\n"
+                    (subs all (- (count all) output-limit)))
+               all)]
     (put-buffer! s output-name
-                 (read-only (buf/make output-name (str old text) nil)))))
+                 (read-only (buf/make output-name kept nil)))))
 
 (defn- on-event! [s msg]
   (case (:event msg)
@@ -310,7 +323,11 @@
   (let [cb (get @(:pending s) request_seq)]
     (swap! (:pending s) dissoc request_seq)
     (if success
-      (when cb (cb body))
+      ;; One bad callback must not abort the batch: later messages may include
+      ;; the `stopped` event the whole UI is waiting for.
+      (when cb
+        (try (cb body)
+             (catch Exception e (log/log "DAP response handler:" (.getMessage e)))))
       (do (log/log "DAP request failed:" request_seq message)
           (message! s (str "Debug adapter: " message))))))
 
@@ -375,11 +392,15 @@
           :else
           (do
             (when @session (stop!))
-            (try
-              (let [adapter (when tcp? (rpc/start-adapter {:argv argv :dir root}))
-                    conn (if tcp?
-                           (rpc/open-tcp {:port port})
-                           (rpc/open-stdio {:argv argv :dir root}))
+            (let [started-adapter (atom nil)]
+              (try
+                (let [adapter (when tcp?
+                                (let [a (rpc/start-adapter {:argv argv :dir root})]
+                                  (reset! started-adapter a)
+                                  a))
+                      conn (if tcp?
+                             (rpc/open-tcp {:port port})
+                             (rpc/open-stdio {:argv argv :dir root}))
                     s (merge opts
                              {:conn conn :adapter adapter
                               :state (atom :starting) :seq (atom 0)
@@ -394,11 +415,13 @@
                                                           {:program file :cwd root})
                                                    nil)))]
                   (do (stop!) err)
-                  (str "Starting " (:id language) " debugger...")))
-              (catch Exception e
-                (when-let [a (:adapter @session)] (proc/kill! a))
-                (reset! session nil)
-                (str "Debug adapter failed to start: " (.getMessage e))))))))))
+                    (str "Starting " (:id language) " debugger...")))
+                (catch Exception e
+                  ;; `@session` is still nil when open-tcp throws, so the
+                  ;; process started just above would otherwise be orphaned.
+                  (when-let [a @started-adapter] (proc/kill! a))
+                  (reset! session nil)
+                  (str "Debug adapter failed to start: " (.getMessage e)))))))))))
 
 (defn stop!
   "Disconnect (terminating the debuggee), close the transport and forget the

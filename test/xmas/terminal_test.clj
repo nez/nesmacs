@@ -4,6 +4,7 @@
             [xmas.buf :as buf]
             [xmas.ed :as ed]
             [xmas.persist :as persist]
+            [xmas.testutil :as tu]
             [xmas.session :as session]
             [xmas.terminal :as term]
             [xmas.terminal.tmux :as tmux]
@@ -12,11 +13,9 @@
 ;; Session persistence writes to ~/.xmas by default; keep the real one alone.
 (use-fixtures :each
   (fn [f]
-    (let [dir (doto (java.io.File/createTempFile "xmas-terminal-test" "")
-                (.delete)
-                (.mkdirs))]
+    (let [dir (tu/temp-dir "xmas-terminal-test")]
       (try (binding [persist/*dir* dir] (f))
-           (finally (doseq [c (reverse (file-seq dir))] (.delete c)))))))
+           (finally (tu/delete-tree dir))))))
 
 (defn- make-state
   ([text] (make-state text "fake-1"))

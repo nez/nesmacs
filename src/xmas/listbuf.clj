@@ -42,8 +42,22 @@
     (assoc-in s [:bufs name]
               (assoc fresh :point (min p (count (:text fresh)))))))
 
+(defn show
+  "Install an already built list buffer and show it in the current window.
+   An open minibuffer keeps focus: a job that finishes mid-prompt must not
+   replace its input."
+  [s name b]
+  (let [s (assoc-in s [:bufs name] b)]
+    (if (:mini s) s (cmd/set-cur-buffer s name))))
+
 (defn open
-  "Install a freshly built `spec` buffer and show it in the current window."
+  "Build `spec` and show it (see `show`)."
   [s name spec]
-  (-> s (assoc-in [:bufs name] (make spec))
-        (cmd/set-cur-buffer name)))
+  (show s name (make spec)))
+
+(defn reload
+  "Refresh `name` from `spec`; when `ok?` is false, also report `missing-msg`
+   (the listing keeps whatever it could render)."
+  [s name spec ok? missing-msg]
+  (cond-> (refresh s name spec)
+    (not ok?) (cmd/msg missing-msg)))

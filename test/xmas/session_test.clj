@@ -4,18 +4,14 @@
             [xmas.session :as session]
             [xmas.buf :as buf]
             [xmas.persist :as persist]
+            [xmas.testutil :as tu]
             [xmas.window :as win]
             [xmas.cmd :as cmd]
             [xmas.complete :as complete]
             [xmas.dap :as dap]))
 
-(defn- temp-dir []
-  (doto (java.io.File/createTempFile "xmas-session-dir" "")
-    (.delete)
-    (.mkdirs)))
-
-(defn- delete-tree [^java.io.File f]
-  (doseq [c (reverse (file-seq f))] (.delete c)))
+(defn- temp-dir [] (tu/temp-dir "xmas-session-dir"))
+(defn- delete-tree [f] (tu/delete-tree f))
 
 ;; Never read or write the real ~/.xmas from tests; the journal tests in
 ;; particular would otherwise trim a running editor's journal.
@@ -270,3 +266,63 @@
           (is ok)
           (is (= :light (:theme restored)))))
       (finally (dap/restore-breakpoints! {})))))
+
+(deftest a-corrupt-session-does-not-brick-startup
+  ;; `win/leaves` recursed forever on nil, so a session without a window tree
+  ;; (or with garbage field types) killed the editor before the first frame.
+  (let [[s ok] (session/restore-session
+                 (make-state)
+                 (#'session/sanitize-session
+                   {:version 1
+                  :bufs {"*scratch*" {:name "*scratch*" :text "hi" :point "4"
+                                      :version "x" :file 42}
+                         "junk" "not a buffer"}
+                    :windows nil
+                    :cur-window [:nope]}))]
+    (is ok)
+    (is (= "*scratch*" (:buf s)))
+    (is (= 0 (get-in s [:bufs "*scratch*" :point])))
+    (is (= [[]] (win/leaves (:windows s))))
+    (is (= ["*scratch*"] (map #(get-in (:windows s) (conj % :buffer))
+                              (win/leaves (:windows s)))))))
+
+(deftest all-buffers-vanished-falls-back-to-a-scratch-buffer
+  ;; A window is rebuilt as *scratch* when its file is gone. If no buffer
+  ;; survives and *scratch* was not in the session, the renderer used to get
+  ;; nil for the leaf's buffer and crash on the first frame.
+  (let [[s ok] (session/restore-session
+                 (make-state)
+                 (#'session/sanitize-session
+                   {:version 1
+                    :bufs {"gone.clj" {:name "gone.clj" :file "/no/such/gone.clj"
+                                       :modified false}}
+                    :windows {:type :leaf :buffer "gone.clj"}
+                    :cur-window []}))]
+    (is ok)
+    (is (= "*scratch*" (:buf s)))
+    (is (contains? (:bufs s) "*scratch*"))))
+
+(deftest a-torn-journal-record-is-skipped
+  ;; from/to are fed to buf/edit; a string there used to abort restore.
+  (let [s (make-state)
+        b (get-in s [:bufs "*test*"])
+        s' (#'session/apply-record s {:buf "*test*" :v 1 :from "x" :to 2 :repl "z"})]
+    (is (= (str (:text b)) (str (get-in s' [:bufs "*test*" :text]))))
+    (is (= (:version b) (get-in s' [:bufs "*test*" :version])))))
+
+(deftest a-vanished-buffer-does-not-fall-back-to-a-missing-scratch
+  ;; *scratch* may have been killed, so the fallback must be a buffer that
+  ;; actually exists; otherwise the renderer dereferences nil.
+  (let [[s ok] (session/restore-session
+                 (make-state)
+                 (#'session/sanitize-session
+                   {:version 1
+                    :bufs {"kept.clj" {:name "kept.clj" :text "x"
+                                       :file "/no/such/kept.clj"
+                                       :modified true}}
+                    :windows {:type :leaf :buffer "gone.clj"}
+                    :cur-window []}))]
+    (is ok)
+    (is (= "kept.clj" (:buf s)))
+    (is (= "kept.clj" (get-in s [:windows :buffer])))
+    (is (contains? (:bufs s) "kept.clj"))))
