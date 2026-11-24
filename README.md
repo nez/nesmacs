@@ -28,7 +28,9 @@ make dev
 
 That is the whole install. `C-x C-c` exits; it asks to save each modified
 buffer. First launch creates `~/.xmas/` for config, session and the crash
-journal. `make run` builds a jar, `./xmas` runs it.
+journal. `make run` rebuilds the AOT jar only when sources changed and runs
+it (~1.5 s); `./xmas` runs the existing jar. `make dev` loads source instead,
+so it starts in ~4 s but picks up edits without a restart.
 
 Your fingers already work: `C-f C-b C-n C-p C-a C-e`, `C-s`, `M-%`, `C-x C-f`,
 `C-x C-s`, `C-x 2`, `C-x o`, `M-x`, `M-:`. Beyond those: `C-x g` git status,
@@ -193,7 +195,7 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 641 tests / 6,475 assertions
+make test    # 642 tests / 6,478 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # integration tests against a real clojure-lsp

@@ -11,8 +11,14 @@ dev:
 repl:
 	clojure -M -e '(require (quote xmas.ed)) (clojure.main/repl)'
 
-run: jar
+# Source startup loads ~40 namespaces (~4 s); the AOT jar starts in ~1.5 s.
+# Rebuild only when a source or dependency file changed, so `make run` is the
+# fast path once the jar exists.
+run: $(JAR)
 	java -jar $(JAR)
+
+$(JAR): $(shell find src resources -type f) deps.edn
+	clojure -X:uberjar
 
 jar:
 	clojure -X:uberjar

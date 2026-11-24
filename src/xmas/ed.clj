@@ -18,7 +18,6 @@
             [xmas.gitlog :as gitlog]
             [xmas.gitstatus :as gitstatus]
             [xmas.gap :as gap]
-            [xmas.http :as http]
             [xmas.job :as job]
             [xmas.lang :as lang]
             [xmas.listbuf :as listbuf]
@@ -42,7 +41,6 @@
             [xmas.window :as win]
             [xmas.log :as log]
             [nrepl.server :as nrepl]
-            [xmas.web :as web]
             [xmas.dev :as dev])
   (:gen-class))
 
@@ -1999,11 +1997,17 @@
   {[:ctrl \c] {[:ctrl \k] job/kill}
    \g         job/rerun})
 
+(defn http-open
+  "M-x http: the request buffer. `http-kit` is a big part of start-up, so the
+   app is required on first use, not at editor startup."
+  [s]
+  ((requiring-resolve 'xmas.http/open) s))
+
 (defn http-send
   "C-c C-c in *HTTP*: send the request above the blank line. The response lands
    in the buffer from a future that swaps the editor atom, so typing continues."
   [s]
-  (let [[s' message] (http/send! s editor)]
+  (let [[s' message] ((requiring-resolve 'xmas.http/send!) s editor)]
     (cmd/msg s' message)))
 
 (def http-keymap
@@ -2115,7 +2119,7 @@
    "debug-eval"                  (cmd-entry debug-eval "Evaluate an expression in the stopped frame.")
    "debug-quit"                  (cmd-entry debug-quit "Disconnect the debug session.")
    "load-theme"                  (cmd-entry load-theme "Switch the colour palette (default, light).")
-   "http"                        (cmd-entry http/open "Send HTTP requests from a buffer.")
+   "http"                        (cmd-entry http-open "Send HTTP requests from a buffer.")
    "complete-symbol-at-point"    (cmd-entry complete-symbol-at-point "Complete the symbol at point.")
    "git-status"                  (cmd-entry git-status "Show git status for the current project.")
    "git-commit"                  (cmd-entry gitcommit/commit-at-point "Commit staged changes.")
@@ -2606,6 +2610,18 @@
     (System/setOut null)
     (System/setErr null)))
 
+(defn- web-start
+  "Start the web demo (http-kit, ~1 s to load) on 1234. The demo must never
+   keep the editor from starting: a taken port or a load failure disables it."
+  []
+  (try ((requiring-resolve 'xmas.web/start!) editor 1234 handle-key)
+       (catch Exception e
+         (log/log "web: disabled:" (.getMessage e))
+         nil)))
+
+(defn- web-stop [srv]
+  (when srv ((requiring-resolve 'xmas.web/stop!) srv editor)))
+
 (defn- start-services! []
   (let [preferred-port (try (Integer/parseInt (or (System/getenv "XMAS_NREPL_PORT")
                                                   (System/getProperty "xmas.nrepl.port")
@@ -2621,17 +2637,14 @@
     ;; so a taken port must never keep the editor from starting (a second
     ;; instance, or a dev instance left running, holds 1234).
     {:nrepl nrepl-port
-     :web   (try (web/start! editor 1234 handle-key)
-                 (catch java.net.BindException _
-                   (log/log "web: port 1234 in use, web demo disabled")
-                   nil))
+     :web   (web-start)
      :dev   (dev/start-watcher!)}))
 
 (defn- stop-services! [{:keys [nrepl web dev]}]
   (run-all [#(terminal/shutdown-all! tmux/backend)
             dap/shutdown-all!
             #(dev/stop-watcher! dev)
-            #(when web (web/stop! web editor))
+            #(web-stop web)
             #(nrepl/stop-server nrepl)]))
 
 (defn -main [& _args]
