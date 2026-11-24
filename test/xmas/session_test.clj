@@ -50,6 +50,18 @@
         (is (= :split (:type (:windows restored))))
         (is (= 0.3 (:ratio (:windows restored))))))))
 
+(deftest a-restored-session-selects-the-buffer-it-shows
+  ;; Regression: `:buf` stayed at the pre-restore buffer while the window tree
+  ;; pointed at another one, so keys went to a buffer that was not on screen.
+  (let [state (-> (make-state)
+                  (assoc-in [:bufs "term"] (buf/make "term" "" nil))
+                  (assoc :windows (win/leaf "term") :cur-window []))]
+    (session/save-session! state)
+    (when-let [sess (session/load-session!)]
+      (let [[restored ok] (session/restore-session (make-state) sess)]
+        (is ok)
+        (is (= "term" (:buf restored)))))))
+
 (deftest test-session-restore-missing-file-buffer
   ;; Buffers for non-existent files should be dropped
   (let [state (-> (make-state)

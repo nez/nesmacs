@@ -279,7 +279,7 @@
         (set-terminal! editor name id :dirty? true)
         true)
     (do (set-terminal! editor name id :status :dead)
-        (swap! editor assoc :msg "Terminal unavailable: install tmux")
+        (swap! editor assoc :msg "Terminal unavailable (C-c C-r retries)")
         false)))
 
 (defn- reconcile-orphans!

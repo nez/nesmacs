@@ -91,13 +91,16 @@
                          :props (if saved (:props d) [])
                          :large-file (:large-file d)))]
         ;; A terminal's text is a capture, not a document: start empty and let
-        ;; the backend reattach and paint it.
+        ;; the backend reattach and paint it. `:create?` is true because the
+        ;; tmux session may be gone (reboot, tmux server killed): `new-session
+        ;; -A` reuses it when it exists and otherwise gives the buffer a shell
+        ;; again instead of leaving a dead empty pane.
         (if term
           (-> b
               (assoc :text (gap/of "") :point 0 :mark nil :props []
                      :font-lock [] :font-lock-window nil :large-file false
                      :read-only true :journal? false :mode :terminal-mode
-                     :terminal (assoc term :status :detached :create? false
+                     :terminal (assoc term :status :detached :create? true
                                       :in [] :dirty? true :last-capture 0)))
           ;; A file reloaded from disk may have shrunk, so the saved offsets can
           ;; point past the end.
@@ -434,7 +437,13 @@
                         (assoc :bookmarks bookmarks)
                         (assoc :mini-history mini-history)
                         (assoc :theme (or theme (:theme state :default)))
-                        ;; Point current window to its buffer
-                        (update-in (conj valid-cur-window :buffer)
-                                   (fn [_] (get-in rebuilt-windows valid-cur-window :buffer))))]
+                        ;; The window tree decides what is on screen, but keys and
+                        ;; `cmd/cur` follow `:buf`. Leaving it at the initial
+                        ;; `*scratch*` made a restored terminal look focused while
+                        ;; keystrokes went to another buffer.
+                        (assoc :buf (let [b (get-in rebuilt-windows
+                                                    (conj valid-cur-window :buffer))]
+                                      (if (contains? valid-bufs b)
+                                        b
+                                        (or (first (keys valid-bufs)) "*scratch*")))))]
       [new-state true])))

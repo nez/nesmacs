@@ -291,4 +291,7 @@
       (is (true? (get-in restored [:bufs "*term*" :read-only])))
       (is (false? (get-in restored [:bufs "*term*" :journal?])))
       (is (= :detached (get-in restored [:bufs "*term*" :terminal :status])))
+      ;; Regression: with `:create? false` a restore whose tmux session is gone
+      ;; opened a dead, empty terminal that swallowed every key.
+      (is (true? (get-in restored [:bufs "*term*" :terminal :create?])))
       (is (= "" (str (get-in restored [:bufs "*term*" :text])))))))
