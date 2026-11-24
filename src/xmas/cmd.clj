@@ -3,6 +3,7 @@
   (:require [clojure.string :as str]
             [xmas.buf :as buf]
             [xmas.gap :as gap]
+            [xmas.indent :as indent]
             [xmas.text :as text]))
 
 (defn buf [s name] (get (:bufs s) name))
@@ -97,7 +98,19 @@
 (defn insert-at-point [s ^String text]
   (let [p (:point (cur s))] (edit s p p text)))
 
-(defn insert-newline [s] (insert-at-point s "\n"))
+(defn insert-newline [s]
+  (let [b (cur s)
+        p (:point b)
+        t (:text b)
+        ln (gap/line-of t p)
+        ;; Insert the newline first
+        s (edit s p p "\n")
+        ;; Now the cursor is on the new line (ln+1), compute indent
+        new-ln (inc ln)
+        indent (indent/indent-line b new-ln)]
+    (if (str/blank? indent)
+      s
+      (edit s p p indent))))
 
 (defn delete-char [s]
   (let [b (cur s) p (:point b) t (:text b)]

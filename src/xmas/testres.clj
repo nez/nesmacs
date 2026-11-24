@@ -104,10 +104,11 @@
     :else (parse-text text)))
 
 (defn- file-line
-  "First file:line in a failure message, for jumping."
+  "First file:line in a failure message, for jumping.
+   Handles both relative and absolute paths."
   [^String message]
   (when message
-    (when-let [[_ f l] (re-find #"([\w./-]+\.\w+):(\d+)" message)]
+    (when-let [[_ f l] (re-find #"([/\w./-]+\.\w+):(\d+)" message)]
       {:file f :line (Long/parseLong l)})))
 
 (defn failure-entries [parsed]

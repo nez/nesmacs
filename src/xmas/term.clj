@@ -13,9 +13,12 @@
   (.waitFor (sh (str "stty " (str/join " " args) " </dev/tty"))))
 
 (defn terminal-size []
-  (let [out (slurp (.getInputStream (sh "stty size </dev/tty")))
-        [r c] (str/split (str/trim out) #"\s+")]
-    [(Integer/parseInt r) (Integer/parseInt c)]))
+  (try
+    (let [out (slurp (.getInputStream (sh "stty size </dev/tty")))
+          [r c] (str/split (str/trim out) #"\s+")]
+      [(Integer/parseInt r) (Integer/parseInt c)])
+    (catch Exception _
+      [24 80])))
 
 (defn enter-raw-mode! [] (stty! "raw" "-echo" "-icanon" "-isig"))
 (defn exit-raw-mode! [] (stty! "cooked" "echo" "icanon" "isig"))

@@ -2419,12 +2419,19 @@
     (System/setErr null)))
 
 (defn- start-services! []
-  (let [srv {:nrepl (nrepl/start-server :port 7888)
-             :web   (web/start! editor 1234 handle-key)
-             :dev   (dev/start-watcher!)}]
-    (log/log "nrepl:7888 web:1234 dev:watching")
-    (spit ".nrepl-port" "7888")
-    srv))
+  (let [preferred-port (try (Integer/parseInt (or (System/getenv "XMAS_NREPL_PORT")
+                                                  (System/getProperty "xmas.nrepl.port")
+                                                  "7888"))
+                          (catch Exception _ 7888))
+        nrepl-port (try
+                     (nrepl/start-server :port preferred-port)
+                     (catch java.net.BindException _
+                       (nrepl/start-server :port 0)))]
+    (log/log "nrepl:" (:port nrepl-port) " web:1234 dev:watching")
+    (spit ".nrepl-port" (str (:port nrepl-port)))
+    {:nrepl nrepl-port
+     :web   (web/start! editor 1234 handle-key)
+     :dev   (dev/start-watcher!)}))
 
 (defn- stop-services! [{:keys [nrepl web dev]}]
   (run-all [#(terminal/shutdown-all! tmux/backend)

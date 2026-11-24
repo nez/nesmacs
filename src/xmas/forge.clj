@@ -12,13 +12,22 @@
 (def ^:private prs-buf "*Pull Requests*")
 
 (defn forge
-  "Which CLI to use for `dir`: :github, :gitlab or nil."
+  "Which CLI to use for `dir`: :github, :gitlab or nil.
+   Parses .git/config for remote URLs; GitLab is detected by gitlab.com
+   or any URL containing 'gitlab' in the hostname."
   [dir]
   (when-let [root (git/repo-root dir)]
-    (let [cfg (try (slurp (str root "/.git/config")) (catch Exception _ ""))]
+    (let [cfg (try (slurp (str root "/.git/config")) (catch Exception _ ""))
+          remotes (re-seq #"url\s*=\s*(.+)" cfg)]
       (cond
-        (str/includes? cfg "github.com") :github
-        (str/includes? cfg "gitlab") :gitlab
+        (some #(str/includes? % "github.com") remotes) :github
+        (some (fn [url]
+                (try
+                  (let [uri (java.net.URI. url)]
+                    (str/includes? (.getHost uri) "gitlab"))
+                  (catch Exception _ false)))
+              remotes) :gitlab
+        (some #(str/includes? % "gitlab") remotes) :gitlab
         :else nil))))
 
 (defn parse-gh [s]
