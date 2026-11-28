@@ -246,8 +246,11 @@
   [s cmd]
   (if (str/blank? cmd)
     (cmd/msg s "No test command")
-    (let [root (or (project/context s)
-                   (System/getProperty "user.dir"))
-          name "*Tests*"]
+    (let [root (or (project/context s) (System/getProperty "user.dir"))
+          project? (:project-root s)
+          name (if project? (str "*Task test " root "*") "*Tests*")
+          report (if project? (partial task-report root root (str "*Results test " root "*") :tests)
+                     (partial finish-report root))]
       (job/start s {:argv ["sh" "-c" cmd] :dir root :buf-name name
-                    :on-finish (partial finish-report root)}))))
+                    :buffer-fields {:project-root root :task-report :tests}
+                    :on-finish report}))))

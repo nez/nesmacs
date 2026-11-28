@@ -138,6 +138,18 @@
     (when (and (not (lsp/ready? root-id)) (lsp/on-path? argv))
       (lsp/ensure! root-id argv root (:id language) (fn [_] nil)))))
 
+(defn- show-project-symbols [s root query origin token items]
+  (if-not (identical? token (get-in s [:project-symbol-requests root]))
+    s
+    (let [name (str "*Symbols " root "*")
+          entries (into [] (keep (fn [item]
+                                   (when-let [location (location->entry (:location item))]
+                                     (assoc location :name (:name item))))) items)
+          spec {:name name :mode :nav-mode :header (str "Symbols matching " query)
+                :entries entries :format-entry :name :extras {:project-root root :nav-root root}}
+          focus? (and (= root (project/context s)) (= origin (select-keys s [:buf :cur-window])))]
+      ((if focus? listbuf/open listbuf/refresh) s name spec))))
+
 (defn project-symbols [s]
   (if-let [root (project/context s)]
     (let [language (or (some (fn [b] (let [session (lsp/document-session b)]
@@ -145,28 +157,21 @@
                              (cons (cmd/cur s) (vals (:bufs s))))
                        (some (fn [path] (let [l (lang/language-for-file path)] (when (:lsp l) l)))
                              (project/files root)))
-          argv (when language (lsp-argv s language))
-          root-id (when language (lsp/server-id root (:id language)))
-          name (str "*Symbols " root "*")]
+          argv (when language (lsp-argv s language))]
       (if-not (and argv (lsp/on-path? argv))
         (cmd/msg s "No project language server on PATH")
         (mini/start s "Project symbol: "
           (fn [state query]
-            (api/after-command (cmd/msg state "Searching project symbols…")
-              (fn [publish!]
-                (lsp/ensure! root-id argv root (:id language)
-                  (fn [_]
-                    (lsp/workspace-symbols root-id query
-                      (fn [items]
-                        (let [entries (into [] (keep (fn [item]
-                                                     (when-let [location (location->entry (:location item))]
-                                                       (assoc location :name (:name item))))) items)
-                              spec {:name name :mode :nav-mode :header (str "Symbols matching " query)
-                                    :entries entries :format-entry :name :extras {:project-root root :nav-root root}}]
-                          (publish! (fn [live]
-                                      (if (= root (project/context live))
-                                        (listbuf/open live name spec)
-                                        (listbuf/refresh live name spec)))))))))))))))
+            (let [root-id (lsp/server-id root (:id language))
+                  token (Object.)
+                  origin (select-keys state [:buf :cur-window])]
+              (api/after-command (-> state (assoc-in [:project-symbol-requests root] token)
+                                      (cmd/msg "Searching project symbols…"))
+                (fn [publish!]
+                  (lsp/ensure! root-id argv root (:id language)
+                    (fn [_]
+                      (lsp/workspace-symbols root-id query
+                        #(publish! show-project-symbols root query origin token %)))))))))))
     (cmd/msg s "Open a project first")))
 
 (defn- jump-to-definition [editor res]
@@ -472,3 +477,51 @@
 
       :else [])
     []))
+
+(defn- typing-location [s]
+  (let [b (cmd/cur s)] [(:buf s) (:version b) (:point b)]))
+
+(defn track-typing [before after key now]
+  (let [{:keys [file language read-only]} (cmd/cur after)]
+    (cond
+      (and (:project-root after) (not (:mini after)) (not (:isearch after))
+           (not (:query-replace before)) file (:lsp language) (not read-only)
+           (or (char? key) (= :backspace key))
+           (= (:buf before) (:buf after))
+           (not= (:version (cmd/cur before)) (:version (cmd/cur after))))
+      (assoc after :suggestion {:location (typing-location after) :due (+ now 200)})
+
+      (and (:suggestion after)
+           (or (:mini after) (not= (typing-location after) (get-in after [:suggestion :location]))))
+      (dissoc after :suggestion)
+
+      :else after)))
+
+(defn tick-suggestion! [editor]
+  (let [s @editor {:keys [location due label]} (:suggestion s)
+        now (System/currentTimeMillis)]
+    (when (and due (nil? label) (not (:mini s)) (= location (typing-location s)) (>= now due))
+      (let [b (cmd/cur s)
+            prefix (symbol-prefix (:text b) (:point b))
+            label (when (<= 2 (count prefix))
+                    (first (sort (remove #{prefix} (lsp-completion-source editor prefix {:state s})))))]
+        (swap! editor (fn [current]
+                        (if (= location (typing-location current) (get-in current [:suggestion :location]))
+                          (cond
+                            label (assoc-in current [:suggestion :label] label)
+                            (or (< (count prefix) 2) (> now (+ due 1800))) (dissoc current :suggestion)
+                            :else current)
+                          current)))))))
+
+(defn accept-suggestion [s]
+  (let [{:keys [location label]} (:suggestion s)
+        b (cmd/cur s)]
+    (if (and label (= location (typing-location s)))
+      (let [point (:point b)
+            prefix (symbol-prefix (:text b) point)
+            {:keys [line character]} (offset->pos (:text b) point)
+            item (or (get (complete/document-items b [line character]) label) {:label label})
+            [from to replacement caret] (completion-replacement s item prefix point)]
+        (-> s (dissoc :suggestion) (cmd/edit from to replacement)
+              (cmd/goto-char (+ from (or caret (count replacement))))))
+      (cmd/msg s "No current LSP suggestion"))))

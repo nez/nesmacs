@@ -12,6 +12,7 @@
             [nesmacs.mini :as mini]
             [nesmacs.mode :as mode]
             [nesmacs.persist :as persist]
+            [nesmacs.project :as project]
             [nesmacs.session :as session]))
 
 (defn- auto-save-path
@@ -92,7 +93,7 @@
 
 (defn cli-formatted-text [{:keys [language text file]}]
   (some-> (format/format-text language (str text) file
-                             (some-> ^String file java.io.File. .getParent))
+                             (when file (or (project/root-for file) (.getParent (java.io.File. ^String file)))))
           buf/normalize-eol))
 
 (defn same-buffer-version? [b saved]
@@ -119,7 +120,10 @@
   [s name]
   (let [b (cmd/buf s name)
         file (:file b)
-        format? (:format-on-save s)]
+        format? (if (contains? s :format-on-save) (:format-on-save s)
+                    (when-let [root (and file (project/root-for file))]
+                      (try (true? (:format-on-save (project/profile root)))
+                           (catch Exception e (log/log "Project format profile:" (.getMessage e)) false))))]
     (cond
       (nil? b) (cmd/msg s (str "No buffer: " name))
       (str/blank? file) (cmd/msg s "No file")

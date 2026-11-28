@@ -455,8 +455,10 @@
                 (if-let [err (request! s "initialize" (initialize-args s)
                                        (fn [_]
                                          (request! s request
-                                                   (merge (when (= request "launch") {:program file :cwd root})
-                                                          (:launch dap) arguments)
+                                                   (merge (if (= request "launch")
+                                                            (merge {:program file :cwd root} (:launch dap))
+                                                            (:attach dap))
+                                                          arguments)
                                                    nil)))]
                   (do (stop!) err)
                     (str "Starting " (:id language) " debugger...")))

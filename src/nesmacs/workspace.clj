@@ -34,6 +34,13 @@
     (let [spec (dashboard root)] (listbuf/open s (:name spec) spec))
     (cmd/msg s "Open a project first")))
 
+(defn restore-menus [s]
+  (reduce-kv (fn [state key {:keys [project-root mode]}]
+               (if (and (= :project-mode mode) project-root (= key (buffer-name project-root "Project")))
+                 (listbuf/refresh state key (dashboard project-root))
+                 state))
+             s (:bufs s)))
+
 (defn select-entry [s]
   (if-let [[_ command] (listbuf/entry-at-point s)]
     (if-let [run (get-in s [:commands command :fn])]
@@ -46,7 +53,7 @@
     (if-not (.isDirectory dir)
       (cmd/msg s (str "Project directory not found: " directory))
       (let [root (.getCanonicalPath dir)
-            previous (when (:project-root s) (project/context s))
+            previous (:project-root s)
             spec (dashboard root)
             name (:name spec)
             s (cmd/save-cur-point s)
@@ -168,14 +175,23 @@
 (defn status [s]
   (if-let [root (project/context s)]
     (let [name (buffer-name root "Tools")
-          languages (->> (concat (map :file (vals (:bufs s))) (project/files root))
+          languages (->> (concat (filter #(= root (project/root-for %)) (keep :file (vals (:bufs s))))
+                                 (project/files root))
                          (keep lang/language-for-file) (distinct))
           tools (mapcat (fn [{:keys [id lsp formatter dap] :as language}]
-                          (cond-> []
-                            lsp (conj (str id " LSP — " (first lsp) (if (proc/executable? lsp) " available" " missing")))
-                            formatter (conj (str id " formatter — " (first (:argv formatter))
-                                                 (if (proc/executable? (:argv formatter)) " available" " missing")))
-                            dap (conj (str id " debugger — " (if (dap/available? language) "configured" "adapter missing")))))
+                          (let [argv (or (get-in s [:lsp-commands id]) (:lsp-command s) lsp)
+                                server (lsp/server-id root id)
+                                health (cond
+                                         (lsp/ready? server) " connected"
+                                         (get-in s [:project-lsp-errors root id])
+                                         (str " — " (get-in s [:project-lsp-errors root id]))
+                                         (proc/executable? argv) " available"
+                                         :else " missing")]
+                            (cond-> []
+                              lsp (conj (str id " LSP — " (first argv) health))
+                              formatter (conj (str id " formatter — " (first (:argv formatter))
+                                                   (if (proc/executable? (:argv formatter)) " available" " missing")))
+                              dap (conj (str id " debugger — " (if (dap/available? language) "configured" "adapter missing"))))))
                         languages)
           tasks (for [[task {:keys [argv]}] (sort-by key (task-specs s root))]
                   (str (clojure.core/name task) " — " (if (project/argv? argv) (first argv) "invalid :argv")))]

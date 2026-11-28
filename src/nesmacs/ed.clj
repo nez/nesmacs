@@ -255,7 +255,7 @@
 (defn terminal-open
   "M-x terminal: a terminal buffer running $SHELL in the current directory."
   [s]
-  (terminal/open s))
+  (if (:project-root s) (workspace/terminal s) (terminal/open s)))
 
 (defn agent-cli
   "M-x agent: a terminal buffer running the configured AI CLI (default
@@ -683,9 +683,12 @@
 (defn- git-status
   "C-x g: open the git status buffer for the current project."
   [s]
-  (if-let [root (git/repo-root (or (project/context s) (git/current-dir (cur s))))]
-    (gitstatus/open s root)
-    (msg s "Not a git repository")))
+  (let [project-root (project/context s)]
+    (if-let [root (git/repo-root (or project-root (git/current-dir (cur s))))]
+      (if (:project-root s)
+        (gitstatus/open s root (workspace/buffer-name project-root "Git Status") project-root)
+        (gitstatus/open s root))
+      (msg s "Not a git repository"))))
 
 (def complete-symbol-at-point language/complete-symbol-at-point)
 (defn lsp-completion-source [prefix context] (language/lsp-completion-source editor prefix context))
@@ -715,12 +718,14 @@
       (fn [s pattern]
         (if (str/blank? pattern)
           s
-          (let [name (str "*rg " pattern "*")]
+          (let [name (if (:project-root s) (workspace/buffer-name root (str "rg " pattern))
+                         (str "*rg " pattern "*"))]
             (job/start s {:argv ["rg" "--line-number" "--with-filename" "--no-heading"
                                  "--color" "never" "--smart-case" "--" pattern "."]
                          :dir root
                          :buf-name name
                          :mode :rg-mode
+                         :buffer-fields {:project-root root}
                          :follow-output? false}))))
       (fn [input _s] {:completed input :candidates []}))
     (msg s "Not in a project")))
@@ -976,6 +981,7 @@
    ["project-debug" project-debug "Start a project debug profile."]
    ["project-repl" repl/start "Start the project's nREPL server."]
    ["project-repl-connect" repl/connect "Connect to a project nREPL on localhost."]
+   ["project-repl-output" repl/output "Show evaluations from the project REPL."]
    ["project-eval-form" eval-project-form "Evaluate the top-level form in the project REPL."]
    ["project-eval-region" eval-project-region "Evaluate the region in the project REPL."]
    ["project-eval-buffer" eval-project-buffer "Evaluate the buffer in the project REPL."]
@@ -1006,6 +1012,7 @@
    ["debug-quit" debug-quit "Disconnect the debug session." "C-c d q"]
    ["load-theme" load-theme "Switch the colour palette (default, light)."]
    ["complete-symbol-at-point" complete-symbol-at-point "Complete the symbol at point." "C-c i"]
+   ["accept-lsp-suggestion" language/accept-suggestion "Accept the displayed project completion." "C-c ."]
    ["git-status" git-status "Show git status for the current project." "C-x g"]
    ["git-commit" gitcommit/commit-at-point "Commit staged changes."]
    ["git-diff" diff-open-at-point "Show diff for the entry at point."]
@@ -1283,11 +1290,13 @@
     (when viewports (select-keys painted [:viewports :dividers]))))
 
 (defn- commit-key! [key size clipboard!]
-  (let [[before after] (swap-vals! editor
+  (let [now (System/currentTimeMillis)
+        [before after] (swap-vals! editor
                          (fn [s]
-                           (if size
-                             (merge (run-key (merge s size) key) (select-keys s [:rows :cols]))
-                             (run-key s key))))]
+                           (language/track-typing s
+                             (if size
+                               (merge (run-key (merge s size) key) (select-keys s [:rows :cols]))
+                               (run-key s key)) key now)))]
     (when-let [clip (cmd/new-clipboard-text before after)]
       (clipboard! clip))
     (when (and (:project-root after) (not= (:buf before) (:buf after)))
@@ -1327,6 +1336,7 @@
       (files/auto-save-tick! editor)
       (session/save-tick! editor)
       (lsp/tick! editor)
+      (language/tick-suggestion! editor)
       (job/consume-results! editor)
       (dap/tick! editor)
       (packagehub/tick! editor)
@@ -1490,7 +1500,7 @@
         (when-let [sess (session/load-session!)]
           (let [[restored ok] (session/restore-session @editor sess)]
             (when ok
-              (reset! editor (session/recover-journal! restored))
+              (reset! editor (workspace/restore-menus (session/recover-journal! restored)))
               (dap/restore-breakpoints! (:breakpoints sess)))))
         (catch Exception e
           (log/log "session restore failed:" (.getMessage e))

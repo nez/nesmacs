@@ -7,7 +7,9 @@
    outside the command loop's transaction."
   (:require [nesmacs.buf :as buf]
             [nesmacs.cmd :as cmd]
+            [nesmacs.complete :as complete]
             [nesmacs.keymap :as keymap]
+            [nesmacs.lang :as lang]
             [nesmacs.mode :as mode]
             [nesmacs.persist :as persist]
             [nesmacs.props :as props]
@@ -88,9 +90,23 @@
   (apply! mode/add-hook hook (handler f)))
 
 (defn configure-lsp!
-  "Set the argv used to start language servers from now on."
-  [argv]
-  (apply! assoc :lsp-command (mapv str argv)))
+  "Set the server argv globally or for one language id."
+  ([argv] (apply! assoc :lsp-command (mapv str argv)))
+  ([language argv] (apply! assoc-in [:lsp-commands (name language)] (mapv str argv))))
+
+(defn register-language!
+  "Register a language descriptor with a mode, set of extensions and optional tools."
+  [id {:keys [mode exts lsp] :as spec}]
+  (when-not (and (simple-keyword? id) (simple-keyword? mode) (set? exts) (seq exts)
+                 (every? string? exts))
+    (throw (IllegalArgumentException. "Expected a language id, mode and set of extensions")))
+  (lang/register! id spec)
+  (apply! mode/register mode :major)
+  (when lsp
+    (apply! assoc-in [:completion-sources mode]
+            [complete/buffer-symbols complete/project-symbols
+             (requiring-resolve 'nesmacs.ed/lsp-completion-source)]))
+  nil)
 
 (defn configure-agent!
   "Set the argv opened by `M-x agent` (the AI CLI lives in a terminal buffer;

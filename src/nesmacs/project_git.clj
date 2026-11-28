@@ -28,7 +28,7 @@
                                              ["Compare branch" "project-git-compare"] ["Resolve conflicts" "project-git-conflicts"]
                                              ["Pull (fast-forward)" "project-git-pull"] ["Push" "project-git-push"]]
                                       (get-in s [:commands "forge-prs"]) (conj ["Pull requests" "forge-prs"]))
-                           :format-entry first :extras {:project-root root}}))
+                           :format-entry first :extras {:project-root (project/context s) :git-dir root}}))
     (cmd/msg s "Not a Git repository")))
 
 (defn- repo-file? [root b]

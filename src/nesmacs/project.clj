@@ -32,6 +32,7 @@
   (let [key (or (get-in s [:mini :prev-buf]) (:buf s))
         {:keys [project-root file nav-root git-dir job-dir]} (get-in s [:bufs key])]
     (or project-root (some-> file root) nav-root git-dir (some-> job-dir root)
+        (some-> (get-in s [:bufs key :terminal :dir]) root)
         (:project-root s) (root-for nil))))
 
 (defn profile [root]

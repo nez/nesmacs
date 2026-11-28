@@ -13,7 +13,8 @@
    :formatter {:argv ["prettier" "--stdin-filepath"] :path-arg? true}
    :dap {:transport :tcp
          :argv ["node" "{env:JS_DEBUG_DAP}" "{port}"]
-         :launch {:type "pwa-node"}}
+         :launch {:type "pwa-node"}
+         :attach {:type "pwa-node"}}
    :indent 2})
 
 (def languages
@@ -56,9 +57,16 @@
     :exts #{"el"}
     :indent 2}})
 
+(defonce ^:private extensions-by-language (atom {}))
+
+(defn register! [id spec]
+  (swap! extensions-by-language assoc id (assoc spec :id (name id))))
+
+(defn- registry [] (merge languages @extensions-by-language))
+
 (defn language
   [id]
-  (get languages id))
+  (get (registry) id))
 
 (defn language-for-file
   "Language map for `filename`, or nil when the extension is unknown."
@@ -68,7 +76,7 @@
       (when (pos? dot)
         (let [ext (str/lower-case (subs filename (inc dot)))]
           (some (fn [[_ l]] (when (contains? (:exts l) ext) l))
-                languages))))))
+                (registry)))))))
 
 (defn mode-for-file [filename] (:mode (language-for-file filename)))
 
@@ -80,4 +88,4 @@
 (defn extensions
   "All known extensions, without the dot."
   []
-  (into #{} (mapcat :exts) (vals languages)))
+  (into #{} (mapcat :exts) (vals (registry))))

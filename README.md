@@ -192,6 +192,52 @@ Text properties are public too: `(api/add-prop! 0 12 :match {:owner :demo})`,
 `(api/set-prop! :hover 20 30 :builtin)`, `(api/remove-prop! :demo)` — the same
 durable ranges search and diagnostics use.
 
+## Work in a project
+
+`C-x p p` (`M-x project-open`) opens or switches to a project directory. Press
+`RET` on an entry in the project menu. Use `C-x p m` to return to it, `C-x p t`
+for tasks, `C-x p s` for LSP symbols, and `C-x p e` for problems. In the
+problems buffer, `RET` visits a source location, `a` opens code actions for an
+LSP diagnostic and `g` refreshes diagnostics. `M-x jump-back` and
+`M-x jump-forward` move through source visits. Multi-file LSP changes open a
+review buffer with `y` to apply and `q` to cancel.
+When editing in a project, LSP can show a quiet completion suggestion after
+a pause. Press `C-c .` to accept it or `C-c i` to open the usual picker.
+
+An optional `.nesmacs.edn` in the project root describes commands and working
+directories. Tasks run when selected. This checkout ships with `test`, `lint`,
+`check` and `build`. A profile can also define an interactive task.
+
+```clojure
+{:tasks {:test {:argv ["make" "test"] :report :tests}
+         :lint {:argv ["make" "lint"]}
+         :shell {:argv ["sh"] :interactive true}}
+ :repl {:argv ["clojure" "-M" "-m" "nrepl.cmdline" "--port" "0"]}
+ :format-on-save false}
+```
+
+A task can set `:cwd` relative to the project root and `:env` as a map of
+strings. Use the argument `{file}` for the current file, `{line}` for the
+current line or `{failed-files}` for the files from the project's test
+failures. `project-test-file`, `project-test-at-point` and
+`project-test-failed` use the `:test-file`, `:test-at-point` and `:test-failed`
+tasks. The profile can choose the runner's own arguments or wrapper script.
+
+`M-x project-debug` reads named profiles from `:launch`. For example, a Python
+profile can be `{:launch {:app {:program "app.py" :args ["--dev"]}}}`. Profiles
+accept `:cwd`, `:env`, `:language` and adapter-specific `:arguments`. Use
+`:request :attach` with arguments for the running program. `M-x project-repl`
+starts the project REPL. `M-x project-repl-connect` selects a local nREPL
+port, and `M-x project-eval-form`, `project-eval-region` and
+`project-eval-buffer` evaluate source in that project. `M-x project-repl-output`
+opens the output buffer.
+
+`M-x project-git` shows branch, diff, conflict and upstream commands. Git
+status still supports staging, committing and inspecting hunks.
+`M-x project-status` shows language tools and tasks. User configuration and
+extensions can use `api/register-project-task!`, `api/register-language!` and
+the per-language arity of `api/configure-lsp!`.
+
 ## How it is built
 
 ```

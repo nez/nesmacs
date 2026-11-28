@@ -278,12 +278,15 @@
     "window/showMessage" (when-let [m (:message params)] (log/log "LSP:" root-id m))
     (log/log "LSP unhandled notification" root-id method)))
 
-(defn- on-response [root-id {:keys [id result error]}]
+(defn- on-response [editor root-id {:keys [id result error]}]
   (when-let [s (srv root-id)]
     (if-let [cb (get-in s [:pending id])]
       (do (swap! servers update root-id update :pending dissoc id)
           (if error
-            (log/log "LSP error" id error)
+            (do (log/log "LSP error" id error)
+                (when-not (:initialized? s)
+                  (swap! editor assoc-in [:project-lsp-errors (:root s) (:language-id s)]
+                         (or (:message error) "Initialization failed"))))
             ;; A throwing callback must not drop the messages decoded after it.
             (try (cb result)
                  (catch Exception e
@@ -295,7 +298,7 @@
     (doseq [msg (rpc/read! s)]
       (cond
         (:method msg) (on-notification editor root-id msg)
-        (:id msg)     (on-response root-id msg)
+        (:id msg)     (on-response editor root-id msg)
         :else         (log/log "LSP unknown message" msg)))
     ;; Process died: drop it so the next request restarts the server.
     (when (proc/finished? (:handle s))

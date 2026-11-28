@@ -48,9 +48,10 @@
   (if-let [root (project/context s)]
     (let [profiles (:launch (project/profile root))]
       (cond
-        (empty? profiles) (start editor s)
-        (not (and (map? profiles) (every? simple-keyword? (keys profiles))))
+        (and profiles (not (and (map? profiles) (every? simple-keyword? (keys profiles)))))
         (cmd/msg s "Project :launch must be a map keyed by keywords")
+        (empty? profiles) (if (:file (cmd/cur s)) (start editor s)
+                              (cmd/msg s "Open a source file or define :launch in .nesmacs.edn"))
         :else
         (mini/start s "Debug profile: "
           (fn [s input]

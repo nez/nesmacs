@@ -497,6 +497,9 @@
   (or (:msg state)
       (when-let [{:keys [direction pattern]} (:isearch state)]
         (str (if (= direction :forward) "I-search: " "I-search backward: ") pattern))
+      (when-let [label (get-in state [:suggestion :label])]
+        (when (= (:buf state) (first (get-in state [:suggestion :location])))
+          (str label "  C-c . accept")))
       (get-in state [:modes (get-in state [:bufs (:buf state) :mode]) :hint])
       ""))
 

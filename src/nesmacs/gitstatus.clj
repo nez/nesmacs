@@ -21,18 +21,19 @@
         path (:path e)]
     (format " %s %s" mark path)))
 
-(defn- spec [root]
+(defn- spec [root name project-root]
   (let [entries (git/status-at-root root)]
-    {:name         gitstatus-name
+    {:name         name
      :mode         :gitstatus-mode
      :header       (str "Git: " (or (git/branch-name-at-root root) "no repo")
                         "   RET diff  s stage  u unstage  c commit  g refresh")
      :entries      entries
      :format-entry fmt
-     :extras       {:git-dir root}}))
+     :extras       {:git-dir root :project-root project-root}}))
 
-(defn open [s root]
-  (listbuf/open s gitstatus-name (spec root)))
+(defn open
+  ([s root] (open s root gitstatus-name nil))
+  ([s root name project-root] (listbuf/open s name (spec root name project-root))))
 
 (defn- cur-repo-root [s]
   (git/repo-root (git/current-dir (cmd/cur s))))
@@ -40,8 +41,9 @@
 (defn refresh [s]
   (let [dir (git/current-dir (cmd/cur s))
         root (git/repo-root dir)
-        listing (assoc-in (spec root) [:extras :git-dir] (or root dir))]
-    (listbuf/reload s gitstatus-name listing (some? root)
+        name (:buf s)
+        listing (assoc-in (spec root name (:project-root (cmd/cur s))) [:extras :git-dir] (or root dir))]
+    (listbuf/reload s name listing (some? root)
                     "Not a git repository")))
 
 (defn- alter-index
@@ -49,17 +51,18 @@
   [s git-fn label]
   (if-let [e (listbuf/entry-at-point s)]
     (if-let [dir (cur-repo-root s)]
-      (api/after-command s
+      (let [name (:buf s) project-root (:project-root (cmd/cur s))]
+        (api/after-command s
         (fn [publish!]
           (let [out (git-fn dir (:path e))]
             (if (str/starts-with? out "Error:")
               (publish! cmd/msg (first (str/split-lines out)))
-              (let [listing (spec dir)]
+              (let [listing (spec dir name project-root)]
                 (publish! (fn [s]
                             (-> s
-                                (cond-> (= dir (:git-dir (cmd/buf s gitstatus-name)))
-                                  (listbuf/refresh gitstatus-name listing))
-                                (cmd/msg (str label " " (:path e)))))))))))
+                                (cond-> (= dir (:git-dir (cmd/buf s name)))
+                                  (listbuf/refresh name listing))
+                                (cmd/msg (str label " " (:path e))))))))))))
       (cmd/msg s "Not a git repository"))
     s))
 
@@ -75,11 +78,12 @@
 
 (defn commit-cmd [s]
   (if-let [dir (cur-repo-root s)]
-    (gitcommit/open s dir
-      (fn [state]
-        (if (= dir (get-in state [:bufs gitstatus-name :git-dir]))
-          (listbuf/refresh state gitstatus-name (spec dir))
-          state)))
+    (let [name (:buf s) project-root (:project-root (cmd/cur s))]
+      (gitcommit/open s dir
+        (fn [state]
+          (if (= dir (get-in state [:bufs name :git-dir]))
+            (listbuf/refresh state name (spec dir name project-root))
+            state))))
     (cmd/msg s "Not a git repository")))
 
 (defn log-cmd [s]

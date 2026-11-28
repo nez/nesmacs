@@ -92,7 +92,8 @@
         [from to] (case scope
                     :buffer [0 (count text)]
                     :region (cmd/region-bounds s)
-                    :form (some (fn [[from to]] (when (<= from point to) [from to])) forms))]
+                    :form (or (some (fn [[from to]] (when (and (<= from point) (< point to)) [from to])) forms)
+                              (when (= point (count text)) (peek forms))))]
     (when (and from to (< from to))
       (cond-> {:op "eval" :code (gap/substr text from to)}
         file (assoc :file file :line (inc (gap/line-of text from)))
@@ -102,7 +103,11 @@
   (let [name (workspace/buffer-name root "REPL")
         b (or (cmd/buf s name) (assoc (buf/make name) :project-root root :read-only true :journal? false))]
     (cond-> (assoc-in s [:bufs name] (buf/append-output b output))
-      (= root (project/context s)) (cmd/set-cur-buffer name))))
+      (= root (project/context s)) (cmd/msg (str "REPL: " (first (str/split-lines output)))))))
+
+(defn output [s]
+  (let [root (project/context s) name (workspace/buffer-name root "REPL")]
+    (if (cmd/buf s name) (cmd/set-cur-buffer s name) (cmd/msg s "No project REPL output yet"))))
 
 (defn evaluate [s scope]
   (if-let [root (project/context s)]

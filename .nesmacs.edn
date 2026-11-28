@@ -1,0 +1,5 @@
+{:tasks {:test {:argv ["make" "test"] :report :tests}
+         :lint {:argv ["make" "lint"]}
+         :check {:argv ["make" "check"]}
+         :build {:argv ["make" "jar"]}}
+ :repl {:argv ["clojure" "-M" "-m" "nrepl.cmdline" "--port" "0"]}}
