@@ -8,7 +8,8 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str])
   (:import [java.io File]
-           [java.nio.file Files]))
+           [java.nio.file Files]
+           [java.util Locale]))
 
 (def ^:private markers [".nesmacs.edn" ".git" "deps.edn" "project.clj" ".project"
                         "pyproject.toml" "setup.py" "package.json"])
@@ -96,14 +97,14 @@
   "Files matching `input` as a case-insensitive subsequence, best first.
    Exact basename matches rank above earlier and shorter paths."
   [files input]
-  (let [q (str/lower-case (str/trim input))]
+  (let [q (.toLowerCase ^String (str/trim input) Locale/ROOT)]
     (if (empty? q)
-      (vec (take 200 files))
+      (vec (take 300 files))
       (->> files
-           (filter #(subsequence? q (str/lower-case %)))
-           (sort-by (fn [f]
-                      (let [lf (str/lower-case f)
-                            lb (str/lower-case (.getName (File. f)))]
+           (filter #(subsequence? q (.toLowerCase ^String % Locale/ROOT)))
+           (sort-by (fn [^String f]
+                      (let [lf (.toLowerCase f Locale/ROOT)
+                            lb (subs lf (inc (.lastIndexOf lf "/")))]
                         [(if (= q lb) 0 1) (or (str/index-of lf q) 999) (count f)])))
-           (take 200)
+           (take 300)
            vec))))

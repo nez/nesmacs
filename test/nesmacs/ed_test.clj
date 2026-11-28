@@ -2108,10 +2108,11 @@
         (is (= (str (.getCanonicalPath root) "/src/b.clj") (:buf s))))
       (finally (rm-rf root)))))
 
-(deftest project-find-file-tab-completes-the-pending-unique-match
+(deftest project-files-menu-completes-a-mixed-case-fuzzy-match
   (let [root (project-fixture)
-        state (assoc-in (make-state "") [:bufs "*test*" :file] (str root "/src/a.clj"))
-        editor (atom (reduce ed/handle-key state [[:ctrl \x] \p \f [:paste "b.cl"] :tab]))]
+        state (-> (reduce ed/handle-key (#'ed/initial-state 24 80) [[:ctrl \x] \p \p])
+                  (answer-mini (.getPath root)))
+        editor (atom (reduce ed/handle-key state [[:ctrl \n] :return [:paste "BcL"] :tab]))]
     (try
       (dotimes [_ 200]
         (when (get-in @editor [:mini :tab-pending?])

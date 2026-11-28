@@ -132,12 +132,9 @@
            (distinct)
            vec))))
 
-(defn project-files [prefix {:keys [state]}]
-  (when-let [root (project-root state)]
-    (->> (root-files root)
-         (filter #(match? prefix %))
-         (take 300)
-         vec)))
+(defn project-files [root]
+  (let [files (delay (project/files root))]
+    (fn [prefix _] (project/fuzzy @files prefix))))
 
 (defn project-symbols [prefix {:keys [state]}]
   (when-let [root (project-root state)]

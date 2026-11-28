@@ -48,10 +48,11 @@
       (finally (rm-rf root)))))
 
 (deftest fuzzy-matches-subsequences-and-ranks-exact-names-first
-  (let [files ["src/alpha.clj" "src/beta.clj" "test/alpha_test.clj"]]
-    (is (= "src/alpha.clj" (first (project/fuzzy files "alpha.clj"))))
+  (let [files ["src/alpha.clj" "src/beta.clj" "src/Icon.clj" "test/alpha_test.clj"]]
+    (is (= "src/alpha.clj" (first (project/fuzzy files "ALPHA.CLJ"))))
     (is (= #{"src/alpha.clj" "test/alpha_test.clj"}
            (set (project/fuzzy files "alp"))))
+    (is (= ["src/Icon.clj"] (project/fuzzy files "icon")))
     (is (empty? (project/fuzzy files "zzz")))))
 (deftest language-manifests-are-project-roots
   ;; LSP and test runs need a root for Python and Node projects that have no

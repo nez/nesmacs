@@ -665,19 +665,18 @@
   [s]
   (when (:prefix-arg s) (complete/invalidate-cache!))
   (if-let [root (project-root s)]
-    (let [files (project/files root)]
+    (let [matches (complete/project-files root)]
       (mini-start s (str "Find file in " root ": ")
         (fn [s input]
-          (let [input (str/trim input)
-                rel   (cond
-                        (.isFile (java.io.File. root input)) input
-                        (= 1 (count (project/fuzzy files input)))
-                        (first (project/fuzzy files input))
-                        :else nil)]
-            (if rel
-              (find-file s (str root "/" rel))
-              (msg s (str "No such file: " input)))))
-        {:sources [complete/project-files]}))
+          (let [input (str/trim input)]
+            (if (.isFile (java.io.File. root input))
+              (find-file s (str root "/" input))
+              (let [[match other] (matches input nil)]
+                (cond
+                  other (msg s (str "Multiple files match: " input))
+                  match (find-file s (str root "/" match))
+                  :else (msg s (str "No such file: " input)))))))
+        {:sources [matches]}))
     (msg s "Not in a project")))
 
 (defn- git-status
