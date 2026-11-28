@@ -1169,19 +1169,10 @@
       (:lsp l)))
 
 (defn- lsp-session
-  "Resolve {:root :root-id :argv :language} for the current buffer, or nil.
-   Outside a project the file's own directory is the root, so a lone script
-   still gets hover and completion."
+  "Resolve the current buffer's server and its configured command."
   [s]
-  (let [b (:file (cur s))
-        l (get (cur s) :language)]
-    (when (and b l (:lsp l))
-      (when-let [root (or (project-root s)
-                          (some-> ^String b java.io.File. .getParent))]
-        {:root root
-         :root-id (lsp/server-id root (:id l))
-         :argv (lsp-argv s l)
-         :language l}))))
+  (when-let [sess (lsp/document-session (cur s))]
+    (assoc sess :argv (lsp-argv s (:language sess)))))
 
 (defn- char-col
   "0-based UTF-16 character index of point within its line — what LSP wants."
@@ -1204,7 +1195,15 @@
         (if (lsp/on-path? (:argv sess))
           (do (lsp/ensure! (:root-id sess) (:argv sess) (:root sess)
                            (:id (:language sess))
-                           (fn [_] (swap! editor f sess)))
+                           (fn [_]
+                             (swap! editor
+                                    (fn [state]
+                                      (let [b (cur state)]
+                                        (if (and (= path (:file b))
+                                                 (= (:root-id sess)
+                                                    (:root-id (lsp/document-session b))))
+                                          (f state sess)
+                                          state))))))
               s)
           (msg s (str "Language server not on PATH: " (first (:argv sess)))))
         (msg s "Not in a project")))))
@@ -1277,11 +1276,6 @@
 
 ;; --- Workspace edits (rename, code actions, formatting) ---
 
-(defn- canonical-path
-  "Buffers are keyed by canonical path, but LSP edits may carry a symlink."
-  ^String [^String p]
-  (try (.getCanonicalPath (java.io.File. p)) (catch Exception _ p)))
-
 (defn- workspace-buffer-key [state path]
   (or (when (contains? (:bufs state) path) path)
       (some (fn [[key b]] (when (= (:file b) path) key)) (:bufs state))))
@@ -1322,12 +1316,8 @@
   [edit]
   (let [initial @editor
         source (memoize #(workspace-source initial %))
-        groups (->> (lsp/workspace-edits edit #(:text (source (canonical-path %))))
-                    (reduce (fn [groups {:keys [path edits]}]
-                              (update groups (canonical-path path) (fnil into []) edits))
-                            {})
-                    (mapv (fn [[path edits]]
-                            {:path path :edits (sort-by :from > edits) :source (source path)})))]
+        groups (mapv #(assoc % :source (source (:path %)))
+                     (lsp/workspace-edits edit #(:text (source %))))]
     (if (empty? groups)
       (swap! editor msg "No edits to apply")
       (let [[before after] (swap-vals! editor #(reduce apply-edit-group % groups))

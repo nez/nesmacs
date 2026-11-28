@@ -5,7 +5,11 @@
             [nesmacs.complete :as complete]
             [nesmacs.ed :as ed]
             [nesmacs.gap :as gap]
-            [nesmacs.lsp :as lsp]))
+            [nesmacs.lsp :as lsp]
+            [nesmacs.proc :as proc]
+            [nesmacs.project :as project]
+            [nesmacs.rpc :as rpc]
+            [nesmacs.testutil :as tu]))
 
 (defn- body-of [framed]
   (let [i (.indexOf ^String framed "\r\n\r\n")]
@@ -85,6 +89,50 @@
            :msg nil}]
     (is (= "No language server for this file" (:msg (ed/lsp-hover s))))))
 
+(deftest nested-projects-sync-and-request-from-the-same-server
+  (let [outer (tu/temp-dir "nesmacs-lsp-outer")
+        inner (doto (java.io.File. outer "nested") .mkdir)
+        outer-id (lsp/server-id (.getPath outer) "clojure")
+        inner-id (lsp/server-id (.getPath inner) "clojure")
+        outer-path (str outer "/outer.clj")
+        inner-path (str inner "/inner.clj")
+        state {:buf inner-path
+               :bufs {outer-path (buf/make "outer.clj" "(outer)" outer-path)
+                      inner-path (buf/make "inner.clj" "(inner)" inner-path)}}
+        server (fn [id root] {:id id :root (.getPath ^java.io.File root)
+                             :language-id "clojure" :initialized? true})
+        servers (atom {outer-id (server outer-id outer) inner-id (server inner-id inner)})
+        sent (atom [])
+        scans (atom [])
+        root-for project/root-for]
+    (try
+      (spit (java.io.File. outer "deps.edn") "{}")
+      (spit (java.io.File. inner "deps.edn") "{}")
+      (with-redefs-fn
+        {#'nesmacs.lsp/servers servers
+         #'ed/editor (atom state)
+         #'project/root-for (fn [path] (swap! scans conj path) (root-for path))
+         #'rpc/send! (fn [srv msg]
+                       (swap! sent conj [(:id srv) (:method msg)
+                                         (get-in msg [:params :textDocument :uri])]))
+         #'rpc/read! (constantly [])
+         #'proc/finished? (constantly false)
+         #'lsp/on-path? (constantly true)}
+        (fn []
+          (lsp/tick! ed/editor)
+          (lsp/tick! ed/editor)
+          (ed/lsp-hover @ed/editor)
+          (is (= #{[outer-id "textDocument/didOpen" (lsp/path->uri outer-path)]
+                   [inner-id "textDocument/didOpen" (lsp/path->uri inner-path)]}
+                 (set (take 2 @sent))))
+          (is (= [[inner-id "textDocument/hover" (lsp/path->uri inner-path)]]
+                 (drop 2 @sent)))
+          (is (= {outer-path 1 inner-path 1} (frequencies @scans)))))
+      (finally
+        (lsp/close-doc! outer-path)
+        (lsp/close-doc! inner-path)
+        (tu/delete-tree outer)))))
+
 (deftest document-completion-follows-buffer-lifetime
   (let [original {:buf "x" :bufs {"x" (buf/make "x" "foo" "/x")}}
         editor (atom original)
@@ -145,16 +193,20 @@
 (deftest workspace-edits-merges-a-document-listed-twice
   ;; Both groups carry offsets into the original text. Applying the first one
   ;; would shift the second, so they must be merged and sorted together.
-  (let [edit {:documentChanges
+  (let [paths (atom [])
+        edit {:documentChanges
               [{:textDocument {:uri "file:///tmp/x.clj"}
                 :edits [{:range {:start {:line 0 :character 4}
                                  :end {:line 0 :character 5}}
                          :newText "E"}]}
-               {:textDocument {:uri "file:///tmp/x.clj"}
+               {:textDocument {:uri "file:///tmp/../tmp/x.clj"}
                 :edits [{:range {:start {:line 0 :character 1}
                                  :end {:line 0 :character 2}}
                          :newText "B"}]}]}
-        groups (lsp/workspace-edits edit (constantly (gap/of "abcdef\n")))]
+        groups (lsp/workspace-edits edit (fn [path]
+                                         (swap! paths conj path)
+                                         (gap/of "abcdef\n")))]
+    (is (= [(.getCanonicalPath (java.io.File. "/tmp/x.clj"))] @paths))
     (is (= 1 (count groups)))
     (is (= [{:from 4 :to 5 :text "E"} {:from 1 :to 2 :text "B"}]
            (:edits (first groups))))))

@@ -20,6 +20,7 @@
             [nesmacs.gap :as gap]
             [nesmacs.lang :as lang]
             [nesmacs.proc :as proc]
+            [nesmacs.project :as project]
             [nesmacs.props :as props]
             [nesmacs.rpc :as rpc]
             [nesmacs.log :as log])
@@ -27,6 +28,7 @@
 
 (defonce ^:private servers (atom {}))   ; root-id -> server map
 (defonce ^:private next-id (atom 0))
+(defonce ^:private document-roots (atom {}))
 
 ;; --- Wire format ---
 
@@ -168,6 +170,21 @@
 (defn language-id-for [path]
   (:id (lang/language-for-file path)))
 
+(defn document-session
+  "Server identity for a document, using its nearest project or its own directory."
+  [{:keys [file language large-file]}]
+  (when (and file (not large-file))
+    (let [language (or language (lang/language-for-file file))]
+      (when (:lsp language)
+        ;; shortcut: recheck project markers when the buffer reopens, add
+        ;; filesystem invalidation if live project reconfiguration is needed.
+        (let [root (or (get @document-roots file)
+                       (let [root (or (project/root-for file)
+                                      (.getParent (.getAbsoluteFile (java.io.File. ^String file))))]
+                         (swap! document-roots assoc file root)
+                         root))]
+          {:root root :root-id (server-id root (:id language)) :language language})))))
+
 (defn on-path?
   "True when the first element of a server `argv` is an executable on PATH."
   [argv]
@@ -180,29 +197,21 @@
   (let [s (:textDocumentSync capabilities)]
     (long (if (map? s) (long (or (:change s) 0)) (long (or s 0))))))
 
-(defn- sync-docs! [root-id state]
-  (let [s (srv root-id)]
-    (when (:initialized? s)
-      (let [incremental? (= 2 (sync-kind (:capabilities s)))]
-        (doseq [[_ b] (:bufs state)]
-          (when-let [path (:file b)]
-            (let [l (lang/language-for-file path)]
-              (when (and l
-                         (not (:large-file b))
-                         (= (:id l) (:language-id s))
-                         (or (= path (:root s))
-                             (str/starts-with? path (str (:root s) java.io.File/separator))))
-                (let [v (or (:version b) 0)
-                      seen (get-in s [:docs path])]
-                  (cond
-                    (nil? seen)   (did-open! root-id path (str (:text b)) v (:id l))
-                    (not= seen v) (if incremental?
-                                    (did-change-range! root-id path (str (:text b)) v)
-                                    (did-change! root-id path (str (:text b)) v))))))))))))
+(defn- sync-document! [root-id s b]
+  (let [path (:file b)
+        version (or (:version b) 0)
+        seen (get-in s [:docs path])]
+    (cond
+      (nil? seen) (did-open! root-id path (str (:text b)) version (:language-id s))
+      (not= seen version)
+      (if (= 2 (sync-kind (:capabilities s)))
+        (did-change-range! root-id path (str (:text b)) version)
+        (did-change! root-id path (str (:text b)) version)))))
 
 (defn close-doc!
   "Notify every server that has `path` open that the document closed."
   [path]
+  (swap! document-roots dissoc path)
   (doseq [[root-id s] @servers
           :when (get-in s [:docs path])]
     (notify! root-id "textDocument/didClose"
@@ -402,9 +411,8 @@
             {:command command :arguments (vec args)} cb))
 
 (defn workspace-edits
-  "Normalize a WorkspaceEdit into [{:path :edits [{:from :to :text}]}], with
-   absolute char offsets, sorted descending so applying them in order is safe.
-   `text-for` returns the current text of a path (nil if unavailable).
+  "Group a WorkspaceEdit by canonical path and sort its absolute offsets
+   in descending order. `text-for` reads the text once per canonical path.
    File create/rename/delete operations are ignored: nesmacs does not create or
    delete files behind the user's back."
   [edit text-for]
@@ -414,40 +422,43 @@
                               :when (nil? (:kind d))]
                           [(get-in d [:textDocument :uri]) (:edits d)]))]
       (->> pairs
-           (keep (fn [[uri edits]]
-                   (when (and uri (seq edits))
-                     (let [path (uri->path uri)
-                           text (text-for path)]
-                       (when text
-                         {:path path
-                          :edits (->> edits
-                                      (keep (fn [e]
-                                              (when-let [[f t] (range->offsets text (:range e))]
-                                                {:from f :to t
-                                                 :text (buf/normalize-eol (str (or (:newText e) "")))})))
-                                      vec)})))))
-           (filter (comp seq :edits))
-           ;; A server may list the same document more than once (`:changes`
-           ;; plus `:documentChanges`, or two rename entries). Merge before
-           ;; sorting: otherwise the second group's offsets are applied to text
-           ;; the first group already changed.
-           (reduce (fn [by-path {:keys [path edits]}]
-                     (update by-path path (fnil into []) edits))
+           (reduce (fn [by-path [uri edits]]
+                     (if (and uri (seq edits))
+                       (let [path (uri->path uri)
+                             canonical (try (.getCanonicalPath (java.io.File. ^String path))
+                                            (catch java.io.IOException _ path))]
+                         (update by-path canonical (fnil into []) edits))
+                       by-path))
                    {})
-           (mapv (fn [[path edits]]
-                   {:path path :edits (vec (sort-by :from > edits))}))))))
+           (into []
+                 (keep (fn [[path edits]]
+                         (when-let [text (text-for path)]
+                           (let [edits (keep (fn [{:keys [range newText]}]
+                                               (when-let [[from to] (range->offsets text range)]
+                                                 {:from from :to to
+                                                  :text (buf/normalize-eol (str (or newText "")))}))
+                                             edits)]
+                             (when (seq edits)
+                               {:path path :edits (vec (sort-by :from > edits))}))))))))))
 
 (defn tick!
   "Editor-loop step: sync open documents and read server output. Applies
    diagnostics to buffers via `editor`. Never blocks."
   [editor]
-  (let [state @editor]
-    (doseq [[root-id _] @servers]
-      (try (sync-docs! root-id state) (catch Exception e (log/log "LSP sync:" (.getMessage e))))
-      (try (read-output! editor root-id) (catch Exception e (log/log "LSP read:" (.getMessage e)))))
-    nil))
+  (when-let [running (seq @servers)]
+    (let [documents (group-by (comp :root-id document-session) (vals (:bufs @editor)))]
+      (doseq [[root-id s] running]
+        (try
+          (when (:initialized? s)
+            (doseq [b (get documents (server-id (:root s) (:language-id s)))]
+              (sync-document! root-id s b)))
+          (catch Exception e (log/log "LSP sync:" (.getMessage e))))
+        (try (read-output! editor root-id)
+             (catch Exception e (log/log "LSP read:" (.getMessage e)))))))
+  nil)
 
 (defn shutdown-all! []
+  (reset! document-roots {})
   (doseq [[root-id s] @servers]
     (try (rpc/send! s {:jsonrpc "2.0" :method "exit" :params {}})
          (proc/kill! (:handle s))

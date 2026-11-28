@@ -2010,8 +2010,12 @@
       (binding [persist/*dir* dir]
         (let [open-f (java.io.File. dir "open.py")
               shut-f (java.io.File. dir "shut.py")
+              alias-f (java.io.File. dir "alias.py")
               _ (spit open-f "aaa\n")
               _ (spit shut-f "skip\r\nbbb\r\n")
+              _ (java.nio.file.Files/createSymbolicLink
+                  (.toPath alias-f) (.toPath shut-f)
+                  (make-array java.nio.file.attribute.FileAttribute 0))
               open-path (.getCanonicalPath open-f)
               shut-path (.getCanonicalPath shut-f)
               range (fn [] {:start {:line 0 :character 0} :end {:line 0 :character 3}})]
@@ -2022,13 +2026,18 @@
                    :cur-window [] :rows 24 :cols 80})
           (ed/apply-workspace-edit!
             {:changes {(lsp/path->uri open-path) [{:range (range) :newText "AAA"}]
-                       (lsp/path->uri shut-path) [{:range {:start {:line 1 :character 0}
-                                                          :end {:line 1 :character 3}}
-                                                  :newText "BBB"}]}})
+                       (lsp/path->uri shut-path) [{:range {:start {:line 0 :character 0}
+                                                          :end {:line 0 :character 4}}
+                                                  :newText "keep this"}]}
+             :documentChanges [{:textDocument {:uri (lsp/path->uri (.getPath alias-f))}
+                                :edits [{:range {:start {:line 1 :character 0}
+                                                 :end {:line 1 :character 3}}
+                                         :newText "BBB"}]}]})
           (is (= "aaa\n" (slurp open-f)) "the open buffer is not written")
           (is (true? (get-in @ed/editor [:bufs open-path :modified])))
           (is (= "AAA\n" (str (get-in @ed/editor [:bufs open-path :text]))))
-          (is (= "skip\r\nBBB\r\n" (slurp shut-f)) "the unopened file is written")
+          (is (= "keep this\r\nBBB\r\n" (slurp shut-f)) "both edits use the original offsets")
+          (is (= #{open-path shut-path} (set (keys (:bufs @ed/editor)))))
           (is (false? (get-in @ed/editor [:bufs shut-path :modified])))))
       (finally
         (reset! ed/editor nil)
