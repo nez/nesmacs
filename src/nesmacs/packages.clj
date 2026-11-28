@@ -256,9 +256,9 @@
       (with-open [output (FileOutputStream. file true)
                   _lock (.lock (.getChannel output))]
         (let [before (read-store)
-              after (f before)]
-          (when-not (= before after) (persist/save! store-name after))
-          after)))))
+              {:keys [store] :as result} (f before)]
+          (when-not (= before store) (persist/save! store-name store))
+          result)))))
 
 (defn- install-release [store {:keys [id sha256] :as release}]
   (let [old (get-in store [:installed id])]
@@ -295,26 +295,20 @@
 (defn update-all!
   "Refresh the selected catalog and stage updates for installed packages."
   [default-source]
-  (let [report (volatile! nil)
-        store (with-store!
-                (fn [store]
-                  (let [source (or (:source store) default-source)
-                        refreshed (when source
-                                    (try {:data (catalog-data source)}
-                                         (catch Exception e
-                                           (log/log "packages: could not refresh catalog:" (.getMessage e))
-                                           {:error (.getMessage e)})))
-                        store (merge store (:data refreshed))
-                        upgrades (->> (catalog-entries store)
-                                      (filter #(update-available? (get-in store [:installed (:id %)]) %))
-                                      (sort-by (comp str :id)))
-                        result (reduce stage-update
-                                       {:store store :updated [] :failed {}
-                                        :catalog-error (:error refreshed)}
-                                       upgrades)]
-                    (vreset! report (dissoc result :store))
-                    (:store result))))]
-    (assoc @report :store store)))
+  (with-store!
+    (fn [store]
+      (let [source (or (:source store) default-source)
+            {:keys [data error]} (when source
+                                  (try {:data (catalog-data source)}
+                                       (catch Exception e
+                                         (log/log "packages: could not refresh catalog:" (.getMessage e))
+                                         {:error (.getMessage e)})))
+            store (merge store data)
+            upgrades (->> (catalog-entries store)
+                          (filter #(update-available? (get-in store [:installed (:id %)]) %))
+                          (sort-by (comp str :id)))]
+        (reduce stage-update {:store store :updated [] :failed {} :catalog-error error}
+                upgrades)))))
 
 (defn- select-option [record key value]
   (let [option (some #(when (= key (:key %)) %) (get-in record [:manifest :options]))]
@@ -322,24 +316,26 @@
       (fail "Invalid package option"))
     (assoc-in record [:options key] value)))
 
+(defn- change-installed [store {:keys [action id option value]}]
+  (let [record (get-in store [:installed id])]
+    (when-not record (fail "Package is no longer installed"))
+    (case action
+      :enable (assoc-in store [:installed id :enabled?] true)
+      :disable (assoc-in store [:installed id :enabled?] false)
+      :remove (cond-> (update store :installed dissoc id)
+                (contains? (bundled-packages) id)
+                (update :removed-bundled (fnil conj #{}) id))
+      :configure (assoc-in store [:installed id] (select-option record option value)))))
+
 (defn execute!
   "Run one hub operation off the editor thread and return the committed store."
-  [{:keys [action source id option value] :as request}]
-  (case action
-    :catalog (let [data (catalog-data source)]
-               (with-store! #(merge % data)))
-    :install (with-store! #(install % request))
-    (with-store!
-      (fn [store]
-        (let [record (get-in store [:installed id])]
-          (when-not record (fail "Package is no longer installed"))
-          (case action
-            :enable (assoc-in store [:installed id :enabled?] true)
-            :disable (assoc-in store [:installed id :enabled?] false)
-            :remove (cond-> (update store :installed dissoc id)
-                      (contains? (bundled-packages) id)
-                      (update :removed-bundled (fnil conj #{}) id))
-            :configure (assoc-in store [:installed id] (select-option record option value))))))))
+  [{:keys [action source] :as request}]
+  (let [data (when (= :catalog action) (catalog-data source))]
+    (:store (with-store! (fn [store]
+                           {:store (case action
+                                     :catalog (merge store data)
+                                     :install (install store request)
+                                     (change-installed store request))})))))
 
 (defn- load-extension [s {:keys [release options]}]
   (let [file (artifact-file (:sha256 release))]
@@ -367,10 +363,11 @@
 
 (defn- record-if-current! [id before after]
   (try
-    (= after (get-in (with-store! #(cond-> %
-                                     (= before (get-in % [:installed id]))
-                                     (assoc-in [:installed id] after)))
-                     [:installed id]))
+    (= after (get-in (with-store! (fn [store]
+                                  {:store (cond-> store
+                                            (= before (get-in store [:installed id]))
+                                            (assoc-in [:installed id] after))}))
+                     [:store :installed id]))
     (catch Exception e
       (log/log "packages: could not save startup result:" (.getMessage e))
       false)))

@@ -252,15 +252,15 @@
     (cond
       (and job (realized? (:result job)))
       (let [{:keys [store error updated failed] :as result} @(:result job)
-            {:keys [action id]} (:request job)]
+            {:keys [action id]} (:request job)
+            cleared (cond-> updated (and store id) (conj id))]
         (swap! editor
                (fn [s]
                  (-> s
                      (update :packages dissoc :job)
                      (cond-> store (assoc-in [:packages :store] store)
-                       (and store id) (update-in [:packages :errors] dissoc id)
+                       (seq cleared) (update-in [:packages :errors] #(apply dissoc % cleared))
                        (and store id) (update-in [:packages :update-errors] dissoc id)
-                       (seq updated) (update-in [:packages :errors] #(apply dissoc % updated))
                        failed (assoc-in [:packages :update-errors] failed)
                        (and store (= action :remove)) (update :packages dissoc :detail))
                      refresh-view
