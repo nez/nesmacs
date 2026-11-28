@@ -1,7 +1,5 @@
 (ns nesmacs.testutil
-  "Temp directories for tests that touch the filesystem. Deletion is recursive:
-   a fixture that removes only direct children leaves nested files behind and
-   the delete of the directory then fails silently."
+  "Shared filesystem fixtures and polling for integration tests."
   (:import [java.io File]
            [java.nio.file Files]))
 
@@ -20,3 +18,15 @@
              (not (Files/isSymbolicLink (.toPath f))))
     (doseq [^File c (.listFiles f)] (delete-tree c)))
   (.delete f))
+
+(defn pump-until!
+  "Tick once before each check and measure the timeout with a monotonic clock."
+  [tick! interval-ms editor pred timeout-ms]
+  (let [start (System/nanoTime)
+        timeout-ns (* timeout-ms 1000000)]
+    (loop []
+      (tick! editor)
+      (cond
+        (pred) true
+        (>= (- (System/nanoTime) start) timeout-ns) false
+        :else (do (Thread/sleep interval-ms) (recur))))))

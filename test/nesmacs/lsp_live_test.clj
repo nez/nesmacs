@@ -21,15 +21,7 @@
   (let [[exe & args] (:lsp language)]
     (into [(or (System/getenv env) exe)] args)))
 
-(defn- pump!
-  "Tick the LSP client until `pred` holds or the deadline passes."
-  [editor pred ms]
-  (let [end (+ (System/currentTimeMillis) ms)]
-    (loop []
-      (lsp/tick! editor)
-      (cond (pred) true
-            (> (System/currentTimeMillis) end) false
-            :else (do (Thread/sleep 100) (recur))))))
+(def ^:private pump! (partial tu/pump-until! lsp/tick! 100))
 
 (defn- items-of
   "Servers may answer completion with a CompletionList map or a raw vector."

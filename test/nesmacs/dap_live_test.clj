@@ -21,15 +21,7 @@
   (when-let [p (System/getenv "JS_DEBUG_DAP")]
     (when (.isFile (java.io.File. ^String p)) p)))
 
-(defn- pump!
-  "Tick the DAP client until `pred` holds or the deadline passes."
-  [editor pred ms]
-  (let [end (+ (System/currentTimeMillis) ms)]
-    (loop []
-      (dap/tick! editor)
-      (cond (pred) true
-            (> (System/currentTimeMillis) end) false
-            :else (do (Thread/sleep 50) (recur))))))
+(def ^:private pump! (partial tu/pump-until! dap/tick! 50))
 
 (defn- text-of [editor name]
   (some-> (get-in @editor [:bufs name :text]) str))
