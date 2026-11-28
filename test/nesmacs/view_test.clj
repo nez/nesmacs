@@ -4,6 +4,7 @@
             [nesmacs.buf :as buf]
             [nesmacs.gap :as gap]
             [nesmacs.lang :as lang]
+            [nesmacs.listbuf :as listbuf]
             [nesmacs.props :as props]
             [nesmacs.term :as term]
             [nesmacs.view :as view]
@@ -82,6 +83,15 @@
 (defn- render-result [s]
   (binding [term/*out-fn* (fn [_])]
     (view/render s)))
+
+(deftest reopening-a-list-repaints-its-rows
+  (let [spec {:name "results" :mode :nav-mode :header "Results" :format-entry str}
+        s (listbuf/open {:windows (win/leaf "results") :cur-window []
+                         :rows 5 :cols 20}
+                        "results" (assoc spec :entries ["before"]))
+        s (assoc s :render-sig (:sig (render-result s)))
+        reopened (listbuf/open s "results" (assoc spec :entries ["after"]))]
+    (is (str/includes? (render-str reopened) "after"))))
 
 (deftest render-reuses-cached-font-lock-spans
   ;; A sentinel :builtin span in the cache must survive: if the renderer

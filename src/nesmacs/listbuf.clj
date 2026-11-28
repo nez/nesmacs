@@ -31,23 +31,25 @@
   (let [idx (dec (cmd/line-idx s))]
     (when (>= idx 0) (get (:listbuf-entries (cmd/cur s)) idx))))
 
+(defn- install [s name b]
+  (let [old (cmd/buf s name)]
+    (assoc-in s [:bufs name]
+              (cond-> b old (update :version max (inc (:version old 0)))))))
+
 (defn refresh
   "Replace `name` with a fresh make from `spec`, preserving point clamped
    to the new text length and bumping the version."
   [s name spec]
-  (let [old   (get-in s [:bufs name])
-        v     (inc (or (:version old) 0))
-        p     (or (:point old) 0)
-        fresh (make (assoc spec :version v))]
-    (assoc-in s [:bufs name]
-              (assoc fresh :point (min p (count (:text fresh)))))))
+  (let [fresh (make spec)
+        point (:point (cmd/buf s name) 0)]
+    (install s name (assoc fresh :point (buf/clamp-pos fresh point)))))
 
 (defn show
   "Install an already built list buffer and show it in the current window.
    An open minibuffer keeps focus: a job that finishes mid-prompt must not
    replace its input."
   [s name b]
-  (let [s (assoc-in s [:bufs name] b)]
+  (let [s (install s name b)]
     (if (:mini s) s (cmd/set-cur-buffer s name))))
 
 (defn open
