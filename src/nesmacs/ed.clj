@@ -23,6 +23,7 @@
             [nesmacs.lang :as lang]
             [nesmacs.listbuf :as listbuf]
             [nesmacs.lsp :as lsp]
+            [nesmacs.mini :as mini]
             [nesmacs.mode :as mode]
             [nesmacs.nav :as nav]
             [nesmacs.packagehub :as packagehub]
@@ -185,11 +186,7 @@
 
 (defn keyboard-quit [s]
   (msg (if (:mini s)
-         ;; If the saved prev-buf was killed while the minibuffer was
-         ;; open, fall back so :buf never ends up pointing at a missing
-         ;; entry.
-         (let [[s target] (cmd/ensure-buffer s (:prev-buf (:mini s)))]
-           (assoc s :buf target :mini nil))
+         (mini/close s)
          (update-cur s #(assoc % :mark nil)))
        "Quit"))
 
@@ -343,40 +340,58 @@
           (swap! editor-atom reset-edit-counts saved))))))
 
 (defn- cli-formatted-text [{:keys [language text file]}]
-  (format/format-text language (str text) file
-                      (some-> ^String file java.io.File. .getParent)))
+  (some-> (format/format-text language (str text) file
+                             (some-> ^String file java.io.File. .getParent))
+          buf/normalize-eol))
+
+(defn- same-buffer-version? [b saved]
+  (and (= (:file b) (:file saved))
+       (= (:version b) (:version saved))
+       (identical? (:text b) (:text saved))))
+
+(defn- write-buffer! [publish! name b expected]
+  (persist/write-file! (:file b) (str (:text b)) (:line-ending b) expected)
+  (session/note-saved! name (:version b))
+  (let [state (publish! (fn [s]
+                         (if (same-buffer-version? (cmd/buf s name) b)
+                           (update-in s [:bufs name] assoc :modified false :edit-count 0)
+                           s)))]
+    (same-buffer-version? (cmd/buf state name) b)))
 
 (defn save-buffer-named
-  "Save buffer `name` (a :bufs key). Writes the file and records the saved
-   version in the edit journal, so a crash before the next session snapshot
-   can't replay edits the file already has. With :format-on-save set, the
-   language's formatter runs first (LSP formatting stays explicit, since it is
-   async)."
+  "Queue a save of buffer `name` (a :bufs key). Formatting and disk writes run
+   after the command commits."
   [s name]
-  (let [b0 (cmd/buf s name)]
+  (let [b (cmd/buf s name)
+        file (:file b)
+        format? (:format-on-save s)]
     (cond
-      (nil? b0) (msg s (str "No buffer: " name))
-      (str/blank? (:file b0)) (msg s "No file")
+      (nil? b) (msg s (str "No buffer: " name))
+      (str/blank? file) (msg s "No file")
       :else
-      (try
-        (let [s (if-let [fmt (when (:format-on-save s) (cli-formatted-text b0))]
-                  (update-in s [:bufs name] buf/replace-text fmt)
-                  s)
-              b (cmd/buf s name)
-              f (:file b)
-              raw  (str (:text b))
-              ;; Preserve the EOL style the file had on read. Without
-              ;; this, opening and saving a CRLF file silently rewrote
-              ;; it as LF — a destructive edit we didn't intend.
-              bytes (if (= :crlf (:line-ending b))
-                      (str/replace raw "\n" "\r\n") raw)]
-          (persist/atomic-spit f bytes)
-          (session/note-saved! name (:version b))
-          (let [bak (auto-save-file f)]
-            (when (.exists bak) (.delete bak)))
-          (-> s (update-in [:bufs name] #(assoc % :modified false :edit-count 0))
-                (msg (str "Wrote " f))))
-        (catch Exception e (msg-error s "Save failed" e))))))
+      (api/after-command s
+        (fn [publish!]
+          (try
+            (let [to-save
+                  (if-let [fmt (when format? (cli-formatted-text b))]
+                    (let [state (publish! (fn [state]
+                                            (if (same-buffer-version? (cmd/buf state name) b)
+                                              (update-in state [:bufs name] buf/replace-text fmt)
+                                              state)))
+                          formatted (cmd/buf state name)]
+                      (when (and (= file (:file formatted)) (= fmt (str (:text formatted))))
+                        formatted))
+                    b)]
+              (if to-save
+                (do
+                  (when (write-buffer! publish! name to-save nil)
+                    (try
+                      (java.nio.file.Files/deleteIfExists (.toPath (auto-save-file file)))
+                      (catch Exception e
+                        (log/log "auto-save cleanup failed:" file (.getMessage e)))))
+                  (publish! msg (str "Wrote " file)))
+                (publish! msg "Save canceled: buffer changed during formatting")))
+            (catch Exception e (publish! msg-error "Save failed" e))))))))
 
 (defn save-buffer [s] (save-buffer-named s (:buf s)))
 
@@ -394,10 +409,10 @@
 (def ^:private recentf-limit 50)
 
 (defn- bump-recentf [s path]
-  (let [r (vec (take recentf-limit
-                     (cons path (remove #{path} (:recentf s)))))]
-    (persist/save-quiet! "recentf" r)
-    (assoc s :recentf r)))
+  (-> s
+      (assoc :recentf (vec (take recentf-limit
+                                (cons path (remove #{path} (:recentf s))))))
+      (api/persist-setting :recentf)))
 
 (defn find-file [s filename]
   (let [{:keys [path name exists dir?]} (file-info filename)]
@@ -409,9 +424,9 @@
       dir? (dired/open s path)
 
       exists
-      (try (let [raw (slurp path :encoding "UTF-8")]
-             (-> (open-buf s path (-> (buf/make name (buf/normalize-eol raw) path)
-                                      (assoc :line-ending (buf/detect-eol raw))))
+      (try (let [{:keys [text line-ending]} (persist/read-file path)]
+             (-> (open-buf s path (assoc (buf/make name text path)
+                                        :line-ending line-ending))
                  (bump-recentf path)))
            (catch Exception e (msg-error s (str "Error reading " path) e)))
 
@@ -474,32 +489,8 @@
 
 ;; --- Minibuffer ---
 
-(def ^:private mini-buf-name " *mini*")
-
-(defn mini-start
-  ([s prompt on-done] (mini-start s prompt on-done nil))
-  ([s prompt on-done completer]
-   (if (:mini s)
-     ;; A minibuffer is already active. Opening a second one would drop the
-     ;; outer prompt's `prev-buf` / `on-done` and leave the editor wedged.
-     (msg s "Command attempted to use disabled command in minibuffer")
-     (-> s
-         (assoc-in [:bufs mini-buf-name] (assoc (buf/make mini-buf-name) :journal? false))
-         (assoc :mini {:prompt prompt :on-done on-done :prev-buf (:buf s)
-                       :history-idx -1 :completer completer})
-         (assoc :buf mini-buf-name)))))
-
-(defn mini-accept [s]
-  (if-let [{:keys [on-done prev-buf]} (:mini s)]
-    (let [input  (str (:text (cur s)))
-          [s target] (cmd/ensure-buffer s prev-buf)
-          appended? (and (seq input) (not= input (peek (:mini-history s))))
-          s' (-> s
-                 (assoc :buf target :mini nil)
-                 (cond-> appended? (update :mini-history conj input)))]
-      (when appended? (persist/save-quiet! "mini-history" (:mini-history s')))
-      (on-done s' input))
-    s))
+(def mini-start mini/start)
+(def mini-accept mini/accept)
 
 ;; --- Crash recovery ---
 
@@ -539,108 +530,13 @@
       (fn [s ans]
         (if (= "y" (str/lower-case (str/trim ans)))
           (recover-ask (recover-file s f) more)
-          (do (try (.delete (auto-save-file f))
-                   (catch Exception _))
-              (recover-ask s more)))))
+          (-> s
+              (api/after-command (fn [_]
+                                   (java.nio.file.Files/deleteIfExists (.toPath (auto-save-file f)))))
+              (recover-ask more)))))
     s))
 
-(defn- mini-move-candidate
-  "Move candidate selection by `delta`, starting at the near end of the list."
-  [s delta]
-  (let [n (count (get-in s [:mini :candidates]))
-        i (get-in s [:mini :sel] -1)
-        i (if (and (neg? i) (neg? delta)) n i)
-        j (-> (+ i delta) (max 0) (min (dec n)))]
-    (complete/select-candidate s j)))
-
-(defn- mini-next-candidate [s] (mini-move-candidate s 1))
-(defn- mini-prev-candidate [s] (mini-move-candidate s -1))
-
-(defn- mini-history-move
-  "Move minibuffer history selection. dir=+1 goes back (older), -1 forward (newer).
-   idx=-1 means cleared (no selection); 0..n-1 picks from newest to oldest."
-  [s dir]
-  (let [hist (:mini-history s [])
-        n    (count hist)
-        idx  (get-in s [:mini :history-idx])
-        new  (-> (+ idx dir) (max -1) (min (dec n)))]
-    (cond
-      (= new idx) s
-      (neg? new)  (-> s (assoc-in [:mini :history-idx] -1) (complete/set-input ""))
-      :else       (-> s (assoc-in [:mini :history-idx] new)
-                        (complete/set-input (get hist (- (dec n) new)))))))
-
-(defn- mini-history-prev [s] (mini-history-move s 1))
-(defn- mini-history-next [s] (mini-history-move s -1))
-
-(defn- longest-common-prefix [[^String first-match & others]]
-  (let [length (reduce (fn [length ^String candidate]
-                         (loop [i 0]
-                           (if (and (< i length)
-                                    (.regionMatches first-match true i candidate i 1))
-                             (recur (inc i))
-                             i)))
-                       (.length first-match) others)]
-    (subs first-match 0 length)))
-
-(defn- complete-prefix [input candidates]
-  (let [matches (filterv #(complete/prefix-match? input %) candidates)]
-    {:completed (if (seq matches) (longest-common-prefix matches) input)
-     :candidates matches}))
-
-(defn- file-completer
-  "Tab-complete file paths. Returns {:completed str :candidates [str]}."
-  ([input] (file-completer input nil))
-  ([input _s]
-   (let [f (java.io.File. (if (empty? input) "." input))
-         [parent prefix] (if (.isDirectory f)
-                           [f ""]
-                           [(.getParentFile f) (.getName f)])
-         parent (or parent (java.io.File. "."))
-         children (try (vec (.list parent)) (catch Exception _ []))
-         {:keys [completed candidates]} (complete-prefix prefix children)
-         path (fn [name] (.getPath (java.io.File. parent ^String name)))
-         as-dir (fn [s] (if (str/ends-with? s "/") s (str s "/")))
-         paths (mapv (fn [name]
-                       (let [full (path name)]
-                         (if (.isDirectory (java.io.File. full)) (as-dir full) full)))
-                     candidates)]
-     {:completed (case (count paths)
-                   0 input
-                   1 (first paths)
-                   (if (empty? completed) (as-dir (path completed)) (path completed)))
-      :candidates paths})))
-
-(defn- mini-tab-complete [s]
-  (let [{:keys [completer candidates input for request]} (:mini s)]
-    (cond
-      (map? completer) (if (and (some? for) (= input for) (nil? request))
-                         (if (= 1 (count candidates)) (complete/select-candidate s 0) s)
-                         (assoc-in s [:mini :tab-pending?] true))
-      completer (let [input (str (:text (cur s)))
-                      {:keys [completed]} (completer input s)]
-                  (-> s (complete/set-input (or completed input))
-                        (update :mini dissoc :sel)))
-      :else s)))
-
-(defn- mini-refresh-candidates
-  "Run the completer with the current minibuffer text and stash matches on
-   :mini. Called after every keystroke so candidates narrow live as the
-   user types — no TAB needed. Map completers are asynchronous: they only
-   record the input here, and `complete/tick!` fills the candidates."
-  [s]
-  (let [{:keys [completer candidates sel] :as mini} (:mini s)
-        input (str (:text (cur s)))]
-    (cond
-      (map? completer) (cond-> (assoc-in s [:mini :input] input)
-                         (not= input (:input mini ""))
-                         (update :mini dissoc :for :sel :candidates :tab-pending?))
-      (and completer (not= input (get candidates sel)))
-      (update s :mini #(-> % (assoc :candidates (vec (:candidates (completer input s))))
-                             (dissoc :sel)))
-      :else s)))
-
-(declare handle-key completion-item-for)
+(declare handle-key)
 
 ;; --- Buffer props ---
 
@@ -771,13 +667,15 @@
   "`!` answer: save every modified file buffer, discard the rest, then quit.
    A failed save cancels the quit rather than losing the buffer."
   [s names]
-  (let [files (filter #(:file (cmd/buf s %)) names)
-        s     (reduce (fn [s n] (save-buffer-named s n)) s files)]
-    ;; Bufferless buffers are discarded by `!`; only a failed file save
-    ;; cancels the quit.
-    (if (some #(:modified (cmd/buf s %)) files)
-      (msg s "Quit canceled: a buffer could not be saved")
-      (quit-finish s))))
+  (let [files (filter #(:file (cmd/buf s %)) names)]
+    (-> (reduce save-buffer-named s files)
+        (api/after-command
+          (fn [publish!]
+            (publish! (fn [s]
+                        (if (some #(:modified (cmd/buf s %)) files)
+                          (msg s "Quit canceled: a buffer could not be saved")
+                          (quit-finish s)))))))))
+
 
 (defn- quit-ask
   "Ask about one modified buffer at a time. `y` saves (or discards a buffer
@@ -789,10 +687,13 @@
         (mini-start s (str "Save " b "? (y/n/!) ")
           (fn [s ans]
             (case (str/lower-case (str/trim ans))
-              "y" (let [s (save-buffer-named s n)]
-                    (if (:modified (cmd/buf s n))
-                      (msg s (str "Quit canceled: " b " was not saved"))
-                      (quit-ask s more)))
+              "y" (-> (save-buffer-named s n)
+                      (api/after-command
+                        (fn [publish!]
+                          (publish! (fn [s]
+                                      (if (:modified (cmd/buf s n))
+                                        (msg s (str "Quit canceled: " b " was not saved"))
+                                        (quit-ask s more)))))))
               "n" (quit-ask s more)
               "!" (quit-save-all s names)
               (msg s "Quit canceled"))))
@@ -867,7 +768,9 @@
     (let [window (get-in (:windows s) path)
           viewport (get viewports path)]
       (when (or (nil? viewports)
-                (and (= (:buffer window) (:buffer viewport)) (= rect (:rect viewport))))
+                (and (= (:buffer window) (:buffer viewport)) (= rect (:rect viewport))
+                     (or (nil? (:version viewport))
+                         (= (:version viewport) (:version (cmd/buf s (:buffer window)))))))
         [path rect (or viewport window)]))))
 
 (defn- click-point
@@ -882,19 +785,18 @@
         content (:text b)
         scroll (:scroll viewport 0)
         hscroll (:hscroll viewport 0)
-        c (max 0 (- c (get-in b [:gutter :width] 0)))]
+        gutter (:gutter-width viewport (get-in b [:gutter :width] 0))]
     (when (< r body-rows)
       (let [point-line (gap/line-of content (:point b))
-            folds (fold/effective (fold/collapsed-ranges buffer b) point-line)
-            first-visible (fold/visible-before folds (fold/visible-start folds (gap/line-of content scroll)))
+            folds (or (:folds viewport) (fold/effective (fold/collapsed-ranges buffer b) point-line))
+            first-visible (view/display-row folds (gap/line-of content scroll))
             line (fold/line-at-display folds (+ first-visible r))
-            glyph-col (if (pos? hscroll) (+ hscroll (max 0 (dec c))) c)]
+            glyph-col (max 0 (- c (view/text-column gutter hscroll)))]
         (if (> line (dec (gap/line-count content)))
           (count content)
-          (text/pos-at-col content
-                           (gap/nth-line-start content line)
-                           (gap/nth-line-end content line)
-                           glyph-col))))))
+          (let [end (gap/nth-line-end content line)
+                left (view/visible-line-start content (gap/nth-line-start content line) end hscroll)]
+            (text/pos-at-col content left end glyph-col)))))))
 
 (defn- mouse-click
   "Left press: select the clicked window, then put point under the click.
@@ -913,15 +815,15 @@
     s))
 
 (defn- mouse-scroll [s {:keys [direction] :as event}]
-  (if-let [[path rect {:keys [buffer scroll]}] (mouse-window s event)]
+  (if-let [[path rect {:keys [buffer scroll folds]}] (mouse-window s event)]
     (let [wp (into [:windows] path)
           {:keys [text point mode] :as b} (cmd/buf s buffer)
           body-rows (dec (:rows rect))]
       (if (or (<= body-rows 0) (= mode :terminal-mode))
         s
         (let [point-line (gap/line-of text point)
-              folds (fold/effective (fold/collapsed-ranges buffer b) point-line)
-              row-at (fn [line] (fold/visible-before folds (fold/visible-start folds line)))
+              folds (or folds (fold/effective (fold/collapsed-ranges buffer b) point-line))
+              row-at #(view/display-row folds %)
               top (row-at (gap/line-of text (or scroll 0)))
               last-top (max 0 (- (fold/visible-count folds (gap/line-count text)) body-rows))
               new-top (-> (+ top (if (= direction :up) -3 3)) (max 0) (min last-top))
@@ -1108,7 +1010,7 @@
   "M-x entry point: prompt for a stored macro name and replay it."
   [s]
   (let [candidates (sort (keys (:named-macros s)))
-        completer (fn [input _s] (complete-prefix input candidates))]
+        completer (fn [input _s] (mini/complete-prefix input candidates))]
     (mini-start s "Macro name: " execute-kbd-macro completer)))
 
 ;; --- Help (C-h) ---
@@ -1211,28 +1113,18 @@
   (let [l (gap/line-of text i)]
     {:line l :character (- i (gap/nth-line-start text l))}))
 
-(defn- lsp-range-offsets
-  "Char offsets for an LSP range within `text`."
-  [text {:keys [start end]}]
-  (let [n (gap/line-count text)
-        clamp-line (fn [l] (min (max 0 (long l)) (dec n)))
-        base (fn [l c] (+ (gap/nth-line-start text (clamp-line l)) (max 0 (long c))))]
-    [(base (:line start) (:character start))
-     (base (:line end) (:character end))]))
-
 (defn- completion-replacement
   "Compute [from to text caret] for accepting `item` with `prefix` at point."
   [s item prefix p]
-  (let [b (cur s)
-        text (str (or (:insertText item) (:label item)))
-        [text caret] (if (and (:insertTextFormat item)
-                              (== 2 (long (:insertTextFormat item))))
+  (let [edit (:textEdit item)
+        range (lsp/range->offsets (:text (cur s)) (:range edit))
+        [from to] (or range [(- p (count prefix)) p])
+        text (buf/normalize-eol
+               (str (or (when range (:newText edit)) (:insertText item) (:label item))))
+        [text caret] (if (= 2 (:insertTextFormat item))
                        (snippet/expand text)
                        [text nil])]
-    (if-let [te (:textEdit item)]
-      (let [[from to] (lsp-range-offsets (:text b) (:range te))]
-        [from to (str (or (:newText te) text)) caret])
-      [(- p (count prefix)) p text caret])))
+    [from to text caret]))
 
 (defn complete-symbol-at-point
   "C-c i: complete the symbol at point asynchronously from buffers and the
@@ -1241,15 +1133,15 @@
   [s]
   (let [b (cur s) p (:point b)
         source (:buf s)
-        path (:file b) version (:version b)
+        version (:version b)
         prefix (symbol-prefix (:text b) p)
         {:keys [line character]} (offset->pos (:text b) p)
         ch character]
     (mini-start s "Complete: "
       (fn [s chosen]
         (let [b (cur s)
-              item (when path (completion-item-for path version line ch chosen))]
-          (if (and (= source (:buf s)) (= p (:point b))
+              item (get (complete/document-items b [line ch]) chosen)]
+          (if (and (= source (:buf s)) (= version (:version b)) (= p (:point b))
                    (= prefix (gap/substr (:text b) (- p (count prefix)) p)))
             (if item
               (let [[from to repl caret] (completion-replacement s item prefix p)]
@@ -1343,14 +1235,14 @@
         uri   (or (:uri loc) (:targetUri loc))
         range (or (:range loc) (:targetRange loc))]
     (when (and uri range)
-      (let [line (max 0 (get-in range [:start :line] 0))
-            ch   (max 0 (get-in range [:start :character] 0))]
-        (swap! editor
-               (fn [s]
-                 (let [s  (find-file s (lsp/uri->path uri))
-                       t  (:text (cur s))
-                       ln (min line (dec (gap/line-count t)))]
-                   (cmd/goto-char s (+ (gap/nth-line-start t ln) ch)))))))))
+      (swap! editor
+             (fn [s]
+               (let [s (find-file s (lsp/uri->path uri))
+                     t (:text (cur s))]
+                 (if-let [offset (lsp/position->offset t (:start range))]
+                   (cmd/goto-char s offset)
+                   s)))))))
+
 
 (defn- lsp-position-request [s request on-result]
   (lsp-request-at-point s
@@ -1385,84 +1277,75 @@
 
 ;; --- Workspace edits (rename, code actions, formatting) ---
 
-(defn- text-for-path
-  "Current text of `path` as a `gap/Text` (what LSP offset conversion needs):
-   the open buffer, else the file on disk."
-  [s path]
-  (if-let [b (some (fn [[_ b]] (when (= path (:file b)) b)) (:bufs s))]
-    (:text b)
-    (let [f (java.io.File. ^String path)]
-      (when (.exists f)
-        (try (gap/of (slurp f :encoding "UTF-8")) (catch Exception _ nil))))))
-
-(defn- apply-edit-group
-  [s {:keys [path edits]}]
-  (let [s (if (contains? (:bufs s) path) s (find-file s path))]
-    (if (contains? (:bufs s) path)
-      (update-in s [:bufs path]
-                 (fn [b] (reduce (fn [b {:keys [from to text]}]
-                                   (buf/edit b from to text))
-                                 b edits)))
-      s)))
-
 (defn- canonical-path
-  "Buffers are keyed by canonical path (`file-info`), LSP edits carry the raw
-   one; compare and store with this so a symlink cannot miss a buffer."
+  "Buffers are keyed by canonical path, but LSP edits may carry a symlink."
   ^String [^String p]
   (try (.getCanonicalPath (java.io.File. p)) (catch Exception _ p)))
 
-(defn- write-edited-file!
-  "Write a file the edit created in memory (it was not open before). Writes only
-   while the disk still holds the text the edit was computed from: a concurrent
-   external change wins and the buffer stays modified for review. Returns true
-   when the file was written."
-  [path ^String original]
-  (let [p (canonical-path path)
-        b (get-in @editor [:bufs p])
-        f (java.io.File. p)
-        disk (try (slurp f :encoding "UTF-8") (catch Exception _ nil))]
-    (cond
-      (nil? b)
-      (do (log/log "workspace edit: no buffer for" p) false)
+(defn- workspace-buffer-key [state path]
+  (or (when (contains? (:bufs state) path) path)
+      (some (fn [[key b]] (when (= (:file b) path) key)) (:bufs state))))
 
-      (not= disk original)
-      (do (log/log "workspace edit: disk changed, left in buffer:" p) false)
+(defn- workspace-source [state path]
+  (if-let [key (workspace-buffer-key state path)]
+    (let [b (cmd/buf state key)]
+      {:key key :buffer b :text (:text b)})
+    (try
+      (let [{:keys [raw text line-ending]} (persist/read-file path)
+            b (assoc (buf/make (.getName (java.io.File. ^String path)) text path)
+                     :line-ending line-ending)]
+        {:key path :expected raw :buffer b :text (:text b)})
+      (catch Exception e
+        (log/log "workspace edit read failed:" path (.getMessage e))
+        nil))))
 
-      :else
-      (try
-        (spit f (str (:text b)) :encoding "UTF-8")
-        (session/note-saved! p (:version b))
-        (swap! editor assoc-in [:bufs p :modified] false)
-        true
-        (catch Exception e
-          (log/log "workspace edit write failed:" p (.getMessage e))
-          false)))))
+(defn- workspace-source-current? [state path {:keys [key buffer expected]}]
+  (if expected
+    (nil? (workspace-buffer-key state path))
+    (same-buffer-version? (cmd/buf state key) buffer)))
+
+(defn- apply-edit-group [state {:keys [path edits source]}]
+  (if (workspace-source-current? state path source)
+    (let [state (if (:expected source)
+                  (-> (open-buf state path (:buffer source))
+                      (bump-recentf path))
+                  state)]
+      (update-in state [:bufs (:key source)]
+                 (fn [b] (reduce (fn [b {:keys [from to text]}]
+                                   (buf/edit b from to text))
+                                 b edits))))
+    state))
 
 (defn apply-workspace-edit!
-  "Apply a WorkspaceEdit to open buffers (opening files as needed). Files that
-   were not open are written to disk, like every other IDE's multi-file rename;
-   open buffers keep their edits in memory so the user saves them."
+  "Apply a WorkspaceEdit to open buffers, writing previously unopened files
+   only if their source on disk still matches the bytes used for the edit."
   [edit]
-  (let [originals (atom {})
-        groups (->> (lsp/workspace-edits
-                      edit
-                      (fn [path]
-                        (let [p (canonical-path path)
-                              t (text-for-path @editor p)]
-                          (swap! originals assoc p (some-> t str))
-                          t)))
-                    (mapv (fn [g] (update g :path canonical-path))))
-        open-before (into #{} (keep :file) (vals (:bufs @editor)))]
+  (let [initial @editor
+        source (memoize #(workspace-source initial %))
+        groups (->> (lsp/workspace-edits edit #(:text (source (canonical-path %))))
+                    (reduce (fn [groups {:keys [path edits]}]
+                              (update groups (canonical-path path) (fnil into []) edits))
+                            {})
+                    (mapv (fn [[path edits]]
+                            {:path path :edits (sort-by :from > edits) :source (source path)})))]
     (if (empty? groups)
       (swap! editor msg "No edits to apply")
-      (do
-        (swap! editor (fn [s] (reduce apply-edit-group s groups)))
-        (let [written (count (filter (fn [{:keys [path]}]
-                                       (and (not (contains? open-before path))
-                                            (write-edited-file! path (get @originals path))))
-                                     groups))]
-          (swap! editor msg (str "Applied edits in " (count groups) " file(s)"
-                                 (when (pos? written) (str ", " written " written)")))))))))
+      (let [[before after] (swap-vals! editor #(reduce apply-edit-group % groups))
+            applied (filter #(workspace-source-current? before (:path %) (:source %)) groups)
+            written (count (filter (fn [{:keys [path source]}]
+                                     (when-let [expected (:expected source)]
+                                       (try
+                                         (write-buffer! (fn [f] (swap! editor f)) path
+                                                        (cmd/buf after path) expected)
+                                         true
+                                         (catch Exception e
+                                           (log/log "workspace edit write failed:" path (.getMessage e))
+                                           false))))
+                                   applied))]
+        (swap! editor msg (str "Applied edits in " (count applied) " file(s)"
+                               (when (pos? written) (str ", " written " written"))
+                               (when (< (count applied) (count groups))
+                                 " (some buffers changed)")))))))
 
 (defn- apply-code-action!
   [sess action]
@@ -1512,7 +1395,7 @@
                                (do (apply-code-action! sess a) st)
                                st))
                            (fn [input _]
-                             (complete-prefix input (map :title actions))))))))))
+                             (mini/complete-prefix input (map :title actions))))))))))
         state))))
 
 (defn- show-signature [{:keys [signatures activeSignature]}]
@@ -1607,78 +1490,21 @@
 ;; request and returns the cached hits (usually none); when the reply lands we
 ;; stash it and nudge the minibuffer to re-run its sources, which now hit the
 ;; cache. So a slow server only delays the *list*, never a keystroke.
-(defonce ^:private comp-cache (atom {}))     ; path -> {:v version :pos {[line ch] {label item}}}
-(defonce ^:private comp-inflight (atom {}))  ; [path version line ch] -> millis
+(defn lsp-completion-source [prefix {:keys [state]}]
+  (if-let [{:keys [root-id root language argv]} (lsp-session state)]
+    (cond
+      (not (lsp/server-exists? root-id))
+      (do (lsp/ensure! root-id argv root (:id language) (fn [_])) [])
 
-(def ^:private comp-inflight-ttl-ms 5000)
+      (lsp/ready? root-id)
+      (let [line (cmd/line-idx state)
+            ch (char-col state)
+            file (:file (cur state))]
+        (complete/document-candidates! editor state [line ch] prefix
+          #(lsp/completion root-id file line ch %)))
 
-(defn- cached-completion [path version line ch prefix]
-  (let [{:keys [v pos]} (get @comp-cache path)]
-    (when (and (= v version) (contains? pos [line ch]))
-      (->> (keys (get pos [line ch]))
-           (filter #(complete/prefix-match? prefix %))
-           vec))))
-
-(defn completion-item-for
-  "The raw LSP completion item for `label` at this document version and
-   position, if any. Used on accept to honour insertText/textEdit/snippets;
-   looking it up by position avoids picking a same-named item from another
-   completion request."
-  [path version line ch label]
-  (let [{:keys [v pos]} (get @comp-cache path)]
-    (when (= v version)
-      (get-in pos [[line ch] label]))))
-
-(defn- remember-completion! [path version line ch items]
-  (let [by-label (into {} (keep (fn [i] (when-let [l (:label i)] [l i])) items))]
-    (swap! comp-cache
-           (fn [m]
-             (if (= version (:v (get m path)))
-               (assoc-in m [path :pos [line ch]] by-label)
-               (assoc m path {:v version :pos {[line ch] by-label}}))))))
-
-(defn- refresh-completion!
-  "Make complete/tick! re-run the active minibuffer's sources so a freshly
-   cached LSP reply becomes visible."
-  []
-  (swap! editor (fn [s] (if (:mini s) (assoc-in s [:mini :for] ::stale) s))))
-
-(defn lsp-completion-source
-  "M4 completion source backed by the project's LSP server. Never blocks."
-  [prefix ctx]
-  (let [state (:state ctx)
-        b     (cmd/cur state)
-        l     (:language b)]
-    (if (and (:file b) l (:lsp l) (lsp-session state))
-      (let [{:keys [root-id]} (lsp-session state)
-            path     (:file b)
-            version  (or (:version b) 0)
-            line     (cmd/line-idx state)
-            ch       (char-col state)
-            key      [path version line ch]
-            cached   (cached-completion path version line ch prefix)
-            inflight (when-let [t (get @comp-inflight key)]
-                       (< (- (System/currentTimeMillis) t) comp-inflight-ttl-ms))]
-        (cond
-          (not (lsp/server-exists? root-id))
-          (do (when-let [{:keys [root argv language]} (lsp-session state)]
-                (lsp/ensure! root-id argv root (:id language) (fn [_])))
-              [])
-
-          (not (lsp/ready? root-id)) []
-          (or inflight cached)       cached
-          :else
-          (do
-            (swap! comp-inflight assoc key (System/currentTimeMillis))
-            (lsp/completion root-id path line ch
-                            (fn [res]
-                              (let [items  (cond (map? res)    (:items res)
-                                                 (vector? res) res)]
-                                (remember-completion! path version line ch items)
-                                (swap! comp-inflight dissoc key)
-                                (refresh-completion!))))
-            [])))
-      [])))
+      :else [])
+    []))
 
 (defn- project-search
   "C-x p g: run rg over the project as a job; RET on a hit opens it."
@@ -1936,7 +1762,7 @@
           (msg s (str "Unknown theme. Available: "
                       (str/join ", " (view/theme-names)))))))
     (fn [input _]
-      (complete-prefix input (map clojure.core/name (view/theme-names))))))
+      (mini/complete-prefix input (map clojure.core/name (view/theme-names))))))
 
 ;; --- Config reload ---
 
@@ -2060,7 +1886,7 @@
    "imenu"                       (cmd-entry imenu "List definitions in the current buffer.")
    "reload-config"               (cmd-entry reload-config "Re-run ~/.nesmacs/init.clj.")
    "hub"                         (cmd-entry packagehub/open "Explore and manage editor extensions.")
-   "package-catalog"             (cmd-entry #(packagehub/set-source % mini-start) "Set the extension catalog URL or file.")
+   "package-catalog"             (cmd-entry packagehub/set-source "Set the extension catalog URL or file.")
    "package-update-all"          (cmd-entry packagehub/update-all "Check for and stage all installed package updates.")
    "package-upgrade-all"         (cmd-entry packagehub/update-all "Check for and stage all installed package updates.")
    "terminal"                    (cmd-entry terminal-open "Open a terminal buffer running $SHELL.")
@@ -2110,7 +1936,7 @@
 (defn- command-completer
   "Tab-complete command names. Returns {:completed str :candidates [str]}."
   [input s]
-  (complete-prefix input (command-names s)))
+  (mini/complete-prefix input (command-names s)))
 
 (defn execute-extended-command
   "Look up and invoke a named command. M-x entry point."
@@ -2131,7 +1957,7 @@
 ;; --- Bookmarks (named, persisted positions) ---
 
 (defn- bookmark-completer [input s]
-  (complete-prefix input (sort (map str (keys (:bookmarks s))))))
+  (mini/complete-prefix input (sort (map str (keys (:bookmarks s))))))
 
 (defn- bookmark-set-1 [s name]
   (let [n (str/trim name)]
@@ -2139,8 +1965,8 @@
       s
       (let [bookmarks (assoc (:bookmarks s) n
                              {:buf (:buf s) :pos (:point (cur s))})]
-        (persist/save-quiet! "bookmarks" bookmarks)
         (-> s (assoc :bookmarks bookmarks)
+              (api/persist-setting :bookmarks)
               (msg (str "Bookmark " n " saved")))))))
 
 (defn- bookmark-jump-1 [s name]
@@ -2161,7 +1987,7 @@
 ;; --- Recentf ---
 
 (defn- recentf-completer [input s]
-  (complete-prefix input (:recentf s)))
+  (mini/complete-prefix input (:recentf s)))
 
 (defn recentf-open [s]
   (mini-start s "Recent file: " find-file recentf-completer))
@@ -2218,7 +2044,7 @@
                \v (prompt "Describe variable: " describe-variable)}
       [:ctrl \c] cx-c-map
 [:ctrl \x] {[:ctrl \s] save-buffer
-               [:ctrl \f] (prompt "Find file: " find-file file-completer)
+               [:ctrl \f] (prompt "Find file: " find-file mini/file-completer)
                [:ctrl \b] buflist/open
                [:ctrl \c] confirm-quit
                [:ctrl \x] exchange-point-and-mark
@@ -2226,7 +2052,7 @@
                [:ctrl \l] downcase-region
                [:ctrl \t] transpose-lines
                \b         (prompt "Buffer: " switch-buffer)
-               \d         (prompt "Dired: " dired/open file-completer)
+               \d         (prompt "Dired: " dired/open mini/file-completer)
                \h         mark-whole-buffer
                \k         (prompt "Kill buffer: " kill-buffer)
                \r         cx-r-map
@@ -2257,13 +2083,19 @@
    [:ctrl \q] confirm-quit
    [:ctrl \r] terminal/restart})
 
-(def ^:private mini-keys
-  {:return   mini-accept
-   [:meta \p] mini-history-prev
-   [:meta \n] mini-history-next
-   [:ctrl \n] mini-next-candidate
-   [:ctrl \p] mini-prev-candidate
-   :tab      mini-tab-complete})
+(defn- dispatch-binding [s key binding prefixed?]
+  (cond
+    (map? binding) (assoc s :pending binding)
+    (fn? binding) (cond-> (binding s)
+                    (not= binding universal-argument) (dissoc :prefix-arg))
+    prefixed? (if (= key [:ctrl \g])
+                (keyboard-quit (dissoc s :prefix-arg))
+                (msg s (str "prefix " key (if binding " not a command" " undefined"))))
+    :else (dissoc (cond
+                    (char? key) (if (>= (int key) 32) (self-insert s key) s)
+                    (string? key) (self-insert s key)
+                    :else (msg s (str key " undefined")))
+                  :prefix-arg)))
 
 (defn handle-key
   "Pure state transition. Handles prefix keys via :pending state.
@@ -2291,18 +2123,7 @@
 
              ;; pending prefix — resolve second key
              (:pending s)
-             (let [prefix-map (:pending s) s (dissoc s :pending)]
-               (if-let [cmd (get prefix-map key)]
-                 (cond
-                   ;; nested prefix (e.g. C-x r → C-x r SPC)
-                   (map? cmd) (assoc s :pending cmd)
-                   ;; The command consumes :prefix-arg just like a direct
-                   ;; dispatch would; strip it here so `C-u 4 C-x C-s` works.
-                   (fn? cmd)  (dissoc (cmd s) :prefix-arg)
-                   :else      (msg s (str "prefix " key " not a command")))
-                 (if (= key [:ctrl \g])
-                   (keyboard-quit (dissoc s :prefix-arg))
-                   (msg s (str "prefix " key " undefined")))))
+             (dispatch-binding (dissoc s :pending) key (get (:pending s) key) true)
 
              (:query-replace s)
              (let [h (get qr-keys key)] ((or h qr-exit) s))
@@ -2310,7 +2131,7 @@
              (:isearch s) (handle-isearch s key)
 
              ;; minibuffer-scoped keys
-             (and (:mini s) (mini-keys key)) ((mini-keys key) s)
+             (and (:mini s) (mini/keymap key)) ((mini/keymap key) s)
 
              ;; Terminal char mode: every key goes to the process except C-c,
              ;; the editor prefix. C-c C-x opens the normal C-x map so quitting,
@@ -2329,24 +2150,10 @@
                         {:num (+ (* 10 (or (:num pa) 0))
                                  (- (int key) (int \0)))})
                  :else
-                 (let [binding (resolve-binding s key)
-                       s' (cond
-                            (map? binding) (assoc s :pending binding)
-                            (fn? binding)  (binding s)
-                            (char? key)    (if (>= (int key) 32) (self-insert s key) s)
-                            (string? key)  (self-insert s key)
-                            :else          (msg s (str key " undefined")))]
-                   ;; Only drop :prefix-arg when a command actually ran.
-                   ;; When we stashed a prefix keymap into :pending, the
-                   ;; prefix-arg still belongs to the upcoming command.
-                   (cond-> s'
-                     (and pa
-                          (not (map? binding))
-                          (not= binding universal-argument))
-                     (dissoc :prefix-arg))))))]
+                 (dispatch-binding s key (resolve-binding s key) false))))]
     ;; Refresh live-filter candidates while a minibuffer is active.
     (cond-> s'
-      (:mini s') mini-refresh-candidates)))
+      (:mini s') mini/refresh-candidates)))
 
 ;; --- Main ---
 
@@ -2360,39 +2167,42 @@
       (log/log "command error:" (.getMessage e))
       (msg-error s "Command error" e))))
 
+(defn- render-terminal! []
+  ;; CAS the scroll writeback against the rendered snapshot so a concurrent
+  ;; mutation (nREPL/web) doesn't clobber the other thread's update.
+  (let [snapshot @editor
+        {:keys [sig cur-scroll cur-hscroll font-lock-updates viewports]}
+        (view/render snapshot)
+        wp (cmd/cur-window-path snapshot)
+        with-cache
+        (reduce-kv
+          (fn [acc buf-name {:keys [version font-lock font-lock-window]}]
+            (if (= version (get-in acc [:bufs buf-name :version]))
+              (-> acc
+                  (assoc-in [:bufs buf-name :font-lock] font-lock)
+                  (assoc-in [:bufs buf-name :font-lock-window] font-lock-window))
+              acc))
+          (assoc snapshot :render-sig sig)
+          (or font-lock-updates {}))
+        updated (cond-> with-cache
+                  (some? cur-scroll)  (assoc-in (conj wp :scroll) cur-scroll)
+                  (some? cur-hscroll) (assoc-in (conj wp :hscroll) cur-hscroll))]
+    (compare-and-set! editor snapshot updated)
+    viewports))
+
 (defn command-loop [{:keys [active? input! render!]}]
-  (loop []
+  (loop [last-viewports nil]
     (when-let [[rows cols] (t/apply-pending-resize!)]
       (swap! editor assoc :rows rows :cols cols))
-    ;; CAS the scroll writeback against the rendered snapshot so a concurrent
-    ;; mutation (nREPL/web) doesn't clobber the other thread's update.
-    (let [snapshot @editor
-          {:keys [sig cur-scroll cur-hscroll font-lock-updates]}
-          (view/render snapshot)
-          wp (cmd/cur-window-path snapshot)
-          with-cache
-          (reduce-kv
-            (fn [acc buf-name {:keys [version font-lock font-lock-window]}]
-              (if (= version (get-in acc [:bufs buf-name :version]))
-                (-> acc
-                    (assoc-in [:bufs buf-name :font-lock] font-lock)
-                    (assoc-in [:bufs buf-name :font-lock-window] font-lock-window))
-                acc))
-            (assoc snapshot :render-sig sig)
-            (or font-lock-updates {}))
-          updated (cond-> with-cache
-                    (some? cur-scroll)  (assoc-in (conj wp :scroll) cur-scroll)
-                    (some? cur-hscroll) (assoc-in (conj wp :hscroll) cur-hscroll))]
-      (compare-and-set! editor snapshot updated))
-    (let [key (t/read-key-timeout (if (and active? (active?)) 16 100))]
+    (let [viewports (or (render-terminal!) last-viewports)
+          key (t/read-key-timeout (if (and active? (active?)) 16 100))]
       (when key
-        (let [kill-before (peek (:kill @editor))]
-          (swap! editor run-key key)
-          ;; Clipboard is a boundary side effect, so it stays out of the
-          ;; pure commands and out of tests.
-          (when (and (seq (:kill @editor))
-                     (not= kill-before (peek (:kill @editor))))
-            (t/set-clipboard! (peek (:kill @editor))))))
+        (let [event (if (and (map? key) (= :mouse (:type key)))
+                      (assoc key :viewports viewports)
+                      key)
+              [before after] (swap-vals! editor run-key event)]
+          (when-let [clip (cmd/new-clipboard-text before after)]
+            (t/set-clipboard! clip))))
       ;; Persist text edits since the last command, not just on the 5s
       ;; snapshot: this is what makes kill -9 lose at most the command in
       ;; flight. Runs outside swap! because it does IO.
@@ -2417,7 +2227,7 @@
       (testres/tick! editor)
       (gitcommit/tick! editor)
       (dap/tick! editor)
-      (deferred/tick! editor comp-cache)
+      (deferred/tick! editor)
       (packagehub/tick! editor)
       (view/use-theme! (:theme @editor))
       (when (and render! (not (:exit @editor))) (render!))
@@ -2426,7 +2236,7 @@
         ;; is only deleted after that write succeeds.
         (when (session/save-session! @editor)
           (session/discard-journal!)))
-      (when-not (:exit @editor) (recur)))))
+      (when-not (:exit @editor) (recur viewports)))))
 
 (defn- run-all
   "Run each no-arg fn, logging and continuing on failure."
@@ -2462,12 +2272,12 @@
       (mode/register :gitcommit-mode :major :keymap gitcommit/gitcommit-keymap
                      :hint "C-c C-c commit  |  C-c C-k abort")
       (mode/register :packagehub-mode :major
-                     :keymap {:return #(packagehub/select-entry % mini-start)
+                     :keymap {:return packagehub/select-entry
                               :tab packagehub/switch-view
-                              \/ #(packagehub/search % mini-start)
+                              \/ packagehub/search
                               \g packagehub/refresh-catalog
                               \U packagehub/update-all
-                              \s #(packagehub/set-source % mini-start)
+                              \s packagehub/set-source
                               \q packagehub/back}
                      :hint "RET select  U update all  TAB views  / search  g refresh  s catalog  q back")))
 

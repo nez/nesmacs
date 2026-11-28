@@ -5,6 +5,7 @@
             [nesmacs.complete :as complete]
             [nesmacs.listbuf :as listbuf]
             [nesmacs.log :as log]
+            [nesmacs.mini :as mini]
             [nesmacs.packages :as packages]
             [nesmacs.props :as props]))
 
@@ -160,22 +161,22 @@
     (show-list s)
     (cmd/remove-buffer s buffer-name (get-in s [:packages :return-to]))))
 
-(defn search [s mini-start]
-  (mini-start s "Search packages (blank clears): "
+(defn search [s]
+  (mini/start s "Search packages (blank clears): "
               (fn [st input]
                 (-> st
                     (assoc-in [:packages :query] (str/trim input))
                     show-list))))
 
-(defn set-source [s mini-start]
-  (mini-start s "Catalog URL or file: "
+(defn set-source [s]
+  (mini/start s "Catalog URL or file: "
               (fn [st input]
                 (if (str/blank? input)
                   (cmd/msg st "Catalog unchanged")
                   (queue st {:action :catalog :source (str/trim input)})))))
 
-(defn- choose [s mini-start prompt choices on-done]
-  (mini-start s prompt
+(defn- choose [s prompt choices on-done]
+  (mini/start s prompt
               (fn [st input]
                 (if-let [choice (some #{input} choices)]
                   (on-done st choice)
@@ -185,25 +186,25 @@
                   {:candidates matches
                    :completed (if (= 1 (count matches)) (first matches) input)}))))
 
-(defn- option-value [s mini-start id {:keys [key label type choices default]} record]
+(defn- option-value [s id {:keys [key label type choices default]} record]
   (let [request {:action :configure :id id :option key}
         current (get (:options record) key default)
         save (fn [st value] (queue st (assoc request :value value)))
         prompt (str label ": ")]
     (case type
-      :boolean (choose s mini-start prompt ["true" "false"] #(save %1 (= "true" %2)))
-      :choice (choose s mini-start prompt choices save)
-      :string (-> (mini-start s prompt save) (complete/set-input current)))))
+      :boolean (choose s prompt ["true" "false"] #(save %1 (= "true" %2)))
+      :choice (choose s prompt choices save)
+      :string (-> (mini/start s prompt save) (complete/set-input current)))))
 
-(defn- configure [s mini-start id record]
+(defn- configure [s id record]
   (let [options (get-in record [:manifest :options])
         names (into {} (map #(vector (subs (str (:key %)) 1) %)) options)]
     (if (= 1 (count options))
-      (option-value s mini-start id (first options) record)
-      (choose s mini-start "Package option: " (sort (keys names))
-              (fn [st option] (option-value st mini-start id (names option) record))))))
+      (option-value s id (first options) record)
+      (choose s "Package option: " (sort (keys names))
+              (fn [st option] (option-value st id (names option) record))))))
 
-(defn select-entry [s mini-start]
+(defn select-entry [s]
   (let [{:keys [id action]} (listbuf/entry-at-point s)
         detail (get-in s [:packages :detail])]
     (cond
@@ -212,9 +213,9 @@
       (let [{:keys [record available release]} (detail-row s (rows (:packages s)))
             request {:action action :id detail}]
         (case action
-          :configure (configure s mini-start detail record)
+          :configure (configure s detail record)
           :install (queue s (assoc request :checksum (:sha256 available)))
-          :remove (choose s mini-start (str "Uninstall " (:name release) "? ") ["yes" "no"]
+          :remove (choose s (str "Uninstall " (:name release) "? ") ["yes" "no"]
                           (fn [st answer] (if (= answer "yes") (queue st request) st)))
           (queue s request)))
       :else s)))

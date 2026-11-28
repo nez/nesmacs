@@ -16,6 +16,7 @@
    One server per (project root, language): a Clojure and a Python server in
    the same project must not share a handle."
   (:require [clojure.string :as str]
+            [nesmacs.buf :as buf]
             [nesmacs.gap :as gap]
             [nesmacs.lang :as lang]
             [nesmacs.proc :as proc]
@@ -211,18 +212,26 @@
 
 ;; --- Diagnostics -> props ---
 
-(defn- line-offset [text line]
-  (when (< -1 line (gap/line-count text))
-    (gap/nth-line-start text line)))
+(defn position->offset
+  "Convert an LSP UTF-16 position, clamping its column to the line."
+  [text {:keys [line character] :or {character 0}}]
+  (when (and (integer? line) (integer? character)
+             (<= 0 line) (< line (gap/line-count text)))
+    (let [start (gap/nth-line-start text line)
+          end (gap/nth-line-end text line)]
+      (+ start (min (- end start) (max 0 character))))))
 
-(defn- lsp-range->offsets [text {:keys [start end]}]
-  (when-let [s (line-offset text (:line start))]
-    (let [e (if (= (:line end) (gap/line-count text))
-              (count text)
-              (line-offset text (:line end)))]
-      (when e
-        [(+ s (:character start 0))
-         (max (+ s (:character start 0)) (+ e (:character end 0)))]))))
+(defn range->offsets
+  "Convert an LSP range to bounded offsets. The line after the last may
+   represent the end of the file in the end position."
+  [text {:keys [start end]}]
+  (let [from (position->offset text start)
+        to (if (and (= (:line end) (gap/line-count text))
+                    (integer? (:character end 0)))
+             (count text)
+             (position->offset text end))]
+    (when (and from to)
+      [from (max from to)])))
 
 (defn- diag-face [severity]
   (case severity 1 :diag-error 2 :diag-warning 3 :diag-info :diag-info))
@@ -234,7 +243,7 @@
              (fn [b]
                (let [text   (:text b)
                      ranges (for [{:keys [range severity message]} diags
-                                  :let [offs (lsp-range->offsets text range)]
+                                  :let [offs (range->offsets text range)]
                                   :when offs]
                               (props/make (first offs) (second offs)
                                           (diag-face severity)
@@ -397,9 +406,7 @@
    absolute char offsets, sorted descending so applying them in order is safe.
    `text-for` returns the current text of a path (nil if unavailable).
    File create/rename/delete operations are ignored: nesmacs does not create or
-   delete files behind the user's back. Edits for unopened files are returned
-   with their source text so the caller can write them only if the disk is
-   unchanged; see `nesmacs.ed/apply-workspace-edit!`."
+   delete files behind the user's back."
   [edit text-for]
   (when (map? edit)
     (let [pairs (concat (for [[uri edits] (:changes edit)] [uri edits])
@@ -415,10 +422,11 @@
                          {:path path
                           :edits (->> edits
                                       (keep (fn [e]
-                                              (when-let [[f t] (lsp-range->offsets text (:range e))]
-                                                {:from f :to t :text (str (or (:newText e) ""))})))
-                                      (sort-by :from >)
+                                              (when-let [[f t] (range->offsets text (:range e))]
+                                                {:from f :to t
+                                                 :text (buf/normalize-eol (str (or (:newText e) "")))})))
                                       vec)})))))
+           (filter (comp seq :edits))
            ;; A server may list the same document more than once (`:changes`
            ;; plus `:documentChanges`, or two rename entries). Merge before
            ;; sorting: otherwise the second group's offsets are applied to text

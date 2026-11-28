@@ -35,6 +35,7 @@
        :point (:point b)
        :mark (:mark b)
        :file file
+       :line-ending (:line-ending b)
        :modified (:modified b)
        :mode (:mode b)
        :version (:version b)
@@ -49,11 +50,11 @@
       term (assoc :text nil :font-lock [] :props []
                   :terminal (select-keys term [:id :argv :dir :cols :rows])))))
 
-(defn- file-text
+(defn- read-buffer-file
   "Re-read a buffer's file for restore. nil when it can no longer be read, so
    the caller drops the buffer instead of presenting empty text for a real file."
   [^String path]
-  (try (buf/normalize-eol (slurp path :encoding "UTF-8"))
+  (try (persist/read-file path)
        (catch Exception _ nil)))
 
 (defn- sanitize-terminal [t]
@@ -78,7 +79,9 @@
   (let [file (when (string? (:file d)) (:file d))
         saved (when (string? (:text d)) (:text d))
         term (sanitize-terminal (:terminal d))
-        text (or saved (some-> file file-text))]
+        disk (when (and file (or (nil? saved) (nil? (:line-ending d))))
+               (read-buffer-file file))
+        text (or saved (:text disk))]
     (when (or text (nil? file))
       ;; Text reloaded from disk may have changed since the session was saved,
       ;; so cached fontification and props no longer line up. Fontification is
@@ -86,7 +89,8 @@
       ;; starts empty when the text is reloaded from disk. Props ride along
       ;; only with session text, since their offsets would otherwise be stale.
       (let [b (-> (buf/make (:name d) (or text "") file)
-                  (assoc :modified (:modified d)
+                  (assoc :line-ending (or (:line-ending disk) (:line-ending d))
+                         :modified (:modified d)
                          :mode (:mode d)
                          :version (safe-int (:version d))
                          :edit-count (safe-int (:edit-count d))
@@ -142,8 +146,7 @@
 
 (def ^:private save-counter (atom 0))
 (def ^:private save-interval 50) ; ~5 seconds (50 * 100ms ticks)
-(def ^:private last-sig (atom nil))
-(def ^:private last-struct (atom nil))
+(def ^:private last-snapshot (atom nil))
 
 ;; Snapshots run off the editor thread. Sequence numbers make a later write
 ;; win even when two saves overlap: an older snapshot never clobbers a newer
@@ -164,7 +167,7 @@
                  [name (:version b) (:point b) (:modified b)])
                (:bufs s))
          (:windows s) (:cur-window s)
-         (:recentf s) (:bookmarks s) (:mini-history s)
+         (:recentf s) (:bookmarks s) (:mini-history s) (:theme s :default)
          (dap/snapshot-breakpoints)]))
 
 (defn- structure-signature
@@ -174,6 +177,9 @@
   [s]
   (hash [(mapv (fn [[name b]] [name (:file b)]) (:bufs s))
          (:windows s) (:cur-window s)]))
+
+(defn- snapshot-signatures [state]
+  {:signature (signature state) :structure (structure-signature state)})
 
 (defn- session-data [state]
   (let [bufs (:bufs state)]
@@ -202,12 +208,13 @@
         (persist/write-lines! journal-file kept)
         (persist/delete! journal-file)))))
 
-(defn- write-session! [session n]
+(defn- write-session! [session n signatures]
   (locking write-lock
     (when (> n @written-seq)
       (let [ok? (persist/save-quiet! session-file session)]
         (when ok?
           (reset! written-seq n)
+          (reset! last-snapshot signatures)
           (locking journal-lock
             (trim-journal! (update-vals (:bufs session) #(or (:version %) 0)))))
         ok?))))
@@ -216,7 +223,9 @@
   "Save current editor state to ~/.nesmacs/session.edn. Returns true when written.
    Called on clean exit and periodically."
   [state]
-  (write-session! (session-data state) (swap! write-seq inc)))
+  (let [n (swap! write-seq inc)
+        signatures (snapshot-signatures state)]
+    (write-session! (session-data state) n signatures)))
 
 (defn save-tick!
   "Editor-loop step: snapshot the session when the buffer/window structure
@@ -225,19 +234,16 @@
    buffer no longer stalls the command loop."
   [editor-atom]
   (let [s      @editor-atom
-        struct (structure-signature s)
-        sig    (signature s)
+        signatures (snapshot-signatures s)
+        last-saved @last-snapshot
         tick?  (>= (swap! save-counter inc) save-interval)]
     (when tick? (reset! save-counter 0))
-    (when (and (or tick? (not= struct @last-struct))
-               (or (not= sig @last-sig) (not= struct @last-struct))
+    (when (and (or tick? (not= (:structure signatures) (:structure last-saved)))
+               (not= signatures last-saved)
                (compare-and-set! save-pending? false true))
-      (reset! last-sig sig)
-      (reset! last-struct struct)
       (let [n (swap! write-seq inc)]
         (future
-          (try (let [data (session-data s)]
-                 (write-session! data n))
+          (try (write-session! (session-data s) n signatures)
                (catch Exception e
                  (log/log "session save failed:" (.getMessage e)))
                (finally (reset! save-pending? false))))))))

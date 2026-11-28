@@ -326,3 +326,38 @@
     (is (= "kept.clj" (:buf s)))
     (is (= "kept.clj" (get-in s [:windows :buffer])))
     (is (contains? (:bufs s) "kept.clj"))))
+
+(deftest failed-session-write-does-not-mark-snapshot-saved
+  (let [editor (atom (make-state))
+        saves (atom [])
+        succeed? (atom false)]
+    (with-redefs-fn {#'session/last-snapshot (atom nil)
+                     #'session/save-counter (atom 0)
+                     #'session/save-interval 2
+                     #'session/save-pending? (atom false)
+                     #'clojure.core/future-call (fn [f] (f))
+                     #'persist/save-quiet! (fn [_ snapshot]
+                                             (swap! saves conj (:theme snapshot))
+                                             @succeed?)}
+      (fn []
+        (session/save-tick! editor)
+        (reset! succeed? true)
+        (session/save-tick! editor)
+        (session/save-tick! editor)
+        (is (= [:default :default] @saves))
+        (swap! editor assoc :theme :light)
+        (session/save-tick! editor)
+        (is (= [:default :default :light] @saves))))))
+
+(deftest restores-crlf-for-clean-and-dirty-buffers
+  (let [file (java.io.File. persist/*dir* "crlf.txt")
+        path (.getCanonicalPath file)]
+    (spit file "one\r\ntwo\r\n")
+    (let [state (ed/find-file (make-state) path)]
+      (doseq [s [state (ed/edit state 0 3 "edited")]]
+        (is (session/save-session! s))
+        (let [[restored ok] (session/restore-session (make-state) (session/load-session!))
+              b (get-in restored [:bufs path])]
+          (is ok)
+          (is (= :crlf (:line-ending b)))
+          (is (= (str (get-in s [:bufs path :text])) (str (:text b)))))))))

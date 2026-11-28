@@ -9,6 +9,7 @@
             [nesmacs.cmd :as cmd]
             [nesmacs.keymap :as keymap]
             [nesmacs.mode :as mode]
+            [nesmacs.persist :as persist]
             [nesmacs.props :as props]
             [nesmacs.view :as view]))
 
@@ -48,6 +49,10 @@
    receives a function that applies a state transition to the live editor."
   [s effect]
   (update s ::effects (fnil conj []) effect))
+
+(defn persist-setting [s k]
+  (let [value (get s k)]
+    (after-command s (fn [_] (persist/save-quiet! (name k) value)))))
 
 (defn run-effects!
   "Drain committed effects on the editor thread, outside the command swap."

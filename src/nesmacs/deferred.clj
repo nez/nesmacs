@@ -9,22 +9,6 @@
             [nesmacs.job :as job]
             [nesmacs.listbuf :as listbuf]))
 
-(defn cleanup-completion-cache!
-  "Remove completion cache entries for buffer versions that are no longer
-   current. Runs from the editor loop."
-  [editor comp-cache]
-  (let [s @editor
-        current-versions (into {} (for [[_ b] (:bufs s)
-                                        :when (:file b)]
-                                    [(str (:file b)) (or (:version b) 0)]))]
-    (swap! comp-cache
-           (fn [cache]
-             (reduce-kv (fn [acc path {:keys [v pos]}]
-                          (if (= v (get current-versions path))
-                            (assoc acc path {:v v :pos pos})
-                            acc))
-                        {} cache)))))
-
 (defn start
   "Start `argv` in `dir` as a job named `job-name`. `build` runs once the job
    exits, on the editor loop."
@@ -50,7 +34,6 @@
       :else s)))
 
 (defn tick!
-  "Editor-loop step: finish deferred jobs once and clean stale completion cache."
-  [editor & [comp-cache]]
-  (when comp-cache (cleanup-completion-cache! editor comp-cache))
+  "Editor-loop step: finish deferred jobs once."
+  [editor]
   (job/consume-results! editor pending? build-result publish-result))

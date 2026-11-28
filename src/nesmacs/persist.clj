@@ -5,6 +5,8 @@
    file should never prevent the editor from starting."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.string :as str]
+            [nesmacs.buf :as buf]
             [nesmacs.log :as log])
   (:import [java.io PushbackReader]
            [java.nio.file Files StandardCopyOption]))
@@ -27,25 +29,43 @@
   "Write `s` to `path` via a sibling temp file and rename, so a crash mid-write
    can't truncate the target. Preserves POSIX permissions; removes the temp on
    failure so a read-only dir or full disk leaves no debris."
-  [^String path ^String s]
-  (let [target (.toPath (.getAbsoluteFile (java.io.File. path)))
-        parent (.getParent target)
-        tmp    (Files/createTempFile parent ".nesmacs-" ".tmp"
-                 (into-array java.nio.file.attribute.FileAttribute []))
-        nolink (into-array java.nio.file.LinkOption [])
-        done?  (atom false)]
-    (try
-      (spit (.toFile tmp) s :encoding "UTF-8")
-      (when (Files/exists target nolink)
-        (try (Files/setPosixFilePermissions tmp (Files/getPosixFilePermissions target nolink))
-             (catch UnsupportedOperationException _)))
-      (Files/move tmp target
-        (into-array [StandardCopyOption/ATOMIC_MOVE StandardCopyOption/REPLACE_EXISTING]))
-      (reset! done? true)
-      true
-      (finally
-        (when-not @done?
-          (try (Files/deleteIfExists tmp) (catch Exception _)))))))
+  ([path s] (atomic-spit path s nil))
+  ([^String path ^String s before-move]
+   (let [target (.toPath (.getAbsoluteFile (java.io.File. path)))
+         parent (.getParent target)
+         tmp    (Files/createTempFile parent ".nesmacs-" ".tmp"
+                  (into-array java.nio.file.attribute.FileAttribute []))
+         nolink (into-array java.nio.file.LinkOption [])
+         done?  (atom false)]
+     (try
+       (spit (.toFile tmp) s :encoding "UTF-8")
+       (when (Files/exists target nolink)
+         (try (Files/setPosixFilePermissions tmp (Files/getPosixFilePermissions target nolink))
+              (catch UnsupportedOperationException _)))
+       (when before-move (before-move))
+       (Files/move tmp target
+         (into-array [StandardCopyOption/ATOMIC_MOVE StandardCopyOption/REPLACE_EXISTING]))
+       (reset! done? true)
+       true
+       (finally
+         (when-not @done?
+           (try (Files/deleteIfExists tmp) (catch Exception _))))))))
+
+(defn read-file
+  "Read a UTF-8 document once, retaining the raw source for guarded writes."
+  [path]
+  (let [raw (slurp path :encoding "UTF-8")]
+    {:raw raw :text (buf/normalize-eol raw) :line-ending (buf/detect-eol raw)}))
+
+(defn write-file!
+  "Atomically write normalized document text using its original line ending.
+   When supplied, expected is the raw disk text used to derive the edit."
+  ([path text line-ending] (write-file! path text line-ending nil))
+  ([path text line-ending expected]
+   (atomic-spit path (if (= :crlf line-ending) (str/replace text "\n" "\r\n") text)
+                (when (some? expected)
+                  #(when (not= expected (slurp path :encoding "UTF-8"))
+                     (throw (ex-info "File changed on disk" {:path path})))))))
 
 (defn load!
   "Read EDN from name; return default on any failure."

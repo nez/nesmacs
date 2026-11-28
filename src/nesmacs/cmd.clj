@@ -93,6 +93,10 @@
    (if (:read-only (cur s))
      (assoc s :msg "Buffer is read-only")
      (update-cur s #(buf/edit % from to repl separate-undo?)))))
+(defn new-clipboard-text [before after]
+  (let [text (peek (:kill after))]
+    (when (not= text (peek (:kill before))) text)))
+
 (defn msg [s m] (assoc s :msg m))
 (defn msg-error [s prefix ^Throwable e] (msg s (str prefix ": " (.getMessage e))))
 

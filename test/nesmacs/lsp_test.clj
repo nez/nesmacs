@@ -2,6 +2,7 @@
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing]]
             [nesmacs.buf :as buf]
+            [nesmacs.complete :as complete]
             [nesmacs.ed :as ed]
             [nesmacs.gap :as gap]
             [nesmacs.lsp :as lsp]))
@@ -84,41 +85,24 @@
            :msg nil}]
     (is (= "No language server for this file" (:msg (ed/lsp-hover s))))))
 
-(deftest diagnostic-ranges-clamp-at-end-and-drop-stale
-  (let [offs (deref #'nesmacs.lsp/lsp-range->offsets)
-        text (gap/of "abc\ndef\n")]
-    (is (= [4 7] (offs text {:start {:line 1 :character 0}
-                             :end   {:line 1 :character 3}})))
-    (testing "end line == line-count means end of text"
-      (is (= [4 8] (offs text {:start {:line 1 :character 0}
-                               :end   {:line 3 :character 0}}))))
-    (testing "a stale range beyond the text is dropped, not misapplied"
-      (is (nil? (offs text {:start {:line 5 :character 0}
-                            :end   {:line 6 :character 0}}))))))
-
-;; The completion cache is what makes LSP completion non-blocking; guard it.
-(deftest completion-cache-filters-and-resets-on-version
-  (let [remember (deref #'nesmacs.ed/remember-completion!)
-        cached   (deref #'nesmacs.ed/cached-completion)
-        path     "/lsp-cache-test/x.clj"]
-    (remember path 1 3 4 [{:label "add"} {:label "add-watch"} {:label "assoc"}])
-    (testing "filters cached labels by prefix at the same version/position"
-      (is (= ["add" "add-watch"] (cached path 1 3 4 "add")))
-      (is (= []                   (cached path 1 3 4 "zzz"))))
-    (testing "a version change invalidates old results"
-      (is (nil? (cached path 2 3 4 "add")))
-      (remember path 2 3 4 [{:label "new"}])
-      (is (= ["new"] (cached path 2 3 4 "new"))))))
-
-(deftest completion-cache-does-not-swallow-uncached-positions
-  ;; `[]` is truthy, so an uncached position at a cached version used to fall
-  ;; into the cache branch and never send a request.
-  (let [remember (deref #'nesmacs.ed/remember-completion!)
-        cached   (deref #'nesmacs.ed/cached-completion)
-        path     "/lsp-cache-pos/x.clj"]
-    (remember path 1 3 4 [{:label "add"}])
-    (is (= ["add"] (cached path 1 3 4 "add")))
-    (is (nil? (cached path 1 3 9 "add")))))
+(deftest document-completion-follows-buffer-lifetime
+  (let [original {:buf "x" :bufs {"x" (buf/make "x" "foo" "/x")}}
+        editor (atom original)
+        replies (atom [])
+        request #(complete/document-candidates! editor @editor %1 %2
+                   (fn [reply] (swap! replies conj reply)))]
+    (request [0 0] "")
+    (request [0 0] "")
+    (is (= 1 (count @replies)))
+    (swap! editor update-in [:bufs "x"] buf/edit 0 0 "a")
+    (request [0 0] "")
+    ((second @replies) {:items [{:label "add"} {:label "other"}]})
+    ((first @replies) [{:label "old"}])
+    (is (= ["add"] (request [0 0] "ad")))
+    (request [0 1] "")
+    (reset! editor original)
+    ((last @replies) [{:label "late"}])
+    (is (= original @editor))))
 
 (deftest completion-source-uses-snapshot-state
   ;; Sources receive {:state snapshot}, not the editor atom. Reading it as an
@@ -174,3 +158,16 @@
     (is (= 1 (count groups)))
     (is (= [{:from 4 :to 5 :text "E"} {:from 1 :to 2 :text "B"}]
            (:edits (first groups))))))
+
+(deftest range-offsets-clamp-lines-columns-and-eof
+  (let [text (gap/of "a😀\nbc\nlast")]
+    (is (= [3 6] (lsp/range->offsets text {:start {:line 0 :character 50}
+                                          :end {:line 1 :character 50}})))
+    (is (= [10 11] (lsp/range->offsets text {:start {:line 2 :character 3}
+                                            :end {:line 3 :character 2}})))
+    (is (nil? (lsp/range->offsets text {:start {:line 50 :character 2}
+                                        :end {:line 1 :character -3}})))
+    (is (= [7 7] (lsp/range->offsets text {:start {:line 2 :character -3}
+                                          :end {:line 0 :character 0}})))
+    (is (nil? (lsp/range->offsets text {:start {:line 0 :character "1"}
+                                        :end {:line 0 :character 1}})))))

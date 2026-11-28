@@ -2,6 +2,7 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [org.httpkit.server :as http]
+            [nesmacs.cmd :as cmd]
             [nesmacs.log :as log]
             [nesmacs.term :as t]
             [nesmacs.view :as view])
@@ -121,10 +122,9 @@
                             (fn [s]
                               (merge (run-key! (merge s size) key)
                                      (select-keys s [:rows :cols]))))
-                before (peek (:kill old))
-                after (peek (:kill new))]
-            (when (and after (not= before after) (<= (count after) 100000))
-              (send! ch ["clipboard" after]))))))))
+                clip (cmd/new-clipboard-text old new)]
+            (when (and clip (<= (count clip) 100000))
+              (send! ch ["clipboard" clip]))))))))
 
 (defn- render-clients! [clients state]
   (doseq [[ch client] @clients]

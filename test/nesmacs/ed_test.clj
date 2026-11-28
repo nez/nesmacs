@@ -3,15 +3,18 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
+            [nesmacs.api :as api]
             [nesmacs.buf :as buf]
             [nesmacs.complete :as complete]
             [nesmacs.ed :as ed]
+            [nesmacs.mini :as mini]
             [nesmacs.job :as job]
             [nesmacs.lsp :as lsp]
             [nesmacs.nav :as nav]
             [nesmacs.persist :as persist]
             [nesmacs.rect :as rect]
             [nesmacs.session :as session]
+            [nesmacs.term :as term]
             [nesmacs.dap :as dap]
             [nesmacs.view :as view]
             [nesmacs.spec :as spec]
@@ -36,6 +39,11 @@
     :kill [] :msg nil :mini nil
     :windows (win/leaf "*test*") :cur-window []
     :scroll 0 :rows 24 :cols 80}))
+
+(defn- with-effects [state]
+  (let [editor (atom state)]
+    (api/run-effects! editor)
+    @editor))
 
 (defn point [s] (:point (ed/cur s)))
 (defn text [s] (str (:text (ed/cur s))))
@@ -292,7 +300,7 @@
     (try
       (let [s (-> (make-state "new content" 0)
                   (assoc-in [:bufs "*test*" :file] (.getAbsolutePath f)))
-            s' (ed/save-buffer s)]
+            s' (with-effects (ed/save-buffer s))]
         (is (= "new content" (slurp f)))
         (is (false? (:modified (ed/cur s'))))
         (is (clojure.string/starts-with? (:msg s') "Wrote")))
@@ -725,7 +733,7 @@
             _   (spit bak "stale")
             s   (-> (make-state "hello" 0)
                     (assoc-in [:bufs "*test*" :file] path))
-            s'  (ed/save-buffer s)]
+            s'  (with-effects (ed/save-buffer s))]
         (is (not (.exists bak)))
         (is (= "hello" (slurp f))))
       (finally (.delete f)))))
@@ -771,6 +779,23 @@
 
 (deftest mouse-click-moves-point
   (is (= 6 (point (click (make-state "abc\ndef\nghi" 0) 1 2)))))
+
+(deftest click-uses-the-painted-folds-gutter-and-horizontal-scroll
+  (let [prefix "(fold\nhidden\n)\n"
+        state (-> (make-state (str prefix "012345678901") (+ (count prefix) 9))
+                  (assoc :cols 9)
+                  (update-in [:bufs "*test*"] assoc :mode :clojure-mode
+                             :collapsed #{0} :gutter {:width 2}))
+        frame (binding [term/*out-fn* (fn [_])] (view/render state))
+        viewport (get (:viewports frame) [])
+        event {:type :mouse :button 0 :action :press :row 1 :col 4
+               :viewports (:viewports frame)}]
+    (is (= [[0 2]] (:folds viewport)))
+    (is (pos? (:hscroll viewport)))
+    (is (= (+ (count prefix) (:hscroll viewport) 1)
+           (point (ed/handle-key state event))))
+    (let [edited (update-in state [:bufs "*test*"] buf/edit 0 0 "X")]
+      (is (= (point edited) (point (ed/handle-key edited event)))))))
 
 (deftest mouse-click-on-modeline-keeps-point
   (is (= 1 (point (click (make-state "abc\ndef" 1) 22 0)))))
@@ -950,7 +975,7 @@
     (try
       (let [s (-> (make-state "data" 0)
                   (assoc-in [:bufs "*test*" :file] (.getAbsolutePath f)))
-            s' (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \s]))]
+            s' (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \s]) with-effects)]
         (is (= "data" (slurp f)))
         (is (clojure.string/starts-with? (:msg s') "Wrote")))
       (finally (.delete f)))))
@@ -964,7 +989,7 @@
 ;; --- Exit ---
 
 (defn- answer-mini [s text]
-  (reduce ed/handle-key s (concat (seq text) [:return])))
+  (with-effects (reduce ed/handle-key s (concat (seq text) [:return]))))
 
 (deftest exit-no-modified-buffers
   (let [s' (-> (make-state "abc" 0)
@@ -1155,7 +1180,7 @@
         (.write os (.getBytes "a\r\nb\r\n"))
         (.close os))
       (let [s  (ed/find-file (make-state "" 0) (.getAbsolutePath f))
-            s' (ed/save-buffer s)]
+            s' (with-effects (ed/save-buffer s))]
         (is (not (:modified (ed/cur s'))))
         (is (= "a\r\nb\r\n" (slurp f :encoding "UTF-8"))))
       (finally (.delete f)))))
@@ -1221,7 +1246,7 @@
 (deftest save-buffer-error
   (let [s (-> (make-state "data" 0)
               (assoc-in [:bufs "*test*" :file] "/nonexistent-dir/impossible/file.txt"))
-        s' (ed/save-buffer s)]
+        s' (with-effects (ed/save-buffer s))]
     (is (clojure.string/starts-with? (:msg s') "Save failed"))))
 
 (deftest save-buffer-relative-path
@@ -1234,7 +1259,7 @@
     (try
       (let [s (-> (make-state "relative content" 0)
                   (assoc-in [:bufs "*test*" :file] fname))
-            s' (ed/save-buffer s)]
+            s' (with-effects (ed/save-buffer s))]
         (is (clojure.string/starts-with? (:msg s') "Wrote"))
         (is (= "relative content" (slurp f))))
       (finally (.delete f)))))
@@ -1302,7 +1327,7 @@
     (spit (java.io.File. dir "testfile.txt") "")
     (try
       (let [{:keys [completed candidates]}
-            (#'ed/file-completer (str (.getPath dir) "/TEST"))]
+            (mini/file-completer (str (.getPath dir) "/TEST"))]
         (is (clojure.string/ends-with? completed "testfile.txt"))
         (is (= [completed] candidates)))
       (finally
@@ -1317,7 +1342,7 @@
     (spit (java.io.File. dir "alphaB.txt") "")
     (try
       (let [{:keys [completed candidates]}
-            (#'ed/file-completer (str (.getPath dir) "/ALP"))]
+            (mini/file-completer (str (.getPath dir) "/ALP"))]
         (is (clojure.string/ends-with? (clojure.string/lower-case completed) "alpha"))
         (is (= 2 (count candidates))))
       (finally
@@ -1327,7 +1352,7 @@
 
 (deftest file-completer-no-matches
   (let [{:keys [completed candidates]}
-        (#'ed/file-completer "/nonexistent-nesmacs-path/zzz")]
+        (mini/file-completer "/nonexistent-nesmacs-path/zzz")]
     (is (= "/nonexistent-nesmacs-path/zzz" completed))
     (is (empty? candidates))))
 
@@ -1340,7 +1365,7 @@
     (spit (java.io.File. dir "two.txt") "")
     (try
       (let [{:keys [candidates]}
-            (#'ed/file-completer (str (.getPath dir) "/"))]
+            (mini/file-completer (str (.getPath dir) "/"))]
         (is (= 2 (count candidates))))
       (finally
         (.delete (java.io.File. dir "one.txt"))
@@ -1357,7 +1382,7 @@
     (try
       (let [prefix (str (.getPath dir) "/UNI")
             s (make-state "abc" 0)
-            s1 (ed/mini-start s "Find: " (fn [s _] s) #'ed/file-completer)
+            s1 (ed/mini-start s "Find: " (fn [s _] s) mini/file-completer)
             ;; Type the prefix into minibuffer
             s2 (reduce #(ed/handle-key %1 %2) s1 (seq prefix))
             ;; Press tab
@@ -1988,7 +2013,7 @@
         (let [open-f (java.io.File. dir "open.py")
               shut-f (java.io.File. dir "shut.py")
               _ (spit open-f "aaa\n")
-              _ (spit shut-f "bbb\n")
+              _ (spit shut-f "skip\r\nbbb\r\n")
               open-path (.getCanonicalPath open-f)
               shut-path (.getCanonicalPath shut-f)
               range (fn [] {:start {:line 0 :character 0} :end {:line 0 :character 3}})]
@@ -1999,11 +2024,13 @@
                    :cur-window [] :rows 24 :cols 80})
           (ed/apply-workspace-edit!
             {:changes {(lsp/path->uri open-path) [{:range (range) :newText "AAA"}]
-                       (lsp/path->uri shut-path) [{:range (range) :newText "BBB"}]}})
+                       (lsp/path->uri shut-path) [{:range {:start {:line 1 :character 0}
+                                                          :end {:line 1 :character 3}}
+                                                  :newText "BBB"}]}})
           (is (= "aaa\n" (slurp open-f)) "the open buffer is not written")
           (is (true? (get-in @ed/editor [:bufs open-path :modified])))
           (is (= "AAA\n" (str (get-in @ed/editor [:bufs open-path :text]))))
-          (is (= "BBB\n" (slurp shut-f)) "the unopened file is written")
+          (is (= "skip\r\nBBB\r\n" (slurp shut-f)) "the unopened file is written")
           (is (false? (get-in @ed/editor [:bufs shut-path :modified])))))
       (finally
         (reset! ed/editor nil)
@@ -2023,3 +2050,68 @@
         (is (:exit s2))
         (is (= "yabc" (slurp path))))
       (finally (.delete f)))))
+
+
+(deftest save-buffer-keeps-concurrent-edit-dirty
+  (let [f (java.io.File. persist/*dir* "concurrent.txt")
+        path (.getCanonicalPath f)
+        write-file! persist/write-file!
+        _ (spit f "original")
+        editor (atom (-> (make-state "") (ed/find-file path) (ed/edit 0 8 "saved")))]
+    (swap! editor ed/save-buffer)
+    (is (= "original" (slurp f)))
+    (with-redefs [persist/write-file! (fn [& args]
+                                       (swap! editor ed/edit 5 5 " newer")
+                                       (apply write-file! args))]
+      (api/run-effects! editor))
+    (is (= "saved" (slurp f)))
+    (is (= "saved newer" (text @editor)))
+    (is (:modified (ed/cur @editor)))))
+
+(deftest workspace-edit-keeps-external-disk-change
+  (let [f (java.io.File. persist/*dir* "external.txt")
+        path (.getCanonicalPath f)
+        write-file! persist/write-file!]
+    (try
+      (spit f "first\r\nsecond\r\n")
+      (reset! ed/editor (make-state ""))
+      (with-redefs [persist/write-file! (fn [& args]
+                                         (spit f "external\n")
+                                         (apply write-file! args))]
+        (ed/apply-workspace-edit!
+          {:changes {(lsp/path->uri path) [{:range {:start {:line 1 :character 0}
+                                                  :end {:line 3 :character 0}}
+                                          :newText "edited\r\n"}]}}))
+      (is (= "external\n" (slurp f)))
+      (is (= "first\nedited\n" (str (get-in @ed/editor [:bufs path :text]))))
+      (is (get-in @ed/editor [:bufs path :modified]))
+      (finally (reset! ed/editor nil)))))
+
+(deftest format-on-save-runs-after-command-and-preserves-crlf
+  (let [f (java.io.File. persist/*dir* "format.txt")
+        path (.getCanonicalPath f)
+        _ (spit f "old\r\n")
+        calls (atom 0)
+        editor (atom (-> (make-state "") (ed/find-file path)
+                         (assoc :format-on-save true)))]
+    (with-redefs-fn {#'ed/cli-formatted-text (fn [_] (swap! calls inc) "formatted\n")}
+      (fn []
+        (swap! editor ed/save-buffer)
+        (is (zero? @calls))
+        (api/run-effects! editor)
+        (is (= 1 @calls))))
+    (is (= "formatted\r\n" (slurp f)))
+    (is (= "formatted\n" (text @editor)))
+    (is (false? (:modified (ed/cur @editor))))))
+
+(deftest quit-save-failure-keeps-editor-open
+  (let [f (java.io.File. persist/*dir* "quit-error.txt")
+        path (.getCanonicalPath f)
+        _ (spit f "old")
+        s (-> (make-state "") (ed/find-file path) (ed/edit 0 3 "new")
+              ed/confirm-quit)]
+    (with-redefs [persist/write-file! (fn [& _] (throw (java.io.IOException. "disk full")))]
+      (let [after (answer-mini s "y")]
+        (is (nil? (:exit after)))
+        (is (get-in after [:bufs path :modified]))
+        (is (= "old" (slurp f)))))))

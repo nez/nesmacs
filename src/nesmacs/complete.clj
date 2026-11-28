@@ -23,6 +23,51 @@
   [^String prefix ^String candidate]
   (.regionMatches candidate true 0 prefix 0 (.length prefix)))
 
+(defn document-items [buffer position]
+  (let [cache (::document buffer)]
+    (when (= (:version buffer) (:version cache))
+      (get-in cache [:items position]))))
+
+(defn document-candidates!
+  "Cache server replies on the source buffer. A closed or edited buffer cannot
+   accept an earlier reply, even when reopened at the same version."
+  [editor state position prefix request!]
+  (let [name (:buf state)
+        source (cmd/cur state)
+        version (:version source)
+        base [:bufs name ::document]
+        pending (into base [:pending position])
+        ticket {:started (System/currentTimeMillis)}
+        updated (swap! editor
+                  (fn [s]
+                    (let [b (cmd/buf s name)
+                          active (get-in s pending)]
+                      (if (or (not (identical? (:text source) (:text b)))
+                              (not= version (:version b))
+                              (document-items b position)
+                              (and (= version (get-in s (conj base :version)))
+                                   active (< (- (:started ticket) (:started active)) 5000)))
+                        s
+                        (-> s
+                            (cond-> (not= version (get-in s (conj base :version)))
+                              (assoc-in base {:version version}))
+                            (assoc-in pending ticket))))))]
+    (when (identical? ticket (get-in updated pending))
+      (request!
+        (fn [result]
+          (let [items (if (map? result) (:items result) result)
+                labels (into {} (keep #(when (:label %) [(:label %) %])) items)]
+            (swap! editor
+                   (fn [s]
+                     (if (and (= version (get-in s [:bufs name :version]))
+                              (identical? ticket (get-in s pending)))
+                       (-> s
+                           (update-in (conj base :pending) dissoc position)
+                           (assoc-in (into base [:items position]) labels)
+                           (cond-> (:mini s) (assoc-in [:mini :for] ::stale)))
+                       s)))))))
+    (filterv #(prefix-match? prefix %) (keys (document-items (cmd/buf updated name) position)))))
+
 (defn- match? [prefix s]
   (str/includes? (str/lower-case s) (str/lower-case prefix)))
 

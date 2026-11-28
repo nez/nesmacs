@@ -103,6 +103,15 @@
   (swap! theme-version inc)
   nil)
 
+(defn display-row [folds line]
+  (fold/visible-before folds (fold/visible-start folds line)))
+
+(defn text-column [gutter-width hscroll]
+  (+ gutter-width (if (pos? hscroll) 1 0)))
+
+(defn visible-line-start [content start end hscroll]
+  (if (pos? hscroll) (text/pos-at-col content start end hscroll) start))
+
 (defn- ensure-visible [content point-line scroll rows folds]
   ;; A pane with body-rows <= 0 (e.g. a 1-row split that gets 0 body rows
   ;; after reserving the modeline) has nowhere to show the point, so
@@ -111,9 +120,8 @@
   ;; and crash with ArrayIndexOutOfBoundsException.
   (if (<= rows 0)
     scroll
-    (let [scroll-line (fold/visible-start folds (gap/line-of content scroll))
-          pd (fold/visible-before folds point-line)
-          sd (fold/visible-before folds scroll-line)]
+    (let [pd (display-row folds point-line)
+          sd (display-row folds (gap/line-of content scroll))]
       (cond
         (< pd sd)
         (gap/nth-line-start content (fold/line-at-display folds pd))
@@ -154,7 +162,7 @@
     (t/move screen-row screen-col)
     (let [n (count glyphs)
           scrolled (pos? hscroll)
-          start (if scrolled (text/pos-at-col glyphs 0 n hscroll) 0)
+          start (visible-line-start glyphs 0 n hscroll)
           avail (if scrolled (dec width) width)
           end   (text/pos-at-col glyphs start n avail)
           ;; visible display width used
@@ -405,10 +413,8 @@
         scroll (if current? (ensure-visible content point-line scroll-in body-rows folds)
                    scroll-in)
         collapsed (into #{} (map first) folds)
-        cursor-row (- (fold/visible-before folds point-line)
-                      (fold/visible-before folds
-                                           (fold/visible-start folds
-                                                               (gap/line-of content scroll))))
+        cursor-row (- (display-row folds point-line)
+                      (display-row folds (gap/line-of content scroll)))
         cursor-col (text/display-width content (gap/nth-line-start content point-line) point)
         gutter (:gutter buf)
         gw (long (:width gutter 0))
@@ -430,8 +436,12 @@
     (render-window-modeline rect (or (:title buf) (:name buf)) (:modified buf) mode (:minor-modes buf)
                             point-line cursor-col current?)
     {:window (assoc window :scroll scroll :hscroll hscroll
-                           :point-line point-line :cursor-col cursor-col
-                           :cursor-row cursor-row :gutter-width gw)
+                           :point-line point-line
+                           :cursor-col (let [left (visible-line-start content
+                                                    (gap/nth-line-start content point-line)
+                                                    (gap/nth-line-end content point-line) hscroll)]
+                                         (text/display-width content left point))
+                           :cursor-row cursor-row :gutter-width gw :folds folds :version version)
      :buf-name buf-name
      :version version
      :font-lock font-lock
@@ -589,10 +599,8 @@
               (when (and rect win (> (:rows rect) 1) (pos? (:cols rect)))
                 (let [body-rows (dec (:rows rect))
                       row-in-win (max 0 (min (long (:cursor-row win)) (dec body-rows)))
-                      col-in-win (cond-> (+ (long (:gutter-width win 0))
-                                            (- (long (:cursor-col win))
-                                               (long (:hscroll win))))
-                                         (pos? (:hscroll win)) inc)]
+                      col-in-win (+ (:cursor-col win)
+                                    (text-column (:gutter-width win 0) (:hscroll win 0)))]
                   (t/move (+ (:row rect) row-in-win) (+ (:col rect) col-in-win))))))
           (t/show-cur))
         (let [cur-win (get @rendered cur-path)]
@@ -600,7 +608,7 @@
            :cur-scroll (:scroll cur-win)
            :cur-hscroll (:hscroll cur-win)
            :viewports (into {} (map (fn [[path w]]
-                                      [path (assoc (select-keys w [:buffer :scroll :hscroll :gutter-width])
+                                      [path (assoc (select-keys w [:buffer :scroll :hscroll :gutter-width :folds :version])
                                                    :rect (get layouts path))]))
                             @rendered)
            :font-lock-updates @cache-ups})))))
