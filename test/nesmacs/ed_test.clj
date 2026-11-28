@@ -808,6 +808,44 @@
 (defn- click [s row col]
   (ed/handle-key s {:type :mouse :button 0 :action :press :row row :col col}))
 
+(deftest drag-resizes-the-grabbed-nested-divider
+  (let [s (-> (make-state "abcdef" 2) ed/split-window-right ed/other-window ed/split-window-below)
+        mouse (fn [s action row source]
+                (ed/handle-key s {:type :mouse :button 0 :action action :row row :col 50
+                                  :mouse-source source}))
+        grabbed (mouse s :grab 11 :tab)
+        moved (mouse grabbed :drag 6 :tab)
+        released (mouse moved :release 7 :tab)
+        divider-row #(get-in (win/frame-geometry %) [:dividers 1 :row])]
+    (is (= 11 (divider-row (mouse grabbed :drag 6 :other-tab))))
+    (is (= 6 (divider-row moved)))
+    (is (= 7 (divider-row released)))
+    (is (= 7 (divider-row (mouse released :drag 3 :tab))))
+    (is (= (:cur-window s) (:cur-window released)))
+    (is (= (point s) (point released)))
+    (is (= (:bufs s) (:bufs released)))))
+
+(deftest closing-a-pane-keeps-the-promoted-panes-point
+  (let [s (-> (make-state "abcdef" 1) ed/split-window-right ed/other-window
+              ed/split-window-below ed/other-window ed/other-window
+              (assoc-in [:windows :b :a :point] 5))
+        closed (reduce ed/handle-key s [[:ctrl \x] \0])]
+    (is (= [:a] (:cur-window closed)))
+    (is (= 5 (point closed)))
+    (is (= (keys (:bufs s)) (keys (:bufs closed))))
+    (is (nil? (:exit closed)))))
+
+(deftest switch-to-buffer-works-in-the-focused-pane
+  (let [s (-> (make-state "abc") ed/split-window-right
+              (assoc :commands (#'ed/builtin-commands))
+              (assoc-in [:bufs "another"] (buf/make "another")))
+        actions [(ed/execute-extended-command s "switch-to-buffer")
+                 (reduce ed/handle-key s [[:ctrl \x] \b])]]
+    (doseq [prompt actions]
+      (let [chosen (reduce ed/handle-key prompt [[:paste "another"] :return])]
+        (is (= "another" (get-in chosen [:windows :a :buffer])))
+        (is (= "*test*" (get-in chosen [:windows :b :buffer])))))))
+
 (deftest mouse-click-moves-point
   (is (= 6 (point (click (make-state "abc\ndef\nghi" 0) 1 2)))))
 

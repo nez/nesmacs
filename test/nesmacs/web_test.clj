@@ -61,6 +61,10 @@
          (event "mouse" "down" 7 120)))
   (is (= {:type :mouse :action :press :button 0 :row 7 :col 120}
          (event "mouse" "click" 7 120)))
+  (doseq [action ["grab" "drag" "release" "cancel"]]
+    (is (= {:type :mouse :action (keyword action) :button 0 :row 7 :col 120}
+           (event "mouse" action 7 120))))
+  (is (nil? (event "mouse" "drag" 7 500)))
   (is (nil? (event "mouse" "up" -1 3)))
   (is (nil? (event "mouse" "left" 1 3)))
   (is (= {:type :resize :rows 42 :cols 132} (event "resize" 42 132)))

@@ -607,6 +607,7 @@
           {:sig sig
            :cur-scroll (:scroll cur-win)
            :cur-hscroll (:hscroll cur-win)
+           :dividers divs
            :viewports (into {} (map (fn [[path w]]
                                       [path (assoc (select-keys w [:buffer :scroll :hscroll :gutter-width :folds :version])
                                                    :rect (get layouts path))]))

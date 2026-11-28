@@ -42,6 +42,9 @@
           [parent-path (peek path)]
           (recur parent-path))))))
 
+(defn- set-ratio [tree path ratio]
+  (assoc-in tree (conj path :ratio) (-> ratio (max 0.1) (min 0.9))))
+
 (defn adjust-size
   "Resize the current window along `dir` by `delta` of `total` (rows for
    :stacked, cols for :side-by-side). Returns new tree."
@@ -50,9 +53,8 @@
     (let [split (get-in tree ancestor-path)
           ratio (:ratio split 0.5)
           step  (/ (double delta) (max 1 (double total)))
-          new-ratio (-> (if (= side :a) (+ ratio step) (- ratio step))
-                        (max 0.1) (min 0.9))]
-      (assoc-in tree (conj ancestor-path :ratio) new-ratio))
+          new-ratio (if (= side :a) (+ ratio step) (- ratio step))]
+      (set-ratio tree ancestor-path new-ratio))
     tree))
 
 (defn leaves
@@ -141,14 +143,16 @@
                 (case (:dir node)
                   :stacked
                   (let [[top bottom] (split-size rows ratio)
-                        div {:kind :horizontal :row (+ row top) :col col :len cols}
+                        div {:kind :horizontal :row (+ row top) :col col :len cols
+                             :path path :start row :span rows}
                         [layout dividers] (walk (:a node) (conj path :a)
                                                 row col top cols layout (conj dividers div))]
                     (walk (:b node) (conj path :b) (+ row top 1) col bottom cols
                           layout dividers))
                   :side-by-side
                   (let [[left right] (split-size cols ratio)
-                        div {:kind :vertical :row row :col (+ col left) :len rows}
+                        div {:kind :vertical :row row :col (+ col left) :len rows
+                             :path path :start col :span cols}
                         [layout dividers] (walk (:a node) (conj path :a)
                                                 row col rows left layout (conj dividers div))]
                     (walk (:b node) (conj path :b) row (+ col left 1) rows right
@@ -158,6 +162,26 @@
 
 (defn layout [tree rows cols] (:layout (geometry tree rows cols)))
 (defn dividers [tree rows cols] (:dividers (geometry tree rows cols)))
+
+(defn divider-at [dividers row col]
+  (some (fn [d]
+          (let [horizontal? (= :horizontal (:kind d))
+                [axis along] (if horizontal? [:row :col] [:col :row])
+                [across offset] (if horizontal? [row col] [col row])]
+            (when (and (> (:span d) 3)
+                       (= (axis d) across)
+                       (<= (along d) offset (dec (+ (along d) (:len d)))))
+              d)))
+        dividers))
+
+(defn drag-divider
+  "Move a divider to the pointer's cell on its resize axis."
+  [tree {:keys [path kind start span] :as divider} row col]
+  (let [axis (if (= kind :horizontal) :row :col)
+        target (if (= axis :row) row col)]
+    (if (= target (axis divider))
+      tree
+      (set-ratio tree path (/ (+ 0.5 (- target start)) span)))))
 
 (defn frame-geometry
   "Editor window geometry with one row reserved for the echo area."

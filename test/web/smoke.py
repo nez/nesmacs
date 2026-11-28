@@ -237,15 +237,37 @@ class Browser:
         self.ctrl("x")
         self.ctrl("s")
 
-    def click_cell(self, row, col):
+    def mouse_cell(self, event_type, row, col, buttons=0):
         x, y = self.evaluate(f"""(() => {{
             const rect = document.querySelector('.xterm-screen').getBoundingClientRect();
             return [rect.left + ({col} + 0.5) * rect.width / terminal.cols,
                     rect.top + ({row} + 0.5) * rect.height / terminal.rows];
         }})()""")
-        for event_type in ("mousePressed", "mouseReleased"):
-            self.call("Input.dispatchMouseEvent", type=event_type, x=x, y=y,
-                      button="left", clickCount=1)
+        self.call("Input.dispatchMouseEvent", type=event_type, x=x, y=y,
+                  button="none" if event_type == "mouseMoved" else "left",
+                  buttons=buttons, clickCount=1)
+
+    def click_cell(self, row, col):
+        self.mouse_cell("mousePressed", row, col, buttons=1)
+        self.mouse_cell("mouseReleased", row, col)
+
+    def drag_divider(self, kind):
+        divider = wait_for(lambda: self.evaluate(
+            f"paintedDividers.find(d => d.kind === '{kind}')"),
+            f"no {kind} divider")
+        row, col = divider["row"], divider["col"]
+        end_row, end_col = (row + 3, col) if kind == "horizontal" else (row, col + 4)
+        self.mouse_cell("mouseMoved", row, col)
+        cursor = "row-resize" if kind == "horizontal" else "col-resize"
+        assert self.evaluate("getComputedStyle(terminal.element).cursor") == cursor
+        self.mouse_cell("mousePressed", row, col, buttons=1)
+        self.mouse_cell("mouseMoved", end_row, end_col, buttons=1)
+        axis, coordinate = ("row", end_row) if kind == "horizontal" else ("col", end_col)
+        wait_for(lambda: self.evaluate(f"paintedDividers.some(d => d.kind === '{kind}' && "
+                                      f"d.{axis} === {coordinate})"),
+                 f"{kind} divider did not follow the mouse while held")
+        self.mouse_cell("mouseReleased", end_row, end_col)
+        assert self.evaluate("!dividerDrag")
 
     def resize(self, width, height):
         before = self.evaluate("paintedSize")
@@ -320,9 +342,15 @@ def run(directory, editor):
         browser.ctrl("x")
         browser.key("2")
         wait_for(lambda: browser.screen().count("sample.txt") == 2, "Ctrl+X 2 did not split")
+        browser.drag_divider("horizontal")
         browser.ctrl("x")
         browser.key("1")
         browser.resize(430, 320)
+        browser.ctrl("x")
+        browser.key("3")
+        browser.drag_divider("vertical")
+        browser.ctrl("x")
+        browser.key("0")
         browser.see("sample.txt")
         browser.see("beta ñ😀日本needle")
         browser.resize(1100, 750)

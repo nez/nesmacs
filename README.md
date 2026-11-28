@@ -46,12 +46,18 @@ Your fingers already work: `C-f C-b C-n C-p C-a C-e`, `C-s`, `M-%`, `C-x C-f`,
 complete symbol, `C-x r` registers and rectangles, and `C-c t` opens a
 terminal. `Esc Esc Esc` cancels the current editor prompt, key prefix, or search.
 
+Drag a split divider with the left mouse button in the terminal or browser.
+`C-x o` (`M-x other-window`) focuses the next pane. `C-x b`
+(`M-x switch-to-buffer`) chooses the buffer shown in that pane.
+`C-x 0` (`M-x delete-window`) closes the pane and keeps its buffer open.
+
 Real terminals are core: `C-c t` runs `$SHELL` in a tmux session, so the shell
 (outside the editor) survives an editor exit or crash and reattaches next start.
 `C-c C-c` interrupts, `C-c C-k` kills the buffer and session, `C-c C-r`
-restarts, `C-c M-x` reaches `M-x`, and `C-c C-x` opens the normal `C-x` map
-from inside a terminal. Clicking a terminal window focuses it; clicks are not
-forwarded to the shell, and the pane's cursor is not selectable text.
+restarts and `C-c M-x` reaches `M-x`. While the terminal has focus, use
+`C-c C-x o` for the next pane, `C-c C-x b` to choose a buffer, or
+`C-c C-x 0` to close the pane. `C-c C-x C-c` exits the editor.
+Clicking a terminal pane focuses it. The shell receives keyboard input.
 
 ## The part that is different
 

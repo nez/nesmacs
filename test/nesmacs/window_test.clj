@@ -68,12 +68,12 @@
 (deftest dividers-for-stacked
   (let [t (first (w/split (w/leaf "a") [] :stacked))
         ds (w/dividers t 24 80)]
-    (is (= [{:kind :horizontal :row 12 :col 0 :len 80}] ds))))
+    (is (= [{:kind :horizontal :row 12 :col 0 :len 80 :path [] :start 0 :span 24}] ds))))
 
 (deftest dividers-for-side-by-side
   (let [t (first (w/split (w/leaf "a") [] :side-by-side))
         ds (w/dividers t 24 80)]
-    (is (= [{:kind :vertical :row 0 :col 40 :len 24}] ds))))
+    (is (= [{:kind :vertical :row 0 :col 40 :len 24 :path [] :start 0 :span 80}] ds))))
 
 ;; --- Resize ---
 

@@ -49,13 +49,15 @@
          (#'term/parse-mouse "<0;12;5" :press)))
   (is (= :release (:action (#'term/parse-mouse "<0;12;5" :release)))))
 
-(deftest wheel-and-motion-are-not-clicks
+(deftest wheel-and-drag-are-distinct-from-clicks
   (is (= {:type :mouse :action :scroll :direction :up :col 11 :row 4}
          (#'term/parse-mouse "<64;12;5" :press)))
   (is (= :down (:direction (#'term/parse-mouse "<69;12;5" :press))))
   (is (nil? (#'term/parse-mouse "<64;12;5" :release)))
   (is (nil? (#'term/parse-mouse "<66;12;5" :press)))
-  (is (nil? (#'term/parse-mouse "<32;12;5" :press)))
+  (is (= {:type :mouse :row 4 :col 11 :action :drag :button 0}
+         (#'term/parse-mouse "<32;12;5" :press)))
+  (is (nil? (#'term/parse-mouse "<35;12;5" :press)))
   (is (nil? (#'term/parse-mouse "<0;12" :press))))
 
 (deftest set-clipboard-skips-oversized

@@ -105,6 +105,14 @@ def wait_exit(seconds=30):
 def keys(b):
     os.write(fd, b)
 
+def see_divider(column):
+    global out
+    pattern = re.compile(rb"\x1b\[1;%dH(?:\x1b\[[0-9;]*m)*" % column + "│".encode())
+    out, found = wait_for_output(fd, lambda data: pattern.search(data) is not None,
+                                 time.monotonic() + TIMEOUT, out)
+    checks.append((f"split divider draws at column {column}", found))
+    return found
+
 
 ok = True
 try:
@@ -114,6 +122,12 @@ try:
     ok &= read_until("M-x save", label="command prompt accepts input")
     keys(b"\x1b\x1b\x1b")
     ok &= read_until("Quit", label="three consecutive Escape bytes cancel the prompt")
+
+    keys(b"\x183")
+    ok &= see_divider(51)
+    keys(b"\x1b[<0;51;1M\x1b[<32;65;1M\x1b[<0;65;1m")
+    ok &= see_divider(65)
+    keys(b"\x180")
 
     keys(b"\x1bxgit-blame\r")                              # M-x git-blame
     ok &= read_until("Blame ", label="blame list opened")

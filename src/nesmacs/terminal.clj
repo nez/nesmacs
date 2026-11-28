@@ -271,8 +271,9 @@
    Returns true on success."
   [backend editor name id spec]
   (if-let [_ (attach! backend spec)]
-    (do (set-terminal! editor name id :status :running)
-        (set-terminal! editor name id :dirty? true)
+    (do (swap-buffer! editor name id
+                      #(update % :terminal assoc :status :running :dirty? true
+                               :capture-pending? false))
         true)
     (do (set-terminal! editor name id :status :dead)
         (swap! editor assoc :msg "Terminal unavailable (C-c C-r retries)")

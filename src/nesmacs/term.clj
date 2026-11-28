@@ -125,6 +125,8 @@
             button (bit-and b 3)]
         (case (bit-and b 224)
           0 (assoc event :action action :button button)
+          32 (when (and (= :press action) (zero? button))
+               (assoc event :action :drag :button button))
           64 (when (and (= :press action) (< button 2))
                (assoc event :action :scroll :direction (if (zero? button) :up :down)))
           nil)))))
@@ -200,10 +202,9 @@
 (defn enable-bracketed-paste! [] (tw "\033[?2004h"))
 (defn- disable-bracketed-paste! [] (tw "\033[?2004l"))
 
-;; SGR mouse reporting: press/release only (1000), extended coordinates
-;; (1006). No drag or motion reports — clicks move point, selections do not.
-(defn enable-mouse! [] (tw "\033[?1000h\033[?1006h"))
-(defn- disable-mouse! [] (tw "\033[?1000l\033[?1006l"))
+;; Report button-held motion (1002) using SGR coordinates (1006).
+(defn enable-mouse! [] (tw "\033[?1002h\033[?1006h"))
+(defn- disable-mouse! [] (tw "\033[?1000l\033[?1002l\033[?1006l"))
 
 ;; --- Clipboard (OSC 52) ---
 

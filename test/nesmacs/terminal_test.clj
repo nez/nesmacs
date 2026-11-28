@@ -138,6 +138,19 @@
                    (ed/handle-key [:ctrl \c])))
         "C-c C-x C-c reaches the normal quit command")))
 
+(deftest terminal-editor-prefix-routes-window-commands
+  (let [s (ed/split-window-right (make-state ""))
+        prefix #(-> % (ed/handle-key [:ctrl \c]) (ed/handle-key [:ctrl \x]))
+        pending (prefix s)
+        other (ed/handle-key pending \o)
+        closed (ed/handle-key (prefix other) \0)]
+    (is (:pending pending))
+    (is (nil? (:exit pending)))
+    (is (= [:b] (:cur-window other)))
+    (is (= :leaf (get-in closed [:windows :type])))
+    (is (:terminal (ed/cur closed)))
+    (is (nil? (:exit closed)))))
+
 (deftest restart-resets-a-dead-terminal
   (let [s (assoc-in (make-state "") [:bufs "*term*" :terminal :status] :dead)
         s' (term/restart s)]
@@ -255,7 +268,7 @@
   (is (true? (nth (feed (fresh-client []) ["%exit"]) 3))))
 
 (deftest restart-reattaches-a-live-client
-  (let [{:keys [backend attached? closed]} (fake-backend)
+  (let [{:keys [backend attached? closed captures]} (fake-backend)
         ed (atom (make-state ""))]
     (term/tick! ed backend)
     (term/tick! ed backend)
@@ -264,7 +277,9 @@
     (term/tick! ed backend)
     (is (= 1 @closed) "the old client is closed")
     (is (true? @attached?) "a fresh client attaches in the same tick")
-    (is (= :running (get-in @ed [:bufs "*term*" :terminal :status])))))
+    (is (= :running (get-in @ed [:bufs "*term*" :terminal :status])))
+    (term/tick! ed backend)
+    (is (= 2 @captures) "a capture queued on the old client does not block the new one")))
 
 ;; --- tmux key names and session persistence ---
 

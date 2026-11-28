@@ -18,8 +18,11 @@ let socket;
 let reconnectDelay = 250;
 let noticeTimer;
 let paintedSize;
+let paintedDividers = [];
 let pendingFrame;
 let writing = false;
+let dividerDrag;
+let suppressClick = false;
 const maxTextLength = 1024 * 1024;
 
 terminal.loadAddon(fit);
@@ -44,14 +47,16 @@ function fitTerminal() {
   const rows = Math.max(2, Math.min(300, size.rows));
   const cols = Math.max(2, Math.min(500, size.cols));
   if (rows === terminal.rows && cols === terminal.cols) return;
+  endDividerDrag();
   paintedSize = undefined;
+  paintedDividers = [];
   terminal.resize(cols, rows);
   send(["resize", rows, cols]);
 }
 
 function drawFrame() {
   if (writing || !pendingFrame) return;
-  const [, rows, cols, ansi] = pendingFrame;
+  const [, rows, cols, ansi, dividers = []] = pendingFrame;
   pendingFrame = undefined;
   if (rows !== terminal.rows || cols !== terminal.cols) return;
 
@@ -65,6 +70,7 @@ function drawFrame() {
         rows === terminal.rows && cols === terminal.cols) {
       if (paintedSize === undefined) setStatus("");
       paintedSize = size;
+      paintedDividers = dividers;
     }
     drawFrame();
   });
@@ -100,7 +106,9 @@ function connect() {
     }
   });
   connection.addEventListener("close", () => {
+    endDividerDrag();
     paintedSize = undefined;
+    paintedDividers = [];
     pendingFrame = undefined;
     setStatus("Disconnected. Reconnecting… Typing is paused.");
     setTimeout(connect, reconnectDelay);
@@ -151,14 +159,84 @@ container.addEventListener("paste", event => {
   }
 }, { capture: true });
 
-function mouseCell(event) {
+function mouseCell(event, clamp = false) {
   const screen = container.querySelector(".xterm-screen");
   if (!paintedSize || socket?.readyState !== WebSocket.OPEN || !screen) return;
   const { left, top, width, height } = screen.getBoundingClientRect();
+  if (!width || !height) return;
   const row = Math.floor((event.clientY - top) * terminal.rows / height);
   const col = Math.floor((event.clientX - left) * terminal.cols / width);
+  if (clamp) return [Math.max(0, Math.min(terminal.rows - 1, row)),
+                     Math.max(0, Math.min(terminal.cols - 1, col))];
   if (row >= 0 && row < terminal.rows && col >= 0 && col < terminal.cols) return [row, col];
 }
+
+function dividerAt(cell) {
+  if (!cell) return;
+  const [row, col] = cell;
+  return paintedDividers.find(d => d.kind === "horizontal"
+    ? row === d.row && col >= d.col && col < d.col + d.len
+    : col === d.col && row >= d.row && row < d.row + d.len);
+}
+
+function resizeCursor(divider) {
+  terminal.element.style.cursor = divider
+    ? (divider.kind === "horizontal" ? "row-resize" : "col-resize")
+    : "";
+}
+
+function endDividerDrag(action = "cancel", cell = [0, 0]) {
+  if (!dividerDrag) return;
+  const { pointer } = dividerDrag;
+  dividerDrag = undefined;
+  if (container.hasPointerCapture(pointer)) container.releasePointerCapture(pointer);
+  resizeCursor();
+  send(["mouse", action, ...cell]);
+}
+
+container.addEventListener("pointerdown", event => {
+  if (dividerDrag || event.button !== 0 || !event.isPrimary) return;
+  suppressClick = false;
+  const cell = mouseCell(event);
+  const divider = dividerAt(cell);
+  if (!divider) return;
+  event.preventDefault();
+  event.stopPropagation();
+  container.setPointerCapture(event.pointerId);
+  dividerDrag = { pointer: event.pointerId, cell };
+  suppressClick = true;
+  resizeCursor(divider);
+  send(["mouse", "grab", ...cell]);
+}, { capture: true });
+
+container.addEventListener("pointermove", event => {
+  if (!dividerDrag) {
+    resizeCursor(dividerAt(mouseCell(event)));
+  } else if (event.pointerId === dividerDrag.pointer) {
+    const cell = mouseCell(event, true);
+    if (cell && (cell[0] !== dividerDrag.cell[0] || cell[1] !== dividerDrag.cell[1])) {
+      dividerDrag.cell = cell;
+      send(["mouse", "drag", ...cell]);
+    }
+  }
+});
+
+container.addEventListener("pointerup", event => {
+  if (event.button !== 0 || dividerDrag?.pointer !== event.pointerId) return;
+  const cell = mouseCell(event, true);
+  if (cell) endDividerDrag("release", cell);
+  else endDividerDrag();
+});
+
+for (const type of ["pointercancel", "lostpointercapture"]) {
+  container.addEventListener(type, event => {
+    if (dividerDrag?.pointer === event.pointerId) endDividerDrag();
+  });
+}
+container.addEventListener("pointerleave", () => {
+  if (!dividerDrag) resizeCursor();
+});
+window.addEventListener("blur", () => endDividerDrag());
 
 container.addEventListener("wheel", event => {
   const cell = mouseCell(event);
@@ -169,6 +247,10 @@ container.addEventListener("wheel", event => {
 }, { capture: true, passive: false });
 
 container.addEventListener("click", event => {
+  if (suppressClick) {
+    suppressClick = false;
+    return;
+  }
   if (event.button !== 0 || terminal.hasSelection()) return;
   const cell = mouseCell(event);
   if (cell) send(["mouse", "click", ...cell]);

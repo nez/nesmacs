@@ -280,6 +280,9 @@
       (cmd/set-cur-buffer s k)
       (-> s (assoc-in [:bufs name] (buf/make name)) (cmd/set-cur-buffer name)))))
 
+(defn- switch-to-buffer [s]
+  (mini/start s "Buffer: " switch-buffer {:sources [complete/buffers]}))
+
 (defn kill-buffer
   "Remove `name` (defaults to current). Refuses to kill the last buffer.
    Windows showing the killed buffer fall back to the next visible buffer
@@ -373,7 +376,9 @@
 (defn delete-window [s]
   (let [s (cmd/save-cur-point s)
         [tree path] (win/delete-window (:windows s) (:cur-window s))]
-    (-> s (assoc :windows tree) (cmd/switch-window path))))
+    (-> s
+        (assoc :windows tree :cur-window path :buf (get-in tree (conj path :buffer)))
+        cmd/load-window-point)))
 
 (defn delete-other-windows [s]
   (let [s (cmd/save-cur-point s)
@@ -476,6 +481,38 @@
               (and (= path (:cur-window s)) (not= point-row new-point-row))
               (assoc-in [:bufs buffer :point] (line-start new-point-row)))))))
     s))
+
+(def ^:private divider-id [:path :kind :start :span])
+
+(defn- mouse-press [s {:keys [action button row col dividers mouse-source] :as event}]
+  (if (= 0 button)
+    (let [s (dissoc s :divider-drag)
+          divider (when (or (nil? mouse-source) (= :grab action))
+                    (win/divider-at (:dividers (win/frame-geometry s)) row col))]
+      (if (and divider (or (nil? dividers) (some #{divider} dividers)))
+        (-> s
+            (dissoc :pending :prefix-arg)
+            (assoc :divider-drag {:divider (select-keys divider divider-id)
+                                  :source mouse-source}))
+        (mouse-click s event)))
+    s))
+
+(defn- mouse-event [s {:keys [action button row col mouse-source] :as event}]
+  (let [{:keys [divider source]} (:divider-drag s)
+        dragging? (and divider (= source mouse-source))]
+    (case action
+      (:press :grab) (mouse-press s event)
+      :scroll (mouse-scroll s event)
+      :cancel (cond-> s dragging? (dissoc :divider-drag))
+      (:drag :release)
+      (if (and dragging? (or (= :drag action) (#{0 3} button)))
+        (let [d (some #(when (= divider (select-keys % divider-id)) %)
+                      (:dividers (win/frame-geometry s)))]
+          (cond-> s
+            d (update :windows win/drag-divider d row col)
+            (or (nil? d) (= :release action)) (dissoc :divider-drag)))
+        s)
+      s)))
 
 ;; --- Keyboard macros ---
 
@@ -880,6 +917,7 @@
    ["split-window-below" split-window-below "Split the current window into top and bottom." "C-x 2"]
    ["split-window-right" split-window-right "Split the current window into left and right." "C-x 3"]
    ["other-window" other-window "Switch to the next window." "C-x o"]
+   ["switch-to-buffer" switch-to-buffer "Show another buffer in the current window." "C-x b"]
    ["delete-window" delete-window "Delete the current window." "C-x 0"]
    ["delete-other-windows" delete-other-windows "Delete all windows except the current one." "C-x 1"]
    ["enlarge-window" enlarge-window "Make the current window one row taller." "C-x ^"]
@@ -1042,7 +1080,6 @@
            [:ctrl \x] {[:ctrl \f] (prompt "Find file: " find-file mini/file-completer)
                        [:ctrl \b] buflist/open
                        [:ctrl \c] confirm-quit
-                       \b (prompt "Buffer: " switch-buffer)
                        \d (prompt "Dired: " dired/open mini/file-completer)
                        \k (prompt "Kill buffer: " kill-buffer)
                        \r cx-r-map
@@ -1055,7 +1092,9 @@
   "C-c is the only key the editor keeps inside a terminal. C-c C-c interrupts
    the process; C-c C-x opens the normal C-x map so the editor stays reachable."
   {[:ctrl \c] #(terminal/input % [:ctrl \c])
-   [:ctrl \x] (get bindings [:ctrl \x])
+   [:ctrl \x] #(-> %
+                    (assoc :pending (get bindings [:ctrl \x]))
+                    (msg "0 close pane   o next pane   b switch buffer   C-c quit editor"))
    [:meta \x] (prompt "M-x " execute-extended-command command-completer)
    [:ctrl \b] buflist/open
    [:ctrl \k] #(kill-buffer % nil)
@@ -1090,17 +1129,19 @@
   "Pure state transition. Handles prefix keys via :pending state.
    Works identically for terminal and web — one key at a time."
   [s key]
-  (let [cancel-escape (cancel-escape? s key)
+  (let [mouse? (= :mouse (:type key))
+        s (cond-> s (not mouse?) (dissoc :divider-drag))
+        cancel-escape (cancel-escape? s key)
         s (if cancel-escape s (-> s (dissoc :escape-count) (assoc :msg nil)))
-        s (cond-> s (:macro-recording s) (update :macro-recording conj key))
+        s (cond-> s (:macro-recording s)
+            (update :macro-recording conj (if mouse? (dissoc key :mouse-source) key)))
         s' (cond
              cancel-escape
              (if (= 2 (:escape-count s))
                (keyboard-quit s)
                (update s :escape-count (fnil inc 0)))
 
-             (and (map? key) (= :mouse (:type key)))
-             (if (= :scroll (:action key)) (mouse-scroll s key) (mouse-click s key))
+             mouse? (mouse-event s key)
 
              ;; Bracketed paste is one insert, hence one undo entry. In a
              ;; terminal it belongs to the process, not to the read-only buffer.
@@ -1166,7 +1207,7 @@
   ;; CAS the scroll writeback against the rendered snapshot so a concurrent
   ;; mutation (nREPL/web) doesn't clobber the other thread's update.
   (let [snapshot @editor
-        {:keys [sig cur-scroll cur-hscroll font-lock-updates viewports]}
+        {:keys [sig cur-scroll cur-hscroll font-lock-updates viewports] :as painted}
         (view/render snapshot)
         wp (cmd/cur-window-path snapshot)
         with-cache
@@ -1183,7 +1224,7 @@
                   (some? cur-scroll)  (assoc-in (conj wp :scroll) cur-scroll)
                   (some? cur-hscroll) (assoc-in (conj wp :hscroll) cur-hscroll))]
     (compare-and-set! editor snapshot updated)
-    viewports))
+    (when viewports (select-keys painted [:viewports :dividers]))))
 
 (defn- commit-key! [key size clipboard!]
   (let [[before after] (swap-vals! editor
@@ -1201,13 +1242,13 @@
     (swap! editor #(-> (dissoc % :exit) (msg "Quit canceled: could not save session")))))
 
 (defn command-loop [{:keys [active? input! render!]}]
-  (loop [last-viewports nil]
+  (loop [last-paint nil]
     (when-let [[rows cols] (t/apply-pending-resize!)]
       (swap! editor assoc :rows rows :cols cols))
-    (let [viewports (or (render-terminal!) last-viewports)
+    (let [painted (or (render-terminal!) last-paint)
           key (t/read-key-timeout (if (and active? (active?)) 16 100))]
       (if key
-        (commit-key! (if (= :mouse (:type key)) (assoc key :viewports viewports) key)
+        (commit-key! (if (= :mouse (:type key)) (merge key painted) key)
                      nil t/set-clipboard!)
         (session/journal-tick! editor))
       (when input! (input!))
@@ -1233,7 +1274,7 @@
       (view/use-theme! (:theme @editor))
       (when (:exit @editor) (persist-quit! editor))
       (when (and render! (not (:exit @editor))) (render!))
-      (when-not (:exit @editor) (recur viewports)))))
+      (when-not (:exit @editor) (recur painted)))))
 
 (defn- run-all
   "Run each no-arg fn, logging and continuing on failure."

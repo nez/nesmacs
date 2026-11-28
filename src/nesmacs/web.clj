@@ -40,11 +40,14 @@
             "resize" (when (and (= 3 (count event)) (int? a) (int? b)
                                 (<= 2 a 300) (<= 2 b 500))
                        {:type :resize :rows a :cols b})
-            "mouse" (when (and (= 4 (count event)) (nat-int? b) (nat-int? c)
-                               (contains? #{"click" "up" "down"} a))
-                      (if (= a "click")
-                        {:type :mouse :action :press :button 0 :row b :col c}
-                        {:type :mouse :action :scroll :direction (keyword a) :row b :col c}))
+            "mouse" (when (and (= 4 (count event)) (int? b) (int? c)
+                               (<= 0 b 299) (<= 0 c 499))
+                      (let [e {:type :mouse :row b :col c}]
+                        (case a
+                          "click" (assoc e :action :press :button 0)
+                          ("grab" "drag" "release" "cancel") (assoc e :action (keyword a) :button 0)
+                          ("up" "down") (assoc e :action :scroll :direction (keyword a))
+                          nil)))
             nil))))))
 
 (defn- render-frame [s]
@@ -85,7 +88,10 @@
 (defn- ws-handler [clients ^ArrayBlockingQueue input req]
   (http/as-channel req
     {:on-open (fn [ch] (swap! clients assoc ch (atom {})))
-     :on-close (fn [ch _] (swap! clients dissoc ch))
+     :on-close (fn [ch _]
+                 (when-let [client (get @clients ch)]
+                   (swap! clients dissoc ch)
+                   (.offer input [ch client {:type :mouse :action :cancel}])))
      :on-receive
      (fn [ch msg]
        (when-let [client (get @clients ch)]
@@ -113,23 +119,26 @@
     (let [size (select-keys event [:rows :cols])]
       (when (not= size (:size @client))
         (reset! client {:size size})))
-    (when-let [size (:size @client)]
-      (let [mouse? (= :mouse (:type event))]
-        (when (or (not mouse?) (:viewports @client))
-          (commit-key! (if mouse? (assoc event :viewports (:viewports @client)) event)
-                       size
-                       #(when (<= (count %) 100000) (send! ch ["clipboard" %]))))))))
+    (let [{:keys [size viewports dividers]} @client
+          mouse? (= :mouse (:type event))]
+      (when (and size (or (not mouse?) viewports (= :cancel (:action event))))
+        (commit-key! (cond-> event mouse?
+                       (assoc :viewports viewports :dividers dividers :mouse-source ch))
+                     size
+                     #(when (<= (count %) 100000) (send! ch ["clipboard" %])))))))
 
 (defn- render-clients! [clients state]
   (doseq [[ch client] @clients]
     (let [{:keys [size sig]} @client]
       (when size
         (try
-          (let [{:keys [frame sig viewports]}
+          (let [{:keys [frame sig viewports dividers]}
                 (render-frame (assoc (merge state size) :render-sig sig))]
             (when (seq frame)
-              (if (send! ch ["frame" (:rows size) (:cols size) frame])
-                (swap! client assoc :sig sig :viewports viewports)
+              (if (send! ch ["frame" (:rows size) (:cols size) frame
+                             (mapv #(select-keys % [:kind :row :col :len])
+                                   (filter #(> (:span %) 3) dividers))])
+                (swap! client assoc :sig sig :viewports viewports :dividers dividers)
                 (swap! clients dissoc ch))))
           (catch Exception e
             (log/log "web: render error:" (.getMessage e))
