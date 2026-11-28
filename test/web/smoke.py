@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """Exercise the packaged web client in Chrome against the real editor in a PTY."""
 
-import fcntl
 import json
 import os
-import pty
 import shutil
 import signal
 import socket
-import struct
 import subprocess
+import sys
 import tempfile
-import termios
 import time
 import urllib.request
 from pathlib import Path
 
 import websocket
 
-ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pty"))
+from editor_pty import poll_exit, read_chunk, start, stop
 CHROME = os.environ.get("NESMACS_CHROME") or next(
     (path for name in ("google-chrome", "chromium", "chromium-browser")
      if (path := shutil.which(name))),
@@ -50,22 +48,13 @@ class Editor:
 
     def start(self):
         old_size = self.log.stat().st_size if self.log.exists() else 0
-        self.pid, self.master = pty.fork()
-        if self.pid == 0:
-            os.chdir(ROOT)
-            os.environ.update(HOME=str(self.home), NESMACS_WEB_PORT=str(self.port),
-                              NESMACS_NREPL_PORT="0")
-            termios_size = struct.pack("HHHH", 24, 80, 0, 0)
-            fcntl.ioctl(0, termios.TIOCSWINSZ, termios_size)
-            if jar := os.environ.get("NESMACS_WEB_JAR"):
-                os.execvp("java", ["java", f"-Duser.home={self.home}", "-jar", jar])
-            os.execvp("clojure", ["clojure", f"-J-Duser.home={self.home}", "-M:run"])
-        os.set_blocking(self.master, False)
+        self.pid, self.master = start(self.home,
+                                      env={"NESMACS_WEB_PORT": str(self.port)},
+                                      jar=os.environ.get("NESMACS_WEB_JAR"))
 
         def ready():
             self.drain()
-            done, _ = os.waitpid(self.pid, os.WNOHANG)
-            if done:
+            if poll_exit(self.pid) is not None:
                 os.close(self.master)
                 self.pid = None
                 raise AssertionError("editor exited during startup")
@@ -76,32 +65,24 @@ class Editor:
         wait_for(ready, "editor did not start its web server", timeout=180)
 
     def drain(self):
-        try:
-            while data := os.read(self.master, 65536):
-                self.terminal_output = (self.terminal_output + data)[-20000:]
-        except OSError:
-            # A nonblocking PTY has no bytes available or its child closed it.
-            pass
+        while self.pid is not None and (data := read_chunk(self.master, timeout=0)):
+            self.terminal_output = (self.terminal_output + data)[-20000:]
 
     def stop(self):
         if self.pid is not None:
-            try:
-                os.killpg(self.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(self.pid, 0)
-            os.close(self.master)
+            stop(self.pid, self.master)
             self.pid = None
 
     def wait_for_exit(self):
         def exited():
             self.drain()
-            done, status = os.waitpid(self.pid, os.WNOHANG)
-            if done:
+            status = poll_exit(self.pid)
+            if status is not None:
                 os.close(self.master)
                 self.pid = None
-                assert os.waitstatus_to_exitcode(status) == 0
-            return done
+                assert status == 0
+                return True
+            return False
 
         wait_for(exited, "editor did not exit cleanly")
 
@@ -122,7 +103,7 @@ class Browser:
                 CHROME, "--headless", "--disable-gpu", "--no-first-run",
                 "--remote-debugging-port=0", f"--user-data-dir={profile}",
                 "--window-size=1100,750", "about:blank",
-            ], stdout=log, stderr=subprocess.STDOUT)
+            ], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             port_file = profile / "DevToolsActivePort"
             port = wait_for(lambda: port_file.read_text().splitlines()[0] if port_file.exists() else None,
@@ -155,11 +136,14 @@ class Browser:
         if self.connection:
             self.connection.close()
         if self.process:
-            self.process.terminate()
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             try:
                 self.process.wait(5)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                os.killpg(self.process.pid, signal.SIGKILL)
                 self.process.wait()
 
     def call(self, method, **params):

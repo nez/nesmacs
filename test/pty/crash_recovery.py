@@ -5,13 +5,13 @@ restart with the same HOME, and require the edit to be back on screen.
 Run with `make crash`. Uses a temp HOME so it never touches the real ~/.nesmacs.
 """
 import os
-import signal
+import shutil
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-from editor_pty import read_until, start
+from editor_pty import read_until, start, stop
 
 TIMEOUT = 180
 MARKER = b"KILL9MARKER"
@@ -22,18 +22,8 @@ doc = home / "doc.txt"
 doc.write_text("needle-line\n")
 
 
-def kill9(pid):
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        os.waitpid(pid, 0)
-    except ChildProcessError:
-        pass
-
-
 ok = False
+pid = None
 try:
     # 1. open the file, type a marker at point 0, and die before the snapshot.
     pid, fd = start(home)
@@ -49,7 +39,8 @@ try:
     out, typed = read_until(fd, lambda data: MARKER in data, time.monotonic() + TIMEOUT, out)
     if not typed:
         raise RuntimeError("marker never rendered")
-    kill9(pid)                                     # before the next snapshot
+    stop(pid, fd)                                  # before the next snapshot
+    pid = None
 
     journal = home / ".nesmacs" / "journal.edn"
     had_journal = journal.exists()
@@ -59,20 +50,15 @@ try:
     out, restored = read_until(fd, lambda data: MARKER in data, time.monotonic() + TIMEOUT)
     os.write(fd, b"\x18\x03")                      # C-x C-c
     read_until(fd, lambda _: False, time.monotonic() + 3, out)      # drain the exit
-    kill9(pid)
 
     ok = had_journal and restored
     print("journal=%s restored=%s" % (had_journal, restored))
 except Exception as e:  # noqa: BLE001 - report and fail
     print("FAIL: %s" % e)
 finally:
-    for child in home.rglob("*"):
-        if child.is_file():
-            child.unlink()
-    for child in sorted(home.rglob("*"), reverse=True):
-        if child.is_dir():
-            child.rmdir()
-    home.rmdir()
+    if pid is not None:
+        stop(pid, fd)
+    shutil.rmtree(home)
 
 print("PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

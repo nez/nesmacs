@@ -6,13 +6,13 @@ real ~/.nesmacs. Asserts the startup log (config loaded, clean exit) and that a
 M-! job streams into its buffer while the editor keeps accepting keys.
 """
 import os
-import signal
+import shutil
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-from editor_pty import read_chunk, start
+from editor_pty import read_chunk, start, stop
 
 TIMEOUT = 180
 
@@ -50,14 +50,7 @@ while time.time() - start < TIMEOUT:
         os.write(fd, b"\x18\x03")
         sent_exit = True
 
-try:
-    os.kill(pid, 0)
-    alive = True
-except ProcessLookupError:
-    alive = False
-if alive:
-    os.kill(pid, signal.SIGKILL)
-    os.waitpid(pid, 0)
+stop(pid, fd)
 
 log = ""
 logfile = home / ".nesmacs" / "debug.log"
@@ -71,13 +64,7 @@ print("rendered=%s job_buffer=%s exited=%s bytes=%d"
 print("config_loaded=%s clean_exit=%s"
       % ("loaded init.clj" in log, "nesmacs exiting" in log))
 
-for child in home.rglob("*"):
-    if child.is_file():
-        child.unlink()
-for child in sorted(home.rglob("*"), reverse=True):
-    if child.is_dir():
-        child.rmdir()
-home.rmdir()
+shutil.rmtree(home)
 
 print("PASS" if ok else "FAIL: log:\n" + log[-2000:])
 sys.exit(0 if ok else 1)

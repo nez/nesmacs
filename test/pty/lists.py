@@ -9,7 +9,6 @@ Uses a temp HOME (and -Duser.home) so it never touches the real ~/.nesmacs.
 import os
 import re
 import shutil
-import signal
 import stat
 import subprocess
 import sys
@@ -17,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from editor_pty import read_chunk, read_until as wait_for_output, start
+from editor_pty import poll_exit, read_chunk, read_until as wait_for_output, start, stop
 
 TIMEOUT = 60
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]")
@@ -92,16 +91,14 @@ def read_until(needle, seconds=TIMEOUT, label=None):
 
 def wait_exit(seconds=30):
     global out
-    end = time.time() + seconds
-    while time.time() < end:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
         data = read_chunk(fd)
-        if data == b"":
-            return True
         if data:
             out += data
-        done, _ = os.waitpid(pid, os.WNOHANG)
-        if done:
-            return True
+        status = poll_exit(pid)
+        if status is not None:
+            return status == 0
     return False
 
 
@@ -157,14 +154,7 @@ try:
     checks.append(("clean exit", exited))
     ok &= exited
 finally:
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        os.waitpid(pid, 0)
-    except ChildProcessError:
-        pass
+    stop(pid, fd)
 
 log = ""
 logfile = home / ".nesmacs" / "debug.log"
