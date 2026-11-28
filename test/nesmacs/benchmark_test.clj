@@ -31,7 +31,7 @@
 
 (defn- type-char [state]
   (let [b (get-in state [:bufs "*bench*"])
-        p (min (:point b) (max 0 (dec (count (str (:text b))))))
+        p (min (:point b) (max 0 (dec (count (:text b)))))
         b' (buf/edit b p p "x")]
     (-> state
         (assoc-in [:bufs "*bench*"] b')
