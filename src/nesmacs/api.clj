@@ -5,7 +5,8 @@
    atom under `-main` (so nREPL callers need no wrapping). `nesmacs.ed` binds it
    to a per-command atom during `M-:`, so the same calls are safe inside and
    outside the command loop's transaction."
-  (:require [nesmacs.cmd :as cmd]
+  (:require [nesmacs.buf :as buf]
+            [nesmacs.cmd :as cmd]
             [nesmacs.keymap :as keymap]
             [nesmacs.mode :as mode]
             [nesmacs.props :as props]
@@ -42,6 +43,22 @@
   (apply swap! (target) f args)
   nil)
 
+(defn after-command
+  "Queue an effect for the editor loop after the command commits. The effect
+   receives a function that applies a state transition to the live editor."
+  [s effect]
+  (update s ::effects (fnil conj []) effect))
+
+(defn run-effects!
+  "Drain committed effects on the editor thread, outside the command swap."
+  [editor]
+  (when (seq (::effects @editor))
+    (let [[before] (swap-vals! editor dissoc ::effects)
+          publish! (fn [f & args] (apply swap! editor f args))]
+      (doseq [effect (::effects before)]
+        (try (effect publish!)
+             (catch Exception e (publish! cmd/msg-error "Extension effect failed" e)))))))
+
 (defn- install [s path key f]
   (let [cmd (handler f)]
     (-> s (keymap/bind path (keymap/parse-key-string key) cmd)
@@ -52,6 +69,13 @@
    become visible to M-x."
   [key f]
   (apply! install [:bindings] key f))
+
+(defn register-command!
+  "Expose a named command Var in M-x without assigning a key."
+  [command]
+  (when-not (var? command)
+    (throw (IllegalArgumentException. "register-command! expects a Var")))
+  (apply! register-command command (handler command)))
 
 (defn add-hook!
   "Append `f` to a hook. Accepts `:clojure-mode-hook` or `'clojure-mode-hook`."
@@ -81,20 +105,13 @@
   [face attrs]
   (view/set-face-attr! (keyword face) attrs))
 
-(defn- clamp-range
-  "Clamp [from to) to the buffer text, the way buf/edit does."
-  [b from to]
-  (let [n    (count (:text b))
-        from (-> (long from) (max 0) (min n))]
-    [from (-> (long to) (max from) (min n))]))
-
 (defn- update-props!
   "Clamp the range to the current buffer, then replace :props with
    `(f props from to)`."
   [f from to]
   (apply! cmd/update-cur
           (fn [b]
-            (let [[from to] (clamp-range b from to)]
+            (let [[from to] (buf/clamp-range b from to)]
               (assoc b :props (f (:props b) from to))))))
 
 (defn add-prop!

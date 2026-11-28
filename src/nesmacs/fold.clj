@@ -35,17 +35,23 @@
 
 (defn ranges
   "Candidate fold ranges for `buf`, sorted and de-duplicated."
-  [buf-key buf text version]
-  (let [l (:language buf)
-        lisp? (#{:clojure-mode :emacs-lisp-mode} (:mode buf))
-        ts (when l (if (= "clojure" (:id l))
-                      (treesit/lit-folds buf-key l text version)
-                      (treesit/folds buf-key l text version)))
-        rs (or ts (when lisp? (lisp-ranges text)))]
-    (->> (or rs [])
-         (filter (fn [[s e]] (> (long e) (long s))))
-         (sort-by first)
-         (vec))))
+  ([buf-key {:keys [text version] :as buf}]
+   (ranges buf-key buf text version))
+  ([buf-key {:keys [language mode]} text version]
+   (let [lisp? (#{:clojure-mode :emacs-lisp-mode} mode)
+         ts (when language
+              (if (= "clojure" (:id language))
+                (treesit/lit-folds buf-key language text version)
+                (treesit/folds buf-key language text version)))]
+     (->> (or ts (when lisp? (lisp-ranges text)))
+          (filter (fn [[s e]] (> (long e) (long s))))
+          (sort-by first)
+          vec))))
+
+(defn collapsed-ranges [buf-key {:keys [collapsed large-file] :as buf}]
+  (if (and (seq collapsed) (not large-file))
+    (filterv #(contains? collapsed (first %)) (ranges buf-key buf))
+    []))
 
 ;; --- Display math ---
 
@@ -91,9 +97,16 @@
   (if-let [[s _] (covering folds line)] (long s) line))
 
 (defn effective
-  "Folds to apply while `line` must stay visible (point or scroll there)."
+  "Disjoint folds to apply while `line` must stay visible (point or scroll there)."
   [folds ^long line]
-  (filterv (fn [[s e]] (not (and (< (long s) line) (<= line (long e))))) folds))
+  (reduce (fn [result [start end :as fold]]
+            (let [[prev-start prev-end] (peek result)]
+              (cond
+                (and (< start line) (<= line end)) result
+                (and prev-end (<= start prev-end))
+                (conj (pop result) [prev-start (max prev-end end)])
+                :else (conj result fold))))
+          [] folds))
 
 (defn toggle
   "Collapse or expand the innermost range starting at or containing `line`."

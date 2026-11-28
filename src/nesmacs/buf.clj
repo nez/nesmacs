@@ -7,6 +7,11 @@
 (defn normalize-eol [^String s]
   (-> s (str/replace "\r\n" "\n") (str/replace "\r" "\n")))
 
+(defn internal-name?
+  "Leading space reserves a buffer name for editor internals."
+  [name]
+  (str/starts-with? name " "))
+
 (def undo-limit 1000)
 
 ;; Large-file threshold: skip fontification and property work above this size.
@@ -41,6 +46,13 @@
    the file may have shrunk while the editor was closed."
   [b p]
   (-> (long (or p 0)) (max 0) (min (count (:text b)))))
+
+(defn clamp-range
+  "Clamp both endpoints to the buffer, keeping the end at or after the start."
+  [b from to]
+  (let [n (count (:text b))
+        from (-> (long from) (max 0) (min n))]
+    [from (-> (long to) (max from) (min n))]))
 
 (defn set-point [b f]
   (assoc b :point (-> (f (:text b) (:point b))
@@ -89,33 +101,33 @@
    fresh entry, keeping redo boundaries meaningful."
   [undo entry had-redo?]
   (let [{pf :from pold :old pnew :new} (peek undo)]
-    (if (and (not had-redo?)
+    (if (and (not had-redo?) (not (:separate? entry)) (not (:separate? (peek undo)))
              (= "" (:old entry)) (= "" pold) (string? pnew)
              (string? (:new entry)) (not= "" (:new entry))
              (= (:from entry) (+ pf (count pnew))))
       (conj (pop undo) (assoc (peek undo) :new (str pnew (:new entry))))
       (bounded-conj undo undo-limit entry))))
 
-(defn edit [b from to repl]
-  (let [t         (:text b)
-        ;; Normalize: callers sometimes pass out-of-order or out-of-bounds
-        ;; ranges (query-replace paths, dired ops). Clamp once here so the
-        ;; underlying gap/edit never sees a bad range.
-        tn        (count t)
-        from      (-> (long from) (max 0) (min tn))
-        to        (-> (long to)   (max from) (min tn))
-        repl-len  (count repl)]
-    (if (and (= from to) (zero? repl-len))
-      ;; No-op: don't mark modified, don't pollute undo/redo. A zero-width
-      ;; insert of "" used to clear redo and bump :modified spuriously.
-      b
-      (let [old (if (= from to)
-                  ""
-                  (.toString (.subSequence ^CharSequence t (int from) (int to))))
-            had-redo? (seq (:redo b))]
-        (-> (apply-change b from to repl)
-            (update :undo push-undo {:from from :old old :new repl} had-redo?)
-            (assoc :redo []))))))
+(defn edit
+  ([b from to repl] (edit b from to repl false))
+  ([b from to repl separate-undo?]
+   (let [[from to] (clamp-range b from to)]
+     (if (and (= from to) (zero? (count repl)))
+       b
+       (let [old (if (= from to)
+                   ""
+                   (gap/substr (:text b) from to))
+             had-redo? (seq (:redo b))
+             entry (cond-> {:from from :old old :new repl}
+                     separate-undo? (assoc :separate? true))]
+         (-> (apply-change b from to repl)
+             (update :undo push-undo entry had-redo?)
+             (assoc :redo [])))))))
+
+(defn replace-text
+  "Replace the whole buffer through the normal undoable edit path."
+  [b text]
+  (edit b 0 (count (:text b)) text))
 
 (defn- replay
   "Pop the latest entry from src-key, swap its `gone` text for its `kept` text,

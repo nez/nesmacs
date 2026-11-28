@@ -103,7 +103,7 @@
   (swap! theme-version inc)
   nil)
 
-(defn- ensure-visible [content point scroll rows folds]
+(defn- ensure-visible [content point-line scroll rows folds]
   ;; A pane with body-rows <= 0 (e.g. a 1-row split that gets 0 body rows
   ;; after reserving the modeline) has nowhere to show the point, so
   ;; scrolling it produces out-of-range line indices — the old "anchor on
@@ -111,9 +111,7 @@
   ;; and crash with ArrayIndexOutOfBoundsException.
   (if (<= rows 0)
     scroll
-    (let [point-line  (gap/line-of content point)
-          folds (fold/effective folds point-line)
-          scroll-line (fold/visible-start folds (gap/line-of content scroll))
+    (let [scroll-line (fold/visible-start folds (gap/line-of content scroll))
           pd (fold/visible-before folds point-line)
           sd (fold/visible-before folds scroll-line)]
       (cond
@@ -144,7 +142,7 @@
   (t/sg (if (map? face) face (get faces face (:default faces)))))
 
 (defn- safe-text [^String s]
-  (str/replace s #"[\x00-\x1f\x7f]" "�"))
+  (str/replace s #"[\x00-\x1f\x7f-\x9f]" "�"))
 
 (defn- write-spans!
   "Write row at (screen-row, screen-col) with face spans. Content is clipped
@@ -400,17 +398,13 @@
         mode (:mode buf)
         version (:version buf)
         large-file? (:large-file buf)
-        fold-ranges (if large-file? [] (fold/ranges buf-name buf content version))
-        collapsed-in (set (:collapsed buf))
+        point-line (gap/line-of content point)
+        folds (fold/effective (fold/collapsed-ranges buf-name buf) point-line)
         scroll-in (:scroll window 0)
         hscroll-in (:hscroll window 0)
-        scroll (if current? (ensure-visible content point scroll-in body-rows fold-ranges)
+        scroll (if current? (ensure-visible content point-line scroll-in body-rows folds)
                    scroll-in)
-        point-line (gap/line-of content point)
-        folds (fold/effective fold-ranges point-line)
-        ;; Only folds that are actually applied may show an ellipsis; a fold
-        ;; opened because point sits inside it must not claim to be collapsed.
-        collapsed (into #{} (filter collapsed-in) (map first folds))
+        collapsed (into #{} (map first) folds)
         cursor-row (- (fold/visible-before folds point-line)
                       (fold/visible-before folds
                                            (fold/visible-start folds
@@ -422,7 +416,11 @@
         [r-lo r-hi] (when (and mark current?) (sort [(long mark) (long point)]))
         region (when (and r-lo (< r-lo r-hi))
                  (props/make r-lo r-hi :region {:owner :region :priority 100}))
-        props (:props buf)
+        props (cond-> (:props buf)
+                (and current? (:highlight-line? buf) (pos? point-line))
+                (conj (props/make (gap/nth-line-start content point-line)
+                                  (gap/nth-line-end content point-line)
+                                  :region {:priority 10})))
         hl-spans (when (and (not large-file?) (:language buf))
                    (treesit/spans buf-name (:language buf) content version))
         {:keys [font-lock font-lock-window]}
@@ -474,19 +472,23 @@
           start   (max 0 (- (min (inc (max 0 sel)) (count cs)) max-lines))
           shown   (subvec cs start (+ start max-lines))]
       (doseq [i (range max-lines)
-              :let [r (- rows 1 max-lines) c (get shown i)]]
+              :let [r (- rows 1 max-lines) c (clip-to-cols (str/trim (str (get shown i))) cols)]]
         (when c
           (t/move (+ r i) 0)
           (if (= (or sel -1) (+ start i))
             (t/sg (:region faces))
             (t/reset-sg))
-          (t/tw (str/trim (str c)))
+          (t/tw c)
           (t/reset-sg)
-          (pad-to-cols! (text/display-width (str c)) cols))))))
+          (pad-to-cols! (text/display-width c) cols))))))
+
+(defn- echo-message [state]
+  (let [mode (get-in state [:bufs (:buf state) :mode])]
+    (or (:msg state) (get-in state [:modes mode :hint]) "")))
 
 (defn- render-echo-area
   [{:keys [rows cols] :as state}]
-  (let [mini (:mini state) isearch (:isearch state) msg (:msg state)
+  (let [mini (:mini state) isearch (:isearch state)
         mini-row (dec rows)]
     (t/move mini-row 0)
     (cond
@@ -517,7 +519,7 @@
         (pad-to-cols! (text/display-width p') cols))
 
       :else
-      (let [m (clip-to-cols (or msg "") cols)]
+      (let [m (clip-to-cols (echo-message state) cols)]
         (t/reset-sg) (t/tw m)
         (pad-to-cols! (text/display-width m) cols)))))
 
@@ -528,7 +530,7 @@
     [(:buffer window) (:version buf) (:point buf) (:mark buf)
      (:mode buf) (:minor-modes buf) (:modified buf) (:name buf) (:title buf)
      (:props buf) (:scroll window) (:hscroll window) (:collapsed buf)
-     (:gutter buf) current?]))
+     (:gutter buf) (:highlight-line? buf) current?]))
 
 (defn- echo-sig [state]
   (cond
@@ -538,7 +540,7 @@
        (get-in state [:mini :candidates]) (get-in state [:mini :sel])])
     (:isearch state)
     [:isearch (:direction (:isearch state)) (:pattern (:isearch state))]
-    :else [:msg (:msg state)]))
+    :else [:msg (echo-message state)]))
 
 (defn- frame-sig [state layouts cur-path]
   [(:rows state) (:cols state) layouts cur-path @theme-version
@@ -550,21 +552,13 @@
 ;; --- Top-level render ---
 
 (defn render
-  "Render the whole frame. Returns {:sig :cur-scroll :cur-hscroll}. If the
+  "Render the whole frame. Returns its signature and the painted viewports. If the
    input signature equals (:render-sig state) the frame is skipped and only
    {:sig} is returned — the caller should write :sig back into state and
    leave scroll/hscroll untouched."
   [state]
-  (let [rows (:rows state) cols (:cols state)
-        ;; Minimum sensible frame is 2 rows (one body + echo area). Smaller
-        ;; values (terminals being resized, stale :rows from SIGWINCH storms)
-        ;; would produce negative body-rows and ANSI cursor moves to row 0
-        ;; or below — clamp up front.
-        rows (max 2 (long rows))
-        cols (max 1 (long cols))
-        window-rows (dec rows)   ; reserve last row for echo area
-        tree (:windows state)
-        {layouts :layout divs :dividers} (win/geometry tree window-rows cols)
+  (let [tree (:windows state)
+        {layouts :layout divs :dividers} (win/frame-geometry state)
         cur-path (:cur-window state)
         sig (frame-sig state layouts cur-path)]
     (if (= sig (:render-sig state))
@@ -605,4 +599,8 @@
           {:sig sig
            :cur-scroll (:scroll cur-win)
            :cur-hscroll (:hscroll cur-win)
+           :viewports (into {} (map (fn [[path w]]
+                                      [path (assoc (select-keys w [:buffer :scroll :hscroll :gutter-width])
+                                                   :rect (get layouts path))]))
+                            @rendered)
            :font-lock-updates @cache-ups})))))

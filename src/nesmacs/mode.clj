@@ -3,15 +3,17 @@
    :modes {name {:type :major|:minor :keymap {...}}} and :hooks {name [fns]}.
    File-extension -> mode comes from the language registry in `nesmacs.lang`."
   (:require [nesmacs.cmd :as cmd]
+            [nesmacs.keymap :as keymap]
             [nesmacs.lang :as lang]))
 
 ;; --- Registration ---
 
 (defn register
-  [s mode-name type & {:keys [keymap]}]
-  (-> s
-      (assoc-in [:modes mode-name :type] type)
-      (update-in [:modes mode-name :keymap] #(merge (or % {}) keymap))))
+  [s mode-name type & {:keys [keymap hint]}]
+  (cond-> (-> s
+              (assoc-in [:modes mode-name :type] type)
+              (update-in [:modes mode-name :keymap] #(merge (or % {}) keymap)))
+    hint (assoc-in [:modes mode-name :hint] hint)))
 
 ;; --- Hooks ---
 
@@ -47,11 +49,14 @@
 ;; --- Key lookup ---
 ;; Active minor modes override the major mode, which overrides global.
 
-(defn lookup-key [s key]
-  (let [b (cmd/cur s)]
-    (or (some (fn [m] (get-in s [:modes m :keymap key]))
-              (rseq (vec (:minor-modes b))))
-        (get-in s [:modes (:mode b) :keymap key]))))
+(defn lookup-key
+  ([s key] (lookup-key s key nil))
+  ([s key global]
+   (let [{:keys [mode minor-modes]} (cmd/cur s)]
+     (reduce (fn [binding m]
+               (keymap/inherit binding (get-in s [:modes m :keymap key])))
+             global
+             (cons mode minor-modes)))))
 
 ;; --- File extension → mode ---
 

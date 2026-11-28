@@ -43,6 +43,11 @@
     (is (= #{} (fold/toggle ranges #{2} 3)))
     (testing "a line outside every range changes nothing"
       (is (= #{7} (fold/toggle ranges #{7} 20))))))
+(deftest nested-folds-hide-each-line-once
+  (let [folds [[0 8] [2 5] [3 4]]]
+    (is (= [[0 8]] (fold/effective folds 9)))
+    (is (= [[2 5]] (fold/effective folds 1)))))
+
 (deftest clojure-folds-come-from-nested-lits
   (let [text (str "(defn f [x]\n"
                   "  (let [m {:a 1\n"

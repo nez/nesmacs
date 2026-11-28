@@ -17,26 +17,28 @@
 
 (defn- append-text [b ^String text]
   (let [n (count (:text b))]
-    (cond
-      (:job-truncated b) b
-      (>= n max-output)  (-> b (assoc :job-truncated true :modified false))
-      (> (+ n (count text)) max-output)
-      (-> (buf/edit b n n (subs text 0 (- max-output n)))
-          (buf/edit max-output max-output "\n[output truncated]\n")
-          (assoc :job-truncated true :modified false))
-      :else
-      ;; buf/edit shifts point by the insertion, so a point at the end follows
-      ;; output while a point elsewhere stays put.
-      (-> (buf/edit b n n text) (assoc :modified false)))))
+    (cond->
+      (cond
+        (:job-truncated b) b
+        (>= n max-output) (assoc b :job-truncated true :modified false)
+        (> (+ n (count text)) max-output)
+        (-> (buf/edit b n n (subs text 0 (- max-output n)))
+            (buf/edit max-output max-output "\n[output truncated]\n")
+            (assoc :job-truncated true :modified false))
+        :else (assoc (buf/edit b n n text) :modified false))
+      ;; Appending normally moves a point at EOF. Search starts at the first hit.
+      (= false (:job-follow-output? b)) (assoc :point (:point b)))))
 
 (defn start
   "Start `argv` with its output going to buffer `buf-name`, creating the buffer
    (and showing it) if needed. `:mode` defaults to :job-mode. `argv` is the
-   exact argument vector."
-  [s {:keys [argv dir buf-name mode]}]
+   exact argument vector. Set :follow-output? false to keep point on the results."
+  [s {:keys [argv dir buf-name mode follow-output?]
+      :or {follow-output? true}}]
   (let [b (-> (buf/make buf-name "" nil)
               (assoc :mode (or mode :job-mode) :read-only true :journal? false
-                     :job-command (vec argv) :job-dir dir :job-status :running))]
+                     :job-command (vec argv) :job-dir dir :job-status :running
+                     :job-follow-output? follow-output?))]
     (try
       (let [h (proc/start {:argv argv :dir dir :kind :job})]
         (-> s
@@ -98,6 +100,22 @@
   [s]
   (apply-drain s (drain! (:bufs s))))
 
+(defn consume-results!
+  "Prepare results for matching job buffers outside the editor swap. Publish
+   only while the same output is still pending. Each run owns a fresh Text,
+   and changes to focus or fontification leave that Text in place."
+  [editor pending? prepare publish]
+  (doseq [[name b] (:bufs @editor)
+          :when (pending? b)]
+    (let [result (prepare b)]
+      (swap! editor
+             (fn [s]
+               (let [current (cmd/buf s name)]
+                 (if (and (pending? current)
+                          (identical? (:text b) (:text current)))
+                   (publish s name current result)
+                   s)))))))
+
 (defn kill
   "C-c C-k: kill the process behind the current job buffer."
   [s]
@@ -114,5 +132,6 @@
   (let [b (cmd/cur s)]
     (if-let [argv (:job-command b)]
       (do (when-let [h (some-> (:job-proc b) proc/by-id)] (proc/kill! h))
-          (start s {:argv argv :dir (:job-dir b) :buf-name (:name b)}))
+          (start s {:argv argv :dir (:job-dir b) :buf-name (:name b)
+                    :mode (:mode b) :follow-output? (:job-follow-output? b)}))
       (cmd/msg s "Not a job buffer"))))

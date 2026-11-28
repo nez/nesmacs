@@ -1,6 +1,7 @@
 (ns nesmacs.deferred-test
   (:require [clojure.test :refer [deftest is]]
             [nesmacs.deferred :as deferred]
+            [nesmacs.gap :as gap]
             [nesmacs.window :as win]))
 
 (defn- state [job-buf]
@@ -42,12 +43,30 @@
              :deferred (fn [_] ["*list*" {:name "*list*" :mode :nav-mode
                                           :header "" :entries [] :format-entry str}])
              :deferred-return "*prev*"}
-        s (assoc (state job) :buf " *mini*" :mini {:prompt "M-x: " :input "foo"})
+        s (assoc (state job) :buf " *mini*" :mini {:prompt "M-x: " :prev-buf "*job*"})
         editor (atom s)]
     (deferred/tick! editor)
     (let [s @editor]
       (is (contains? (:bufs s) "*list*") "listing exists")
-      (is (= " *mini*" (:buf s)) "focus stays in the prompt"))))
+      (is (= " *mini*" (:buf s)) "focus stays in the prompt")
+      (is (= "*prev*" (get-in s [:mini :prev-buf])))
+      (is (= "*prev*" (get-in s [:windows :buffer]))))))
+
+(deftest a-finished-job-cannot-publish-over-a-rerun
+  (let [editor (atom nil)
+        replacement {:text (gap/of "same output") :job-status :done
+                     :deferred (constantly "new result") :deferred-return "*prev*"}
+        original (assoc replacement :text (gap/of "same output")
+                        :deferred (fn [_]
+                                    (swap! editor assoc-in [:bufs "*job*"] replacement)
+                                    "old result"))]
+    (reset! editor (state original))
+    (deferred/tick! editor)
+    (is (identical? replacement (get-in @editor [:bufs "*job*"])))
+    (is (nil? (:msg @editor)))
+    (deferred/tick! editor)
+    (is (= "new result" (:msg @editor)))
+    (is (not (contains? (:bufs @editor) "*job*")))))
 
 (deftest a-running-job-is-left-alone
   (let [job {:name "*job*" :text "partial" :job-status :running

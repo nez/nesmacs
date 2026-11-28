@@ -1,61 +1,35 @@
-<!DOCTYPE html>
-<html><head>
-<title>nesmacs</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/addon-fit/lib/addon-fit.css">
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit/lib/addon-fit.js"></script>
-<style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#1a1a1a}
-#t{width:100%;height:100%}</style>
-</head><body>
-<div id="t"></div>
-<script>
-const term = new window.Terminal({cursorBlink:true, fontSize:14, theme:{background:'#1a1a1a'}});
-const fit = new window.FitAddon.FitAddon();
-term.loadAddon(fit);
-term.open(document.getElementById('t'));
-fit.fit();
-window.addEventListener('resize', () => fit.fit());
-
-const ws = new WebSocket(`ws://${location.host}/ws`);
-ws.onmessage = e => { term.reset(); term.write(e.data); };
-ws.onclose = () => term.write('\r\n[disconnected]');
-
-term.onKey(({key, domEvent}) => {
-  const k = domEvent;
-  let msg = null;
-
-  if (k.ctrlKey && !k.altKey) {
-    const ch = String.fromCharCode(k.keyCode + 32);
-    msg = '[:ctrl \\\\' + ch + ']';
-  } else if (k.altKey && !k.ctrlKey) {
-    const ch = k.key.length === 1 ? k.key : null;
-    if (ch) msg = '[:meta \\\\' + ch + ']';
-  } else if (k.key === 'Backspace') {
-    msg = ':backspace';
-  } else if (k.key === 'Enter') {
-    msg = ':return';
-  } else if (k.key === 'Tab') {
-    msg = ':tab';
-  } else if (k.key === 'Escape') {
-    msg = ':escape';
-  } else if (k.key === 'ArrowUp') {
-    msg = ':up';
-  } else if (k.key === 'ArrowDown') {
-    msg = ':down';
-  } else if (k.key === 'ArrowLeft') {
-    msg = ':left';
-  } else if (k.key === 'ArrowRight') {
-    msg = ':right';
-  } else if (k.key === 'Home') {
-    msg = ':home';
-  } else if (k.key === 'End') {
-    msg = ':end';
-  } else if (key.length === 1 && !k.ctrlKey && !k.altKey) {
-    msg = JSON.stringify(key);
-  }
-
-  if (msg && ws.readyState === 1) ws.send(msg);
-});
-</script>
-</body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nesmacs</title>
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <script defer src="/vendor/xterm.js"></script>
+  <script defer src="/vendor/addon-fit.js"></script>
+  <script defer src="/vendor/addon-unicode11.js"></script>
+  <script defer src="/client.js"></script>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #1a1a1a; }
+    #editor { width: 100%; height: 100%; }
+    #connection {
+      position: fixed;
+      inset: 0.5rem 0.5rem auto auto;
+      z-index: 1;
+      max-width: calc(100% - 2rem);
+      padding: 0.4rem 0.65rem;
+      border: 1px solid #817a6a;
+      border-radius: 0.25rem;
+      background: #28251f;
+      color: #f4e9cf;
+      font: 0.875rem/1.4 system-ui, sans-serif;
+      pointer-events: none;
+    }
+    #connection:empty { visibility: hidden; }
+  </style>
+</head>
+<body>
+  <main id="editor" aria-label="Nesmacs editor"></main>
+  <div id="connection" role="status">Connecting to Nesmacs…</div>
+</body>
+</html>

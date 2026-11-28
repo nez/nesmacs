@@ -2,7 +2,8 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [nesmacs.buf :as buf]
-            [nesmacs.testres :as testres]))
+            [nesmacs.testres :as testres]
+            [nesmacs.testutil :as tu]))
 
 (deftest plain-output-is-not-a-test-report
   (is (nil? (testres/parse "hello\nworld\n"))))
@@ -65,6 +66,23 @@
            (mapv #(select-keys % [:name :file :line])
                  (testres/failure-entries p))))))
 
+(deftest clojure-test-basename-resolves-only-to-a-unique-file
+  (let [root (tu/temp-dir "nesmacs-test-source")
+        source "test/demo/app_test.clj"
+        parsed (testres/parse "FAIL in (adds) (app_test.clj:12)\nRan 1 tests\n1 failures, 0 errors.\n")
+        entry #(-> (testres/show-results {} parsed (.getPath root))
+                   (get-in [:bufs "*Test Results*" :listbuf-entries 0]))]
+    (try
+      (doseq [path [source "other/demo/app_test.clj"]]
+        (let [file (java.io.File. root path)]
+          (.mkdirs (.getParentFile file))
+          (spit file "(ns demo.app-test)")
+          (when (= path source)
+            (is (= {:file source :line 12} (select-keys (entry) [:file :line]))))))
+      (is (nil? (:file (entry))))
+      (is (= "Multiple project files match app_test.clj" (:location-error (entry))))
+      (finally (tu/delete-tree root)))))
+
 (deftest pytest-output-is-parsed
   (let [out (str "test_math.py:5: AssertionError: assert 3 == 4\n"
                  "1 failed, 2 passed in 0.03s\n")
@@ -112,3 +130,13 @@
     (testres/tick! ed)
     (is (str/includes? (:msg @ed) "passed"))
     (is (nil? (get-in @ed [:bufs "*Test Results*"])))))
+
+(deftest a-closed-test-job-cannot-publish-a-report
+  (let [editor (atom {:bufs {"*Tests*" (assoc (buf/make "*Tests*" "ok 1 - passing\n" nil)
+                                              :test-report? true :job-status :done)}})
+        parse testres/parse]
+    (with-redefs [testres/parse (fn [output]
+                                 (swap! editor update :bufs dissoc "*Tests*")
+                                 (parse output))]
+      (testres/tick! editor))
+    (is (= {:bufs {}} @editor))))

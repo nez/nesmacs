@@ -31,36 +31,26 @@
   [s {:keys [argv dir job-name build]}]
   (-> (job/start s {:argv argv :dir dir :buf-name job-name})
       (update-in [:bufs job-name]
-                 assoc :deferred build :deferred-return (:buf (cmd/cur s)))))
+                 assoc :deferred build :deferred-return (:buf s))))
+
+(defn- pending? [b]
+  (and (:deferred b)
+       (#{:done :failed} (:job-status b))
+       (not (:deferred-done? b))))
+
+(defn- build-result [b]
+  (try ((:deferred b) (str (:text b)))
+       (catch Exception e (str "Error: " (.getMessage e)))))
+
+(defn- publish-result [s name b result]
+  (let [s (cmd/remove-buffer s name (:deferred-return b))]
+    (cond
+      (string? result) (cmd/msg s result)
+      (vector? result) (let [[buf-name spec] result] (listbuf/open s buf-name spec))
+      :else s)))
 
 (defn tick!
   "Editor-loop step: finish deferred jobs once and clean stale completion cache."
   [editor & [comp-cache]]
   (when comp-cache (cleanup-completion-cache! editor comp-cache))
-  (let [s @editor
-        done (keep (fn [[name b]]
-                     (when (and (:deferred b)
-                                (#{:done :failed} (:job-status b))
-                                (not (:deferred-done? b)))
-                       [name b]))
-                   (:bufs s))]
-    (doseq [[name b] done]
-      (swap! editor update-in [:bufs name] assoc :deferred-done? true)
-      (let [out   (str (:text b))
-            build (:deferred b)
-            res   (try (build out)
-                       (catch Exception e (str "Error: " (.getMessage e))))]
-        (cond
-          (string? res) (swap! editor
-                               (fn [st]
-                                 (-> st
-                                     (cond-> (and (:deferred-return b)
-                                                  (= (:buf st) name))
-                                       (cmd/set-cur-buffer (:deferred-return b)))
-                                     (cmd/msg res))))
-          (vector? res) (let [[buf-name spec] res]
-                          (swap! editor listbuf/open buf-name spec))
-          :else nil)
-        ;; The raw job buffer was only a pipe for this command; once the
-        ;; listing exists its contents are noise.
-        (swap! editor update :bufs dissoc name)))))
+  (job/consume-results! editor pending? build-result publish-result))

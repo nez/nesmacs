@@ -10,18 +10,25 @@
    Project file lists and project symbols are cached per root; a stale cache is
    dropped after `cache-ttl-ms` or on demand with `invalidate-cache!`."
   (:require [clojure.string :as str]
+            [nesmacs.buf :as buf]
             [nesmacs.cmd :as cmd]
+            [nesmacs.gap :as gap]
             [nesmacs.nav :as nav]
             [nesmacs.project :as project]))
 
 ;; --- Sources ---
+
+(defn prefix-match?
+  "Match a prefix case-insensitively while keeping the candidate's spelling."
+  [^String prefix ^String candidate]
+  (.regionMatches candidate true 0 prefix 0 (.length prefix)))
 
 (defn- match? [prefix s]
   (str/includes? (str/lower-case s) (str/lower-case prefix)))
 
 (defn buffers [prefix {:keys [state]}]
   (->> (keys (:bufs state))
-       (remove #(str/starts-with? % " "))
+       (remove buf/internal-name?)
        (filter #(match? prefix %))
        (sort)
        (take 200)
@@ -32,7 +39,7 @@
 
 (defn buffer-symbols [prefix {:keys [state]}]
   (->> (symbols-in (str (:text (cmd/cur state))))
-       (filter #(str/starts-with? % prefix))
+       (filter #(prefix-match? prefix %))
        (sort)
        (take 300)
        vec))
@@ -90,7 +97,7 @@
 (defn project-symbols [prefix {:keys [state]}]
   (when-let [root (project-root state)]
     (->> (root-symbols root)
-         (filter #(str/starts-with? % prefix))
+         (filter #(prefix-match? prefix %))
          (take 300)
          vec)))
 
@@ -102,6 +109,20 @@
   (or (get-in s [:completion-sources (:mode (cmd/cur s))])
       (get-in s [:completion-sources :default])
       default-sources))
+
+(defn set-input
+  "Replace minibuffer text and put point at the end."
+  [s input]
+  (cmd/update-cur s #(assoc % :text (gap/of input) :point (count input))))
+
+(defn select-candidate
+  "Fill the minibuffer with a candidate while keeping the current list."
+  [s index]
+  (let [{:keys [candidates completer]} (:mini s)]
+    (if-let [candidate (get candidates index)]
+      (cond-> (-> s (assoc-in [:mini :sel] index) (set-input candidate))
+        (map? completer) (update :mini assoc :input candidate :for candidate))
+      s)))
 
 ;; --- Requests ---
 
@@ -154,10 +175,25 @@
           (do
             ;; The previous prefix's request can no longer be shown.
             (swap! inflight dissoc (:request m))
-            (let [id (start! s prefix (sources-of (:completer m) s))]
-              (swap! editor #(-> % (assoc-in [:mini :for] prefix)
-                                   (assoc-in [:mini :request] id)
-                                   (assoc-in [:mini :sel] -1)))))
+            (let [state (assoc s :buf (:prev-buf m (:buf s)))
+                  id (start! state prefix (sources-of (:completer m) state))
+                  updated (swap! editor
+                                 (fn [current]
+                                   (if (= m (:mini current))
+                                     (update current :mini assoc :for prefix :request id :sel -1)
+                                     current)))]
+              (when (not= id (get-in updated [:mini :request]))
+                (swap! inflight dissoc id))))
           (when-let [r (and (:request m) (finished (:request m)))]
-            (swap! editor #(-> % (assoc-in [:mini :candidates] (:candidates r))
-                                 (assoc-in [:mini :request] nil)))))))))
+            (swap! editor
+                   (fn [current]
+                     (let [mini (:mini current)]
+                       (if (and (= (:request m) (:request mini)) (= prefix (:for mini))
+                                (= (:input m) (:input mini)))
+                         (let [candidates (:candidates r)]
+                           (cond-> (update current :mini
+                                           #(-> % (assoc :candidates candidates :request nil)
+                                                  (dissoc :tab-pending?)))
+                             (and (:tab-pending? mini) (= 1 (count candidates)))
+                             (select-candidate 0)))
+                         current))))))))))

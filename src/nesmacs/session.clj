@@ -110,19 +110,15 @@
                                       :in [] :dirty? true :last-capture 0)))
           ;; A file reloaded from disk may have shrunk, so the saved offsets can
           ;; point past the end.
-          (cond-> (assoc b :point (buf/clamp-pos b
-                                                   (when (integer? (:point d)) (:point d))))
+          (cond-> (-> b
+                      (assoc :point (buf/clamp-pos b (safe-int (:point d))))
+                      lang/with-file-language)
             (integer? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d)))
             (coll? (:collapsed d))
             (assoc :collapsed
                    (into #{} (filter #(and (integer? %)
                                            (< -1 (long %) (gap/line-count (:text b)))))
-                         (:collapsed d)))
-            ;; Language data is derived from the extension, not persisted, so
-            ;; restored buffers keep highlighting and comment syntax.
-            (lang/language-for-file file)
-            (assoc :language (lang/language-for-file file)
-                   :comment-start (:comment-start (lang/language-for-file file)))))))))
+                         (:collapsed d)))))))))
 
 (defn- window-tree->data
   "Serialize window tree, replacing buffer refs with names."

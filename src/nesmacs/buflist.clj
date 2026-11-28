@@ -1,11 +1,10 @@
 (ns nesmacs.buflist
   "*Buffer List* buffer built on listbuf: tabular view of all open buffers
    with keys to switch, kill, or refresh."
-  (:require [nesmacs.cmd :as cmd]
-            [nesmacs.listbuf :as listbuf]
-            [nesmacs.lsp :as lsp]
-            [nesmacs.treesit :as treesit]
-            [nesmacs.window :as win]))
+  (:require [nesmacs.buf :as buf]
+            [nesmacs.buffer-lifecycle :as lifecycle]
+            [nesmacs.cmd :as cmd]
+            [nesmacs.listbuf :as listbuf]))
 
 (def ^:private buflist-name "*Buffer List*")
 
@@ -22,7 +21,7 @@
   [bufs]
   (->> bufs
        (keep (fn [[k b]]
-               (when-not (or (= k buflist-name) (.startsWith ^String k " "))
+               (when-not (or (= k buflist-name) (buf/internal-name? k))
                  (assoc b :key k))))
        (sort-by :name)
        vec))
@@ -34,9 +33,13 @@
    :entries      (visible-bufs bufs)
    :format-entry format-entry})
 
+(defn revert
+  "Re-render the buffer list from current :bufs state."
+  [s]
+  (listbuf/refresh s buflist-name (spec (:bufs s))))
+
 (defn open [s]
-  (-> s (listbuf/refresh buflist-name (spec (:bufs s)))
-        (cmd/set-cur-buffer buflist-name)))
+  (-> s revert (cmd/set-cur-buffer buflist-name)))
 
 ;; --- Commands ---
 
@@ -51,22 +54,5 @@
   "Kill the buffer on the current line, then refresh the list."
   [s]
   (if-let [b (listbuf/entry-at-point s)]
-    (let [target (:key b)
-          ;; Same cleanup as ed/kill-buffer: a killed file buffer must close
-          ;; its LSP document and drop the native parse state.
-          _ (when-let [f (:file (get-in s [:bufs target]))] (lsp/close-doc! f))
-          _ (treesit/forget! target)
-          s' (-> s
-                 (update :bufs dissoc target)
-                 ;; windows showing the killed buffer fall back to the buflist
-                 (update :windows win/replace-buffer target buflist-name))
-          s' (cond-> s'
-               (= target (:buf s')) (assoc :buf buflist-name))]
-      (-> s' (listbuf/refresh buflist-name (spec (:bufs s')))
-             (cmd/msg (str "Killed " target))))
+    (-> s (lifecycle/kill-buffer (:key b) buflist-name) revert)
     s))
-
-(defn revert
-  "Re-render the buffer list from current :bufs state."
-  [s]
-  (listbuf/refresh s buflist-name (spec (:bufs s))))

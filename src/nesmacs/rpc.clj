@@ -54,10 +54,9 @@
   "Start `argv` and talk to its stdio. The process is owned by `nesmacs.proc`, so
    `kill-all!` reaps it on exit."
   [{:keys [argv dir]}]
-  (let [h (proc/start {:argv argv :dir dir :keep-stdin? true :stderr :log})]
-    {:kind :stdio :handle h
-     :out (.getOutputStream ^Process (:process h))
-     :inbox (atom "")}))
+  {:kind :stdio
+   :handle (proc/start {:argv argv :dir dir :keep-stdin? true :stderr :log})
+   :inbox (atom "")})
 
 (defn start-adapter
   "Start a TCP adapter that prints its own output; returns the handle so the
@@ -94,13 +93,12 @@
            :inbox (atom "")})))))
 
 (defn send!
-  "Write one message. Small writes to a pipe; callers are protocol clients that
-   send a few hundred bytes per request, never bulk data. The lock keeps two
-   senders (editor tick and an async callback) from interleaving frames."
-  [{:keys [^OutputStream out]} msg]
-  (locking out
-    (.write out (.getBytes (encode-msg msg) "UTF-8"))
-    (.flush out)))
+  "Write one message, locking the stream so concurrent sends cannot interleave."
+  [{:keys [out handle]} msg]
+  (let [^OutputStream stream (or out (.getOutputStream ^Process (:process handle)))]
+    (locking stream
+      (.write stream (.getBytes (encode-msg msg) "UTF-8"))
+      (.flush stream))))
 
 (defn- complete-utf8
   "Length of the longest prefix of `bs[0,len)` that does not end inside a

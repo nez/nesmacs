@@ -4,7 +4,8 @@
             [nesmacs.buf :as buf]
             [nesmacs.gap :as gap]
             [nesmacs.indent :as indent]
-            [nesmacs.text :as text]))
+            [nesmacs.text :as text]
+            [nesmacs.window :as win]))
 
 (defn buf [s name] (get (:bufs s) name))
 (defn cur [s] (buf s (:buf s)))
@@ -29,6 +30,23 @@
           (assoc-in (conj wp :buffer) name)
           (assoc-in (conj wp :scroll) 0)
           (assoc-in (conj wp :hscroll) 0))))
+
+(defn ensure-buffer
+  "Return [state name] for a requested buffer, a visible fallback, or a new scratch buffer."
+  [s preferred]
+  (if (contains? (:bufs s) preferred)
+    [s preferred]
+    (if-let [name (first (sort (remove buf/internal-name? (keys (:bufs s)))))]
+      [s name]
+      [(assoc-in s [:bufs "*scratch*"] (buf/make "*scratch*")) "*scratch*"])))
+
+(defn remove-buffer
+  "Remove a buffer and move windows and prompts that refer to it to a live buffer."
+  [s target preferred]
+  (let [[s fallback] (ensure-buffer (update s :bufs dissoc target) preferred)]
+    (cond-> (update s :windows win/replace-buffer target fallback)
+      (= target (:buf s)) (set-cur-buffer fallback)
+      (= target (get-in s [:mini :prev-buf])) (assoc-in [:mini :prev-buf] fallback))))
 
 (defn save-cur-point
   "Write the current buffer's point/mark onto the current window.
@@ -69,10 +87,12 @@
         target-buf (get-in s (conj (cur-window-path s) :buffer))]
     (-> s (assoc :buf target-buf) load-window-point)))
 (defn set-point [s f] (update-cur s #(buf/set-point % f)))
-(defn edit [s from to repl]
-  (if (:read-only (cur s))
-    (assoc s :msg "Buffer is read-only")
-    (update-cur s #(buf/edit % from to repl))))
+(defn edit
+  ([s from to repl] (edit s from to repl false))
+  ([s from to repl separate-undo?]
+   (if (:read-only (cur s))
+     (assoc s :msg "Buffer is read-only")
+     (update-cur s #(buf/edit % from to repl separate-undo?)))))
 (defn msg [s m] (assoc s :msg m))
 (defn msg-error [s prefix ^Throwable e] (msg s (str prefix ": " (.getMessage e))))
 
@@ -99,8 +119,10 @@
 (defn forward-word  [s] (set-point s text/word-forward))
 (defn backward-word [s] (set-point s text/word-backward))
 
-(defn insert-at-point [s ^String text]
-  (let [p (:point (cur s))] (edit s p p text)))
+(defn insert-at-point
+  ([s text] (insert-at-point s text false))
+  ([s ^String text separate-undo?]
+   (let [p (:point (cur s))] (edit s p p text separate-undo?))))
 
 (defn insert-newline [s]
   (let [b (cur s)

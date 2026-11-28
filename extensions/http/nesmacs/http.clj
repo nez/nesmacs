@@ -13,7 +13,7 @@
 
    Bodies are capped so a huge response cannot make the editor crawl."
   (:require [clojure.string :as str]
-            [org.httpkit.client :as http]
+            [nesmacs.api :as api]
             [nesmacs.buf :as buf]
             [nesmacs.cmd :as cmd]
             [nesmacs.log :as log]))
@@ -24,10 +24,6 @@
   "GET https://example.com/\n\n")
 
 (def ^:private max-body 200000)
-
-;; Only the newest request may write a response: a slow first reply must not
-;; land on top of a request the user sent afterwards.
-(defonce ^:private request-seq (atom 0))
 
 ;; --- Request ---
 
@@ -109,7 +105,7 @@
                       (buf/set-point (constantly (min (long (:point b)) (count text))))))))
     s))
 
-(defn open
+(defn http
   "M-x http: show the request buffer, creating it with a template on first use.
    An edited request is never overwritten."
   [s]
@@ -124,35 +120,29 @@
 
 ;; --- Sending ---
 
-(defn- finish!
-  "Apply one reply from the future to the buffer that asked for it."
-  [editor-atom name request-id render-args]
-  (swap! editor-atom with-response name (render render-args) request-id))
+(defn- send-request! [publish! {:keys [method url headers]} request-id]
+  (let [finish! (fn [response]
+                  (publish! with-response buffer-name
+                            (render (assoc response :url url :method method)) request-id))]
+    (try
+      ((requiring-resolve 'org.httpkit.client/request)
+       {:url url :method (keyword (str/lower-case method))
+        :headers headers :timeout 15000}
+       finish!)
+      (catch Exception e
+        (log/log "http:" (.getMessage e))
+        (finish! {:error e})))))
 
-(defn send!
-  "Send the request in `name`. Returns [state' message]: the state already says
-   \"sending…\" and the response lands in the buffer later, from a future that
-   swaps `editor-atom` (so the command itself stays pure)."
-  ([state editor-atom] (send! state editor-atom buffer-name))
-  ([state editor-atom name]
-   (let [req (parse-request (str (get-in state [:bufs name :text])))]
-     (if-not req
-       [state "No http(s) request line (expected: GET https://host/path)"]
-       (let [id (swap! request-seq inc)
-             pending (assoc-in state [:bufs name :http-request] id)]
-         (future
-           (try
-             (let [{:keys [status headers body error]}
-                   @(http/request {:url (:url req)
-                                   :method (keyword (str/lower-case (:method req)))
-                                   :headers (:headers req)
-                                   :timeout 15000})]
-               (finish! editor-atom name id
-                        {:status status :headers headers :body body
-                         :error error :url (:url req) :method (:method req)}))
-             (catch Exception e
-               (log/log "http:" (.getMessage e))
-               (finish! editor-atom name id
-                        {:error e :url (:url req) :method (:method req)}))))
-         [(with-response pending name "sending…\n" id)
-          (str (:method req) " " (:url req) " …")])))))
+(defn send-request [s]
+  (if-let [request (parse-request (str (get-in s [:bufs buffer-name :text])))]
+    (let [id (Object.)]
+      (-> s
+          (assoc-in [:bufs buffer-name :http-request] id)
+          (with-response buffer-name "sending…\n" id)
+          (cmd/msg (str (:method request) " " (:url request) " …"))
+          (api/after-command #(send-request! % request id))))
+    (cmd/msg s "No http(s) request line (expected: GET https://host/path)")))
+
+(defn start! [_]
+  (api/register-command! #'http)
+  (api/register-mode! :http-mode :major {"C-c C-c" send-request}))

@@ -27,6 +27,9 @@ under `~/.local` (override with `--prefix DIR`, or pin a release with
 `--version TAG`) and prints the `PATH` line if it is missing. `--uninstall`
 removes the jar and launcher.
 
+Run `nesmacs path/to/file.clj` to open a file directly. Pass several paths to
+open them in separate buffers with the first file visible.
+
 `C-x C-c` exits; it asks to save each modified buffer. First launch creates
 `~/.nesmacs/` for config, session and the crash journal. If you have an old
 `~/.xmas/`, the installer renames it once.
@@ -56,7 +59,9 @@ The editor is one atom. Every command is a pure function from that state to the
 next one. That is not an implementation detail — it is the feature:
 
 ```clojure
-;; nREPL is on :7888. Connect from CIDER/Calva, or from another terminal:
+;; Connect to the editor's nREPL from CIDER/Calva or another terminal.
+;; The default port is 7888. The last launch writes its actual port to
+;; ~/.nesmacs/nrepl-port.edn.
 user=> (require '[nesmacs.ed :as ed] '[nesmacs.cmd :as cmd])
 user=> (str (:text (cmd/cur @ed/editor)))
 "(ns nesmacs.hello\n  (:require [nesmacs.api :as api]))\n..."
@@ -64,16 +69,20 @@ user=> (swap! ed/editor cmd/edit 0 0 ";; live from the REPL\n")
 ;; the buffer on screen is now different
 ```
 
-Or skip the socket and use `M-:`, which evaluates against the live editor:
+Press `M-:`, paste this form, and press `RET`. Then press `C-c e` to see
+`Hello from nesmacs` in the echo area.
 
 ```clojure
-M-: (api/bind! "C-c g" (fn [s] (assoc s :msg "hi")))
+(nesmacs.api/bind! "C-c e" (fn [s] (assoc s :msg "Hello from nesmacs")))
 ```
 
-Because the state is a value, the same command loop is rendered by a second
-client at <http://127.0.0.1:1234>. Same keys, same state, no second editor. The
-web client is a demo, not a promised frontend — but it is the proof that “state
-is a value” is not a slogan here.
+With Nesmacs running, open <http://127.0.0.1:1234> for the local web client.
+Browser and terminal share the buffers and command loop. Each browser tab
+fits its own viewport and reconnects if the editor restarts. The browser
+assets are packaged in the jar. Set `NESMACS_WEB_PORT` before launch to use
+another local port. Use the browser's Paste action (`Ctrl+Shift+V` or
+`Cmd+V` in Chrome) to paste from the system clipboard. For browser-reserved
+shortcuts such as `Ctrl+W`, use the equivalent command (`M-x kill-region`).
 
 The rest follows from the same decision:
 
@@ -120,7 +129,8 @@ The rest follows from the same decision:
   symbol completion (honouring `textEdit` and snippets), `C-c r` references,
   `C-c R` rename, `C-c a` code actions, `C-c g` signature help, `C-c m`
   document symbols, `C-c f`/`C-c F` format buffer/region. One server per
-  project root and language; servers start on demand.
+  project root and language. Install the server on `PATH` (e.g. `clojure-lsp`
+  for Clojure) and it starts on demand.
 - **Debugging** — `C-c d d` starts the language's DAP adapter (debugpy,
   vscode-js-debug; Clojure keeps nREPL). `C-c d b` toggles a gutter
   breakpoint, `c`/`n`/`i`/`o` resume and step, `s`/`v` show frames and locals,
@@ -139,7 +149,11 @@ The rest follows from the same decision:
 - **AI assistance** — `M-x agent` opens the configured CLI (`$NESMACS_AGENT`, or
   `claude`) in a normal terminal buffer. The editor has no API client.
 
-Packages are Clojure libraries on `deps.edn`; there is no package manager yet.
+**Extensions** can add Clojure commands, modes, key bindings, and hooks. Forge
+and HTTP Client ship as enabled packages. Open `M-x hub` in the terminal or
+web client to manage them and explore other packages. Press `s` to choose a
+catalog URL or file. Extension changes take effect at the next startup. See
+the [example catalog and package format](extensions/README.md).
 
 ## Configure it in Clojure
 
@@ -154,7 +168,7 @@ Packages are Clojure libraries on `deps.edn`; there is no package manager yet.
   "Say hello in the echo area."
   [s] (assoc s :msg "hello from init.clj"))
 
-(api/bind! "C-c g" #'greet)               ; named commands also appear in M-x
+(api/bind! "C-c e" #'greet)               ; named commands also appear in M-x
 
 (api/register-mode! :notes-mode :major
   {"C-c C-c" (fn [s] (assoc s :msg "noted"))})
@@ -189,7 +203,8 @@ tested, replayed from a journal, and rendered by another process.
 | `nesmacs.proc`, `nesmacs.job`, `nesmacs.lsp` | processes, streaming job buffers, language server |
 | `nesmacs.lang`, `nesmacs.treesit`, `nesmacs.fold`, `nesmacs.format`, `nesmacs.snippet` | language registry, Tree-sitter backend, folding, CLI formatters, LSP snippets |
 | `nesmacs.terminal`, `nesmacs.terminal.tmux` | terminal buffers behind a backend protocol; the tmux control-mode backend |
-| `nesmacs.git*`, `nesmacs.githunk`, `nesmacs.gitblame`, `nesmacs.forge`, `nesmacs.testres`, `nesmacs.project`, `nesmacs.dired`, `nesmacs.buflist`, `nesmacs.nav`, `nesmacs.complete` | git apps (status, log, hunk staging, blame, forge), test reports, project search, file and buffer navigation, completion |
+| `nesmacs.git*`, `nesmacs.githunk`, `nesmacs.gitblame`, `nesmacs.testres`, `nesmacs.project`, `nesmacs.dired`, `nesmacs.buflist`, `nesmacs.nav`, `nesmacs.complete` | git apps (status, log, hunk staging, blame), test reports, project search, file and buffer navigation, completion |
+| `extensions/forge`, `extensions/http`, `extensions/project-notes` | Forge, HTTP Client, and Project Notes packages |
 | `nesmacs.session`, `nesmacs.persist`, `nesmacs.term` | session and journal, persistence, raw terminal I/O |
 
 Design rules live in [PRD.md](PRD.md): commands stay pure, one atom, one
@@ -200,8 +215,9 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 669 tests / 6,549 assertions
+make test    # 671 tests / 6,554 assertions
 make check   # lint + tests + pty smoke + kill -9 recovery + require
+make web     # live browser workflow, including Git, LSP and crash recovery
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)
 make lsp     # live tests against clojure-lsp, pyright and typescript-language-server
 make term    # terminal session test against a real tmux
@@ -211,6 +227,10 @@ make grammars # resolve every Tree-sitter grammar into an empty Maven repo
 
 The pty scripts start the editor in a real terminal, drive it with keys and
 check the rendered frame, including blame/hunk/test-report/forge list flows.
+`make web` exercises the client in headless Chrome or Chromium with the real
+editor, using Python's `websocket-client` and `clojure-lsp`. Set
+`NESMACS_CHROME` or `NESMACS_CLOJURE_LSP` if either executable is outside
+`PATH`. Set `NESMACS_WEB_JAR` to run the same checks against a built jar.
 Terminal buffers are exercised end-to-end against real tmux by `make term`,
 which is excluded from `make test` like the live `lsp`, `dap` and `grammars`
 targets. A live target skips a server or adapter it cannot find; point

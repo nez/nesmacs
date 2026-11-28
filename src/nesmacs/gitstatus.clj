@@ -2,7 +2,8 @@
   "Git status buffer built on listbuf. Shows staged/unstaged/untracked files
    with single-key staging (s), unstaging (u), diff (d), commit (c), log (l).
    Refresh with g."
-  (:require [nesmacs.cmd :as cmd]
+  (:require [clojure.string :as str]
+            [nesmacs.cmd :as cmd]
             [nesmacs.git :as git]
             [nesmacs.gitdiff :as gitdiff]
             [nesmacs.gitlog :as gitlog]
@@ -23,7 +24,8 @@
   (let [entries (git/status dir)]
     {:name         gitstatus-name
      :mode         :gitstatus-mode
-     :header       (str "Git: " (or (git/branch-name dir) "no repo"))
+     :header       (str "Git: " (or (git/branch-name dir) "no repo")
+                        "   RET diff  s stage  u unstage  c commit  g refresh")
      :entries      entries
      :format-entry fmt
      :extras       {:git-dir dir}}))
@@ -43,10 +45,12 @@
   "Run `git-fn` on the entry at point, then refresh and report `label`."
   [s git-fn label]
   (if-let [e (listbuf/entry-at-point s)]
-    (let [dir (cur-repo-root s)]
-      (when dir
-        (git-fn dir (:path e))
-        (-> s refresh (cmd/msg (str label " " (:path e))))))
+    (if-let [dir (cur-repo-root s)]
+      (let [out (git-fn dir (:path e))]
+        (if (str/starts-with? out "Error:")
+          (cmd/msg s (first (str/split-lines out)))
+          (-> s refresh (cmd/msg (str label " " (:path e))))))
+      (cmd/msg s "Not a git repository"))
     s))
 
 (defn stage   [s] (alter-index s git/add   "Staged"))
@@ -60,9 +64,13 @@
     s))
 
 (defn commit-cmd [s]
-  (let [dir (cur-repo-root s)]
-    (when dir
-      (gitcommit/open s dir))))
+  (if-let [dir (cur-repo-root s)]
+    (gitcommit/open s dir
+      (fn [state]
+        (if (= dir (get-in state [:bufs gitstatus-name :git-dir]))
+          (listbuf/refresh state gitstatus-name (spec dir))
+          state)))
+    (cmd/msg s "Not a git repository")))
 
 (defn log-cmd [s]
   (let [dir (cur-repo-root s)]

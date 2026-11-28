@@ -1,6 +1,6 @@
 (ns nesmacs.lsp
   "Minimal Language Server Protocol client: JSON-RPC 2.0 over stdio, using
-   `nesmacs.proc` for the server process and `clojure.data.json` for the wire.
+   `nesmacs.rpc` for the server transport and framing.
 
    Deliberately small: incremental text sync when the server advertises it
    (one minimal range per change, full document otherwise), diagnostics as
@@ -49,15 +49,6 @@
 
 ;; --- Server handles ---
 
-(defn- send!
-  "Frames are not atomic writes: a completion future and the editor tick can
-   otherwise interleave two large didChange/completion bodies."
-  [h msg]
-  (let [^java.io.OutputStream out (.getOutputStream ^Process (:process h))]
-    (locking h
-      (.write out (.getBytes (encode-msg msg) "UTF-8"))
-      (.flush out))))
-
 (defn- srv [root-id] (get @servers root-id))
 
 (defn server-exists? [root-id] (contains? @servers root-id))
@@ -69,11 +60,10 @@
   (boolean (get-in @servers [root-id :initialized?])))
 
 (defn- start! [root-id argv dir language-id]
-  (let [h (proc/start {:argv argv :dir dir :keep-stdin? true :stderr :log})]
-    (swap! servers assoc root-id
-           {:handle h :inbox (atom "") :pending {} :root dir
-            :language-id language-id
-            :initialized? false :docs {} :texts {}})))
+  (swap! servers assoc root-id
+         (assoc (rpc/open-stdio {:argv argv :dir dir})
+                :pending {} :root dir :language-id language-id
+                :initialized? false :docs {} :texts {})))
 
 (defn- drop! [root-id]
   (when-let [s (srv root-id)]
@@ -84,14 +74,14 @@
   (when-let [s (srv root-id)]
     (let [id (swap! next-id inc)]
       (swap! servers update root-id update :pending assoc id cb)
-      (try (send! (:handle s) {:jsonrpc "2.0" :id id :method method :params params})
+      (try (rpc/send! s {:jsonrpc "2.0" :id id :method method :params params})
            (catch Exception e
              (log/log "LSP request failed:" method (.getMessage e))
              (drop! root-id))))))
 
 (defn- notify! [root-id method params]
   (when-let [s (srv root-id)]
-    (try (send! (:handle s) {:jsonrpc "2.0" :method method :params params})
+    (try (rpc/send! s {:jsonrpc "2.0" :method method :params params})
          (catch Exception e
            (log/log "LSP notify failed:" method (.getMessage e))
            (drop! root-id)))))
@@ -276,20 +266,15 @@
 
 (defn- read-output! [editor root-id]
   (when-let [s (srv root-id)]
-    (let [chunk (proc/drain! (:handle s) 100000)]
-      (when (seq chunk)
-        (swap! (:inbox s) str chunk))
-      (let [[msgs rest*] (decode-msgs @(:inbox s))]
-        (reset! (:inbox s) rest*)
-        (doseq [msg msgs]
-          (cond
-            (:method msg) (on-notification editor root-id msg)
-            (:id msg)     (on-response root-id msg)
-            :else         (log/log "LSP unknown message" msg)))
-        ;; Process died: drop it so the next request restarts the server.
-        (when (proc/finished? (:handle s))
-          (log/log "LSP server exited" root-id)
-          (drop! root-id))))))
+    (doseq [msg (rpc/read! s)]
+      (cond
+        (:method msg) (on-notification editor root-id msg)
+        (:id msg)     (on-response root-id msg)
+        :else         (log/log "LSP unknown message" msg)))
+    ;; Process died: drop it so the next request restarts the server.
+    (when (proc/finished? (:handle s))
+      (log/log "LSP server exited" root-id)
+      (drop! root-id))))
 
 ;; --- Public API ---
 
@@ -456,7 +441,7 @@
 
 (defn shutdown-all! []
   (doseq [[root-id s] @servers]
-    (try (send! (:handle s) {:jsonrpc "2.0" :method "exit" :params {}})
+    (try (rpc/send! s {:jsonrpc "2.0" :method "exit" :params {}})
          (proc/kill! (:handle s))
          (catch Exception _))
     (swap! servers dissoc root-id)))

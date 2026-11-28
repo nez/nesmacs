@@ -85,6 +85,10 @@
             (<= 64 (int (.charAt line j)) 126) j
             :else (recur (inc j))))))
 
+(defn- append-span [spans start end face]
+  (cond-> spans
+    (and (< start end) (not= face default-face)) (conj [start end face])))
+
 (defn parse-sgr-line
   "Strip SGR sequences from `line`. Returns [text spans], spans being
    [from to face] over `text` and default-face runs omitted."
@@ -93,10 +97,7 @@
         sb (StringBuilder.)]
     (loop [i 0 pos 0 face default-face segs [] seg-start 0]
       (if (>= i n)
-        [(str sb)
-         (if (and (< seg-start pos) (not= face default-face))
-           (conj segs [seg-start pos face])
-           segs)]
+        [(str sb) (append-span segs seg-start pos face)]
         (let [c (.charAt line i)]
           (if (and (= c \u001b) (< (inc i) n) (= \[ (.charAt line (inc i))))
             (let [end (csi-end line i)]
@@ -105,9 +106,7 @@
                   (if (= nf face)
                     (recur (inc end) pos face segs seg-start)
                     (recur (inc end) pos nf
-                           (if (and (< seg-start pos) (not= face default-face))
-                             (conj segs [seg-start pos face])
-                             segs)
+                           (append-span segs seg-start pos face)
                            pos)))
                 ;; Non-SGR control sequence: drop it rather than sending an ESC
                 ;; to the renderer, where it would only show as a replacement char.
@@ -185,20 +184,17 @@
         (if (contains? (:bufs s) name) (recur (inc n)) name)))))
 
 (defn- body-size
-  "Columns and body rows the current window would give a new buffer."
-  [s]
-  (let [layout (:layout (win/geometry (:windows s)
-                                      (max 1 (dec (:rows s 24)))
-                                      (max 1 (:cols s 80))))
-        rect   (get layout (:cur-window s) {:rows 24 :cols 80})]
-    [(max 1 (long (:cols rect))) (max 1 (dec (long (:rows rect))))]))
+  "Columns and body rows within a window rectangle."
+  [{:keys [cols rows]}]
+  [(max 1 (long cols)) (max 1 (dec (long rows)))])
 
 (defn open
   "Open a terminal buffer running `argv` (default: $SHELL) in the current
    directory. The client starts on the next `tick!`."
   ([s] (open s (shell-argv)))
   ([s argv]
-   (let [[cols rows] (body-size s)
+   (let [layout (:layout (win/frame-geometry s))
+         [cols rows] (body-size (get layout (:cur-window s) {:rows 24 :cols 80}))
          name (unique-name s)
          dir  (or (some-> (:file (cmd/cur s)) java.io.File. .getParent)
                   (System/getProperty "user.dir"))
@@ -297,19 +293,15 @@
    schedules a capture for the focused/visible terminal only. Never blocks on a
    response and never writes editor state from a backend thread."
   [editor backend]
-  (let [s      @editor
-        layout (:layout (win/geometry (:windows s)
-                                      (max 1 (dec (:rows s 24)))
-                                      (max 1 (:cols s 80))))
-        terms  (vec (keep (fn [[name b]] (when (terminal? b) [name b])) (:bufs s)))]
+  (let [s @editor
+        layout (:layout (win/frame-geometry s))
+        terms (filterv (comp terminal? val) (:bufs s))]
     (reconcile-orphans! backend terms)
     (doseq [[name b] terms]
       (let [{:keys [id status]} (:terminal b)
             h (get (handles backend) id)
             rect (rect-for s layout name)
-            [want-cols want-rows] (when rect
-                                    [(max 1 (long (:cols rect)))
-                                     (max 1 (dec (long (:rows rect))))])]
+            [want-cols want-rows] (some-> rect body-size)]
         (try
           (cond
             (= status :dead) nil

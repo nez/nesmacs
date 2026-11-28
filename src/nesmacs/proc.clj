@@ -19,10 +19,9 @@
 
 (defn run
   "Run `argv` synchronously and return its output. `opts` may set `:stdin`
-   (text written to the child), `:merge-stderr?` and `:dir`. Failure comes
-   back as \"Error: ...\" instead of throwing, because callers parse the
-   string."
-  [argv dir {:keys [stdin merge-stderr?]}]
+   (text written to the child) and `:merge-stderr?`. With `:check-exit?`,
+   a nonzero exit is reported as \"Error: ...\" followed by the command output."
+  [argv dir {:keys [stdin merge-stderr? check-exit?]}]
   (try
     (let [pb (doto (ProcessBuilder. (into-array String argv))
                (.redirectErrorStream (boolean merge-stderr?)))
@@ -32,9 +31,11 @@
         (with-open [w (io/writer (.getOutputStream p) :encoding "UTF-8")]
           (.write w ^String stdin))
         (.close (.getOutputStream p)))
-      (let [out (slurp (.getInputStream p) :encoding "UTF-8")]
-        (.waitFor p)
-        out))
+      (let [out (slurp (.getInputStream p) :encoding "UTF-8")
+            exit (.waitFor p)]
+        (if (and check-exit? (not (zero? exit)))
+          (str "Error: " (if (str/blank? out) (str "exit " exit) (str/trim out)))
+          out)))
     (catch Exception e (str "Error: " (.getMessage e)))))
 
 (defn- pump

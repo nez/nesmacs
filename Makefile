@@ -1,6 +1,6 @@
 JAR := target/nesmacs.jar
 
-.PHONY: dev run jar repl test bench lsp term dap grammars pty crash lint check clean setup
+.PHONY: dev run jar repl test bench lsp term dap grammars pty web crash lint check clean setup extension-catalog
 
 setup:
 	./script/setup-dev.sh
@@ -17,11 +17,14 @@ repl:
 run: $(JAR)
 	java -jar $(JAR)
 
-$(JAR): $(shell find src resources -type f) deps.edn
+$(JAR): $(shell find src resources extensions -type f) deps.edn
 	clojure -X:uberjar
 
 jar:
 	clojure -X:uberjar
+
+extension-catalog:
+	clojure -M script/build-extension-catalog.clj
 
 test:
 	clojure -M:test -e :benchmark -e :integration
@@ -54,15 +57,18 @@ pty:
 	python3 test/pty/smoke.py
 	python3 test/pty/lists.py
 
+web:
+	python3 test/web/smoke.py
+
 # kill -9 mid-edit, restart, require the journal to restore the edit.
 crash:
 	python3 test/pty/crash_recovery.py
 
 lint:
-	clj-kondo --lint src
+	clj-kondo --lint src extensions
 
 check: lint test pty crash
 	clojure -M -e '(require (quote nesmacs.ed)) (println "ok")'
 
 clean:
-	rm -rf target .cpcache .nrepl-port
+	rm -rf target .cpcache

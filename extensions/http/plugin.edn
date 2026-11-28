@@ -1,0 +1,6 @@
+{:id :nesmacs/http
+ :name "HTTP Client"
+ :description "Send HTTP requests from a buffer and read the response below."
+ :version "1.0.0"
+ :api 2
+ :entry nesmacs.http/start!}

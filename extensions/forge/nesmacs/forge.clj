@@ -4,6 +4,7 @@
    job, so a slow network call never blocks the editor."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
+            [nesmacs.api :as api]
             [nesmacs.cmd :as cmd]
             [nesmacs.deferred :as deferred]
             [nesmacs.git :as git]
@@ -91,7 +92,9 @@
                               [prs-buf (spec kind dir entries)]
                               (str (name kind) " CLI failed or not installed")))}))
 
-(defn open [s]
+(defn forge-prs
+  "List GitHub pull requests or GitLab merge requests for the current repository."
+  [s]
   (let [dir (git/current-dir (cmd/cur s))]
     (cond
       (nil? (forge dir)) (cmd/msg s "No GitHub/GitLab forge for this repository")
@@ -114,6 +117,6 @@
       (open-deferred s kind dir (git/repo-root dir))
       s)))
 
-(def forge-keymap
-  {:return open-at-point
-   \g refresh})
+(defn start! [_]
+  (api/register-mode! :forge-mode :major {"RET" open-at-point "g" refresh})
+  (api/bind! "C-x v p" #'forge-prs))

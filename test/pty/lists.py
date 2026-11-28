@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M9 list round-trip: blame, hunk staging, a parsed test report and forge.
+"""Project workflow: blame, hunk staging, commits, test results and forge.
 
 Drives the real editor in a pty against a temp git project. `gh` is a stub that
 prints the same JSON the real CLI emits: the test has no GitHub credentials,
@@ -34,12 +34,15 @@ doc.write_text("alpha line\nbeta line\n")
 
 
 def git(*args):
-    subprocess.run(["git", "-C", str(proj), "-c", "user.name=Test User",
-                    "-c", "user.email=test@example.com", *args],
-                   check=True, capture_output=True)
+    return subprocess.run(["git", "-C", str(proj), "-c", "user.name=Test User",
+                           "-c", "user.email=test@example.com", *args],
+                          check=True, capture_output=True)
 
 
 git("init", "-q")
+git("config", "user.name", "Test User")
+git("config", "user.email", "test@example.com")
+git("config", "commit.gpgsign", "false")
 git("add", "doc.txt")
 git("commit", "-qm", "first")
 git("remote", "add", "origin", "https://github.com/example/demo.git")
@@ -78,7 +81,7 @@ if pid == 0:
     os.environ["HOME"] = str(home)
     os.environ["PATH"] = str(bin_dir) + ":" + os.environ["PATH"]
     os.environ["NESMACS_NREPL_PORT"] = "0"
-    os.execvp("clojure", ["clojure", "-J-Duser.home=" + str(home), "-M:run"])
+    os.execvp("clojure", ["clojure", "-J-Duser.home=" + str(home), "-M:run", str(doc)])
 
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
 
@@ -144,9 +147,7 @@ def keys(b):
 
 ok = True
 try:
-    ok &= read_until("*scratch*", label="editor started")
-    keys(b"\x18\x06" + str(doc).encode() + b"\r")          # C-x C-f doc.txt
-    ok &= read_until("alpha line", label="source opened")
+    ok &= read_until("alpha line", label="source opened from the launch argument")
 
     keys(b"\x1bxgit-blame\r")                              # M-x git-blame
     ok &= read_until("Blame ", label="blame list opened")
@@ -161,6 +162,21 @@ try:
                              "--name-only"], capture_output=True, text=True).stdout
     checks.append(("index contains doc.txt", "doc.txt" in cached))
     ok &= "doc.txt" in cached
+
+    keys(b"\x18bdoc.txt\r\x18g")                           # C-x b doc.txt, then C-x g
+    ok &= read_until("s stage  u unstage  c commit", label="git status opens from a file")
+    keys(b"c")
+    ok &= read_until("*Git Commit*", label="commit buffer opened")
+    keys(b"PTY workflow commit\x03\x03")                   # C-c C-c
+    ok &= read_until("] PTY workflow commit", label="commit succeeded in the editor")
+    committed = git("log", "-1", "--format=%s").stdout.strip() == b"PTY workflow commit"
+    checks.append(("commit recorded by Git", committed))
+    ok &= committed
+
+    keys(b"cSecond commit\x03\x03")                        # The index is empty now.
+    ok &= read_until("Error: On branch", label="failed commit keeps the editor open")
+    keys(b"\x03\x0b")                                      # C-c C-k
+    ok &= read_until("Commit aborted", label="failed commit can be aborted")
 
     keys(b"\x18bdoc.txt\r")
     keys(b"\x1bxrun-tests\r\r")                            # M-x run-tests, accept default

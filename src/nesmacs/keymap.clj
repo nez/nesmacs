@@ -52,6 +52,14 @@
     (let [s (str/trim s)]
       (if (empty? s) [] (vec (mapcat parse-standard-token (str/split s #"\s+")))))))
 
+(defn inherit
+  "Overlay one binding on another, inheriting sibling keys under shared prefixes."
+  [base override]
+  (cond
+    (nil? override) base
+    (and (map? base) (map? override)) (merge-with inherit base override)
+    :else override))
+
 (defn bind
   "Install `handler` at `path ++ keys` in `state`. A prefix already bound to a
    command is replaced by a map, so binding \"C-x C-f\" after \"C-x\" was a

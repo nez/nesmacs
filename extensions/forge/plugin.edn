@@ -1,0 +1,6 @@
+{:id :nesmacs/forge
+ :name "Forge"
+ :description "List GitHub pull requests and GitLab merge requests using gh or glab."
+ :version "1.0.0"
+ :api 1
+ :entry nesmacs.forge/start!}

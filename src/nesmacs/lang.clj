@@ -7,6 +7,15 @@
    plain text."
   (:require [clojure.string :as str]))
 
+(def ^:private javascript-tools
+  {:comment-start "// "
+   :lsp ["typescript-language-server" "--stdio"]
+   :formatter {:argv ["prettier" "--stdin-filepath"] :path-arg? true}
+   :dap {:transport :tcp
+         :argv ["node" "{env:JS_DEBUG_DAP}" "{port}"]
+         :launch {:type "pwa-node"}}
+   :indent 2})
+
 (def languages
   {:clojure
    {:id "clojure" :mode :clojure-mode :comment-start ";; "
@@ -28,37 +37,19 @@
     :indent 4}
 
    :javascript
-   {:id "javascript" :mode :javascript-mode :comment-start "// "
-    :exts #{"js" "jsx" "mjs" "cjs"}
-    :grammar "org.treesitter.TreeSitterJavascript" :queries "javascript"
-    :lsp ["typescript-language-server" "--stdio"]
-    :formatter {:argv ["prettier" "--stdin-filepath"] :path-arg? true}
-    :dap {:transport :tcp
-          :argv ["node" "{env:JS_DEBUG_DAP}" "{port}"]
-          :launch {:type "pwa-node"}}
-    :indent 2}
+   (merge javascript-tools
+          {:id "javascript" :mode :javascript-mode :exts #{"js" "jsx" "mjs" "cjs"}
+           :grammar "org.treesitter.TreeSitterJavascript" :queries "javascript"})
 
    :typescript
-   {:id "typescript" :mode :typescript-mode :comment-start "// "
-    :exts #{"ts" "mts" "cts"}
-    :grammar "org.treesitter.TreeSitterTypescript" :queries "typescript"
-    :lsp ["typescript-language-server" "--stdio"]
-    :formatter {:argv ["prettier" "--stdin-filepath"] :path-arg? true}
-    :dap {:transport :tcp
-          :argv ["node" "{env:JS_DEBUG_DAP}" "{port}"]
-          :launch {:type "pwa-node"}}
-    :indent 2}
+   (merge javascript-tools
+          {:id "typescript" :mode :typescript-mode :exts #{"ts" "mts" "cts"}
+           :grammar "org.treesitter.TreeSitterTypescript" :queries "typescript"})
 
    :tsx
-   {:id "tsx" :mode :tsx-mode :comment-start "// "
-    :exts #{"tsx"}
-    :grammar "org.treesitter.TreeSitterTsx" :queries "tsx"
-    :lsp ["typescript-language-server" "--stdio"]
-    :formatter {:argv ["prettier" "--stdin-filepath"] :path-arg? true}
-    :dap {:transport :tcp
-          :argv ["node" "{env:JS_DEBUG_DAP}" "{port}"]
-          :launch {:type "pwa-node"}}
-    :indent 2}
+   (merge javascript-tools
+          {:id "tsx" :mode :tsx-mode :exts #{"tsx"}
+           :grammar "org.treesitter.TreeSitterTsx" :queries "tsx"})
 
    :emacs-lisp
    {:id "emacs-lisp" :mode :emacs-lisp-mode :comment-start ";; "
@@ -80,6 +71,11 @@
                 languages))))))
 
 (defn mode-for-file [filename] (:mode (language-for-file filename)))
+
+(defn with-file-language [b]
+  (if-let [l (language-for-file (:file b))]
+    (assoc b :language l :comment-start (:comment-start l))
+    b))
 
 (defn extensions
   "All known extensions, without the dot."

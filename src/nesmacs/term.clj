@@ -116,17 +116,18 @@
 (defn- read-paste [] (read-paste-from #(read-byte-timeout 200)))
 
 (defn- parse-mouse
-  "SGR mouse report params `<b;x;y` (without the leading `<`). b packs the
-   button, modifiers, motion (32) and wheel (64) bits; coordinates are
-   1-based. `:button` is nil for wheel and motion, which are not clicks."
+  "Parse SGR mouse report params `<b;x;y` into zero-based screen coordinates."
   [params action]
   (let [[b x y] (mapv #(try (Long/parseLong %) (catch Exception _ nil))
                       (str/split (subs params 1) #";"))]
     (when (and b x y)
-      {:type :mouse
-       :button (when (zero? (bit-and b (+ 32 64))) (bit-and b 3))
-       :col (dec x) :row (dec y)
-       :action action})))
+      (let [event {:type :mouse :col (dec x) :row (dec y)}
+            button (bit-and b 3)]
+        (case (bit-and b 224)
+          0 (assoc event :action action :button button)
+          64 (when (and (= :press action) (< button 2))
+               (assoc event :action :scroll :direction (if (zero? button) :up :down)))
+          nil)))))
 
 (defn- parse-csi []
   (loop [params ""]

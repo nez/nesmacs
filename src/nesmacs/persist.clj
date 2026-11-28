@@ -13,11 +13,11 @@
   "Override the persistence directory; tests bind it to a temp dir."
   nil)
 
-(defn- nesmacs-dir ^java.io.File []
+(defn directory ^java.io.File []
   (or *dir* (io/file (System/getProperty "user.home") ".nesmacs")))
 
 (defn- file ^java.io.File [^String name]
-  (io/file (nesmacs-dir) (str name ".edn")))
+  (io/file (directory) (str name ".edn")))
 
 (defn- ensure-dir! [^java.io.File d]
   (when (and d (not (.exists d)))
@@ -65,7 +65,7 @@
   "Write `value` to name as EDN atomically. Creates the directory if missing.
    Errors propagate, which is fine — callers that want silence wrap in try."
   [name value]
-  (ensure-dir! (nesmacs-dir))
+  (ensure-dir! (directory))
   (atomic-spit (str (file name)) (pr-str value)))
 
 (defn save-quiet!
@@ -77,6 +77,9 @@
          (log/log "persistence write failed:" name (.getMessage e))
          nil)))
 
+(defn- edn-lines [values]
+  (apply str (map #(str (pr-str %) "\n") values)))
+
 (defn append-lines!
   "Append EDN values to `name`, one per line. Returns true when written."
   [name values]
@@ -86,8 +89,7 @@
       ;; create through atomic-spit so a fresh journal gets the same
       ;; owner-only permissions as the other persisted files
       (when-not (.exists f) (atomic-spit (.getPath f) ""))
-      (spit f (apply str (map #(str (pr-str %) "\n") values))
-            :append true :encoding "UTF-8")
+      (spit f (edn-lines values) :append true :encoding "UTF-8")
       true
       (catch Exception e
         (log/log "persistence append failed:" name (.getMessage e))
@@ -99,7 +101,7 @@
   (try
     (let [f (file name)]
       (ensure-dir! (.getParentFile f))
-      (atomic-spit (.getPath f) (apply str (map #(str (pr-str %) "\n") values))))
+      (atomic-spit (.getPath f) (edn-lines values)))
     (catch Exception e
       (log/log "persistence write failed:" name (.getMessage e))
       false)))

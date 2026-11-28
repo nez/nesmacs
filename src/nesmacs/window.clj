@@ -155,3 +155,8 @@
 
 (defn layout [tree rows cols] (:layout (geometry tree rows cols)))
 (defn dividers [tree rows cols] (:dividers (geometry tree rows cols)))
+
+(defn frame-geometry
+  "Editor window geometry with one row reserved for the echo area."
+  [{:keys [windows rows cols] :or {rows 24 cols 80}}]
+  (geometry windows (dec (max 2 (long rows))) (max 1 (long cols))))

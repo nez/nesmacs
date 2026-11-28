@@ -3,7 +3,8 @@
             [nesmacs.buf :as buf]
             [nesmacs.buflist :as buflist]
             [nesmacs.cmd :as cmd]
-            [nesmacs.gap :as gap]))
+            [nesmacs.gap :as gap]
+            [nesmacs.window :as win]))
 
 (defn- state-with-bufs [bufs cur]
   {:buf cur :bufs bufs :msg nil})
@@ -42,6 +43,19 @@
         s' (buflist/kill s)]
     (is (not (contains? (:bufs s') "b")))
     (is (.contains ^String (str (:msg s')) "Killed b"))))
+
+(deftest kill-replaces-buffer-in-other-window
+  (let [s (-> (state-with-bufs {"a" (buf/make "a" "a" nil)} "a")
+              (assoc :cur-window [:a]
+                     :windows (win/split-node :stacked
+                                             (win/leaf "a")
+                                             (assoc (win/leaf "a" 1 1) :point 1 :mark 0)))
+              buflist/open
+              (cmd/update-cur #(assoc % :point (gap/nth-line-start (:text %) 1))))
+        result (buflist/kill s)]
+    (is (= (win/leaf "*Buffer List*") (get-in result [:windows :b])))
+    (is (= [:a] (:cur-window result)))
+    (is (= "*Buffer List*" (:buf result)))))
 
 (deftest kill-on-header-is-noop
   (let [s0 (state-with-bufs {"a" (buf/make "a" "" nil)} "a")

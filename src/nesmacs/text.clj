@@ -1,4 +1,7 @@
-(ns nesmacs.text)
+(ns nesmacs.text
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io])
+  (:import [java.util Arrays]))
 
 (defn next-pos
   "Advance past one codepoint."
@@ -12,21 +15,20 @@
   (if (<= p 0) 0
     (- p (Character/charCount (Character/codePointBefore t (int p))))))
 
+(defonce ^:private cell-widths
+  (let [{:keys [zero wide]} (edn/read-string (slurp (io/resource "nesmacs/unicode11-widths.edn")))
+        ^bytes widths (byte-array 0x110000)]
+    (Arrays/fill widths (byte 1))
+    (doseq [[ranges width] [[zero 0] [wide 2]]
+            [start end] ranges]
+      (Arrays/fill widths (int start) (inc (int end)) (byte width)))
+    widths))
+
 (defn char-width
-  "Terminal display width of a Unicode codepoint."
+  "Terminal columns for a codepoint, using the same widths as the web renderer.
+   Raw control bytes occupy one cell because the painter replaces them."
   ^long [^long cp]
-  (cond
-    (<= 0x0300 cp 0x036F) 0   ;; combining diacriticals
-    (<= 0x1AB0 cp 0x1AFF) 0   ;; combining extended
-    (<= 0x1DC0 cp 0x1DFF) 0   ;; combining supplements
-    (<= 0xFE20 cp 0xFE2F) 0   ;; combining half marks
-    (<= 0x1100 cp 0x115F) 2   ;; Hangul Jamo
-    (<= 0x2E80 cp 0x9FFF) 2   ;; CJK
-    (<= 0xF900 cp 0xFAFF) 2   ;; CJK compat
-    (<= 0xFE30 cp 0xFE6F) 2   ;; CJK compat forms
-    (<= 0xFF01 cp 0xFF60) 2   ;; fullwidth forms
-    (<= 0x20000 cp 0x2FFFF) 2 ;; CJK extension B+
-    :else 1))
+  (if (<= 0 cp 0x10FFFF) (aget ^bytes cell-widths (int cp)) 1))
 
 (defn display-width
   "Total terminal columns for text[from..to). The 1-arg overload measures

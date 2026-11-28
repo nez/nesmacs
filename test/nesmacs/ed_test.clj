@@ -4,6 +4,7 @@
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [nesmacs.buf :as buf]
+            [nesmacs.complete :as complete]
             [nesmacs.ed :as ed]
             [nesmacs.job :as job]
             [nesmacs.lsp :as lsp]
@@ -731,9 +732,9 @@
 
 (deftest command-completer-single-match-completes-fully
   (let [s (with-commands (make-state "hello"))
-        {:keys [completed candidates]} (#'nesmacs.ed/command-completer "yan" s)]
+        {:keys [completed candidates]} (#'nesmacs.ed/command-completer "YAN" s)]
     (is (= "yank" completed))
-    (is (empty? candidates))))
+    (is (= ["yank"] candidates))))
 
 (deftest switching-to-different-buffer-clears-window-point
   ;; When current window's :buffer changes (e.g., C-x b), stale saved point
@@ -785,6 +786,39 @@
               (assoc-in [:bufs "*test*" :mode] :terminal-mode))
         s' (click s 0 1)]
     (is (= 2 (point s')))))
+
+(defn- wheel [s direction row col]
+  (ed/handle-key s {:type :mouse :action :scroll :direction direction :row row :col col}))
+
+(deftest mouse-wheel-scrolls-and-stops-at-buffer-edges
+  (let [s (make-state (apply str (repeat 30 "x\n")))
+        down (wheel s :down 0 0)
+        up (wheel down :up 0 0)
+        bottom (nth (iterate #(wheel % :down 0 0) s) 10)]
+    (is (= 6 (get-in down [:windows :scroll])))
+    (is (= 6 (point down)))
+    (is (= 0 (get-in up [:windows :scroll])))
+    (is (= 18 (get-in bottom [:windows :scroll])))
+    (is (= bottom (wheel bottom :down 0 0)))
+    (is (= s (wheel s :up 0 0)))))
+
+(deftest mouse-wheel-scrolls-the-pane-under-the-pointer
+  (let [s (ed/split-window-right (make-state (apply str (repeat 30 "x\n"))))
+        scrolled (wheel s :down 0 45)]
+    (is (= [:a] (:cur-window scrolled)))
+    (is (= 0 (point scrolled)))
+    (is (= 0 (get-in scrolled [:windows :a :scroll])))
+    (is (= 6 (get-in scrolled [:windows :b :scroll])))
+    (is (= s (wheel s :down 0 40)))
+    (is (= s (wheel s :down 23 0)))))
+
+(deftest mouse-wheel-skips-folded-lines
+  (let [s (-> (make-state (str "(a\nb\nc\n)\n" (apply str (repeat 30 "x\n"))))
+              (assoc-in [:bufs "*test*" :mode] :clojure-mode)
+              (assoc-in [:bufs "*test*" :collapsed] #{0}))
+        scrolled (wheel s :down 0 0)]
+    (is (= 13 (get-in scrolled [:windows :scroll])))
+    (is (= 13 (point scrolled)))))
 
 ;; --- Redo ---
 
@@ -1268,9 +1302,9 @@
     (spit (java.io.File. dir "testfile.txt") "")
     (try
       (let [{:keys [completed candidates]}
-            (#'ed/file-completer (str (.getPath dir) "/test"))]
+            (#'ed/file-completer (str (.getPath dir) "/TEST"))]
         (is (clojure.string/ends-with? completed "testfile.txt"))
-        (is (empty? candidates)))
+        (is (= [completed] candidates)))
       (finally
         (.delete (java.io.File. dir "testfile.txt"))
         (.delete dir)))))
@@ -1279,16 +1313,16 @@
   (let [dir (java.io.File/createTempFile "nesmacs-comp" "")]
     (.delete dir)
     (.mkdirs dir)
-    (spit (java.io.File. dir "alpha.txt") "")
-    (spit (java.io.File. dir "alphb.txt") "")
+    (spit (java.io.File. dir "Alpha.txt") "")
+    (spit (java.io.File. dir "alphaB.txt") "")
     (try
       (let [{:keys [completed candidates]}
-            (#'ed/file-completer (str (.getPath dir) "/alph"))]
-        (is (clojure.string/ends-with? completed "alph"))
+            (#'ed/file-completer (str (.getPath dir) "/ALP"))]
+        (is (clojure.string/ends-with? (clojure.string/lower-case completed) "alpha"))
         (is (= 2 (count candidates))))
       (finally
-        (.delete (java.io.File. dir "alpha.txt"))
-        (.delete (java.io.File. dir "alphb.txt"))
+        (.delete (java.io.File. dir "Alpha.txt"))
+        (.delete (java.io.File. dir "alphaB.txt"))
         (.delete dir)))))
 
 (deftest file-completer-no-matches
@@ -1321,7 +1355,7 @@
     (.mkdirs dir)
     (spit (java.io.File. dir "unique-file.el") "")
     (try
-      (let [prefix (str (.getPath dir) "/uni")
+      (let [prefix (str (.getPath dir) "/UNI")
             s (make-state "abc" 0)
             s1 (ed/mini-start s "Find: " (fn [s _] s) #'ed/file-completer)
             ;; Type the prefix into minibuffer
@@ -1329,7 +1363,10 @@
             ;; Press tab
             s3 (ed/handle-key s2 :tab)
             completed (str (get-in s3 [:bufs " *mini*" :text]))]
-        (is (clojure.string/ends-with? completed "unique-file.el")))
+        (is (= [(str dir "/unique-file.el")] (get-in s2 [:mini :candidates])))
+        (is (= completed (text (ed/handle-key s2 [:ctrl \n]))))
+        (is (clojure.string/ends-with? completed "unique-file.el"))
+        (is (= [completed] (get-in s3 [:mini :candidates]))))
       (finally
         (.delete (java.io.File. dir "unique-file.el"))
         (.delete dir)))))
@@ -1339,6 +1376,25 @@
   (let [s (ed/mini-start (make-state "abc" 0) "Test: " (fn [s _] s))
         s' (ed/handle-key s :tab)]
     (is (= "" (str (get-in s' [:bufs " *mini*" :text]))))))
+
+(deftest find-file-keeps-nested-paths-while-moving-through-candidates
+  (let [root (tu/temp-dir "nesmacs-file-candidates")
+        dir (doto (java.io.File. root "nested") .mkdirs)
+        paths (mapv #(java.io.File. dir %) ["alpha.txt" "alphb.txt"])]
+    (try
+      (doseq [path paths] (spit path (.getName path)))
+      (let [s (reduce ed/handle-key (make-state "")
+                      [[:ctrl \x] [:ctrl \f] [:paste (str dir "/alph")]])
+            [first-path second-path :as candidates] (get-in s [:mini :candidates])
+            first-selected (ed/handle-key s [:ctrl \n])
+            second-selected (ed/handle-key first-selected [:ctrl \n])
+            back (ed/handle-key second-selected [:ctrl \p])]
+        (is (= (set (map str paths)) (set candidates)))
+        (is (= [first-path second-path first-path]
+               (mapv text [first-selected second-selected back])))
+        (is (= candidates (get-in second-selected [:mini :candidates])))
+        (is (= first-path (:file (ed/cur (ed/handle-key back :return))))))
+      (finally (tu/delete-tree root)))))
 
 ;; --- String key self-insert ---
 
@@ -1417,6 +1473,13 @@
                    (seq "(nesmacs.api/apply! nesmacs.cmd/insert-at-point \"Z\")"))
         s3 (ed/handle-key s2 :return)]
     (is (= "Z" (text s3)))))
+
+(deftest readme-live-binding-preserves-other-commands
+  (let [s (ed/handle-key (make-state "") [:meta \:])
+        form "(nesmacs.api/bind! \"C-c e\" (fn [s] (assoc s :msg \"Hello from nesmacs\")))"
+        s (reduce ed/handle-key s [[:paste form] :return])]
+    (is (= "Hello from nesmacs" (:msg (reduce ed/handle-key s [[:ctrl \c] \e]))))
+    (is (= "Buffer has no file" (:msg (reduce ed/handle-key s [[:ctrl \c] \h]))))))
 
 ;; --- User keybindings dispatch ---
 
@@ -1569,6 +1632,17 @@
         cs3 (count (get-in s3 [:mini :candidates]))]
     ;; back to empty input → candidates restored
     (is (= cs1 cs3))))
+
+(deftest symbol-completion-uses-the-source-buffer-and-preserves-case
+  (let [s (make-state "LoadTheme\nlo" 12)
+        editor (atom (reduce ed/handle-key s (concat [[:ctrl \c] \i] "LOADT")))]
+    (with-redefs [clojure.core/future-call (fn [f] (f))]
+      (complete/tick! editor)
+      (complete/tick! editor))
+    (is (= ["LoadTheme"] (get-in @editor [:mini :candidates])))
+    (let [completed (ed/handle-key @editor :tab)]
+      (is (= "LoadTheme" (text completed)))
+      (is (= "LoadTheme\nLoadTheme" (text (ed/handle-key completed :return)))))))
 
 ;; --- Tier C: registers ---
 
@@ -1786,6 +1860,23 @@
         (is (= (str (.getCanonicalPath root) "/src/b.clj") (:buf s))))
       (finally (rm-rf root)))))
 
+(deftest project-find-file-tab-completes-the-pending-unique-match
+  (let [root (project-fixture)
+        state (assoc-in (make-state "") [:bufs "*test*" :file] (str root "/src/a.clj"))
+        editor (atom (reduce ed/handle-key state [[:ctrl \x] \p \f [:paste "b.cl"] :tab]))]
+    (try
+      (dotimes [_ 200]
+        (when (get-in @editor [:mini :tab-pending?])
+          (complete/tick! editor)
+          (Thread/sleep 5)))
+      (is (= "src/b.clj" (text @editor)))
+      (is (= ["src/b.clj"] (get-in @editor [:mini :candidates])))
+      (is (= (str (.getCanonicalPath root) "/src/b.clj")
+             (:buf (ed/handle-key @editor :return))))
+      (finally
+        (complete/tick! (atom {}))
+        (rm-rf root)))))
+
 (deftest project-search-runs-rg-and-jumps
   (let [root (project-fixture)]
     (try
@@ -1802,8 +1893,7 @@
           (is (clojure.string/includes? txt "src/a.clj:2:"))
           (is (clojure.string/includes? txt "src/b.clj:1:needle"))
           (let [{:keys [file]} (nav/rg-line (first (clojure.string/split-lines txt)))
-                s2 (-> s (assoc-in [:bufs name :point] 0)
-                       (ed/handle-key :return))]
+                s2 (ed/handle-key s :return)]
             (is (= (.getCanonicalPath (java.io.File. (str root "/" file)))
                    (:buf s2))))))
       (finally (rm-rf root)))))

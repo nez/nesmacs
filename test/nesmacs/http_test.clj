@@ -2,8 +2,8 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as server]
+            [nesmacs.api :as api]
             [nesmacs.buf :as buf]
-            [nesmacs.ed :as ed]
             [nesmacs.http :as http]))
 
 (deftest a-request-is-the-block-above-the-first-blank-line
@@ -36,7 +36,7 @@
     (is (< (count out) 210000))))
 
 (deftest send-fills-the-response-area-below-the-request
-  ;; The real path end to end: future -> http-kit -> swap! into the editor atom.
+  ;; Commit the command before starting the request, then apply the reply.
   ;; The response area is everything after the request's blank line, so a
   ;; second C-c C-c parses the request again, not the previous response.
   (let [srv (server/run-server
@@ -49,12 +49,11 @@
       (let [port (:local-port (meta srv))
             text (str "GET http://127.0.0.1:" port "/x\nAccept: */*\n\n")
             state {:bufs {"*HTTP*" (buf/make "*HTTP*" text nil)}}
-            ed (atom state)
-            [sent message] (http/send! state ed)]
-        ;; The command's return value is what the editor stores; the reply only
-        ;; applies while that state still carries this request's id.
-        (reset! ed sent)
-        (is (= (str "GET http://127.0.0.1:" port "/x …") message))
+            ed (atom state)]
+        (swap! ed http/send-request)
+        (is (= (str "GET http://127.0.0.1:" port "/x …") (:msg @ed)))
+        (is (str/ends-with? (str (get-in @ed [:bufs "*HTTP*" :text])) "sending…\n"))
+        (api/run-effects! ed)
         (loop [n 0]
           (let [t (str (get-in @ed [:bufs "*HTTP*" :text]))]
             (when (and (not (str/includes? t "HTTP 200")) (< n 100))
@@ -70,11 +69,11 @@
             "a second send re-parses the request, not the response"))
       (finally
         (srv)))))
-(deftest the-c-c-c-c-wraps-the-result-as-a-message
+(deftest invalid-request-reports-a-message
   ;; The keymap runs inside `swap!`, so the command must return state, not
   ;; print: an invalid buffer only produces a minibuffer message and no future.
   (let [state {:bufs {"*HTTP*" (buf/make "*HTTP*" "not a request\n\n" nil)}}]
-    (is (str/starts-with? (:msg (ed/http-send state)) "No http(s) request line"))))
+    (is (str/starts-with? (:msg (http/send-request state)) "No http(s) request line"))))
 
 (deftest an-edited-request-survives-the-reply
   ;; A reply must only own the response area; the request is the user's text.

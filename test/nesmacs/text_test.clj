@@ -72,6 +72,10 @@
   (is (= 2 (text/char-width 0x4E00)))
   (is (= 2 (text/char-width 0x9FFF))))
 
+(deftest display-width-reserves-cells-for-emoji-and-cjk
+  (is (= 5 (text/display-width "ñ😀日")))
+  (is (= 3 (text/pos-at-col "ñ😀日" 0 4 3))))
+
 (deftest char-width-combining
   (is (= 0 (text/char-width 0x0300)))
   (is (= 0 (text/char-width 0x036F))))

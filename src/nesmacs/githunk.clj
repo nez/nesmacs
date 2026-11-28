@@ -21,7 +21,7 @@
    :mode :hunks-mode
    :header (str (if staged? "Staged" "Unstaged") " hunks for " path
                 "   s=stage u=unstage g=refresh")
-   :entries entries
+   :entries (mapv #(assoc % :path path :staged staged?) entries)
    :format-entry fmt
    :extras {:git-dir dir :hunk-path path :hunk-staged? staged?}})
 
@@ -31,39 +31,30 @@
    (let [b (cmd/cur s)
          path (:file b)
          dir (git/current-dir b)]
-     (cond
-       (nil? path) (cmd/msg s "Buffer has no file")
-
-       :else
+     (if path
        (if-let [root (git/repo-root dir)]
          (deferred/start s
-                         {:argv (into (if staged?
-                                        ["git" "diff" "--cached" "--no-color"]
-                                        ["git" "diff" "--no-color"])
-                                      ["--" (git/path-arg root path)])
+                         {:argv (git/hunk-diff-argv (git/path-arg root path) staged?)
                           :dir root
                           :job-name "*git-diff*"
                           :build (fn [out]
-                                   (let [entries (mapv #(assoc % :path path :staged staged?)
-                                                       (git/parse-hunks out))]
-                                     (if (empty? entries)
-                                       (if staged? "No staged hunks" "No unstaged hunks")
-                                       [hunks-buf (spec root path staged? entries)])))})
-         (cmd/msg s "Not a git repository"))))))
+                                   (if-let [entries (seq (git/parse-hunks out))]
+                                     [hunks-buf (spec root path staged? entries)]
+                                     (if staged? "No staged hunks" "No unstaged hunks")))})
+         (cmd/msg s "Not a git repository"))
+       (cmd/msg s "Buffer has no file")))))
+
+(defn refresh [s]
+  (let [{dir :git-dir path :hunk-path staged? :hunk-staged?} (cmd/cur s)
+        entries ((if staged? git/staged-hunks git/diff-hunks) dir path)]
+    (listbuf/refresh s hunks-buf (spec dir path staged? entries))))
 
 (defn- alter-hunk
   [s reverse? label]
   (if-let [e (listbuf/entry-at-point s)]
-    (let [b (cmd/cur s)
-          dir (:git-dir b)
-          out (git/apply-cached dir (:patch e) reverse?)]
+    (let [out (git/apply-cached (:git-dir (cmd/cur s)) (:patch e) reverse?)]
       (if (or (str/blank? out) (not (re-find #"(?i)error|fatal|patch failed" out)))
-        (-> s
-            (listbuf/refresh hunks-buf
-                             (spec dir (:path e) (:hunk-staged? b)
-                                   ((if (:hunk-staged? b) git/staged-hunks git/diff-hunks)
-                                    dir (:path e))))
-            (cmd/msg (str label " hunk " (:index e))))
+        (-> s refresh (cmd/msg (str label " hunk " (:index e))))
         (cmd/msg s (str "git apply: " (first (str/split-lines out))))))
     s))
   ; shortcut: `git apply --cached` runs synchronously on the editor loop.
@@ -71,15 +62,6 @@
 
 (defn stage   [s] (alter-hunk s false "Staged"))
 (defn unstage [s] (alter-hunk s true "Unstaged"))
-
-(defn refresh [s]
-  (let [b (cmd/cur s)
-        dir (:git-dir b)
-        path (:hunk-path b)
-        staged? (:hunk-staged? b)]
-    (listbuf/refresh s hunks-buf
-                     (spec dir path staged?
-                           ((if staged? git/staged-hunks git/diff-hunks) dir path)))))
 
 (def hunks-keymap
   {\s stage

@@ -1,6 +1,10 @@
 (ns nesmacs.git-test
   (:require [clojure.test :refer [deftest is]]
+            [nesmacs.buf :as buf]
+            [nesmacs.cmd :as cmd]
+            [nesmacs.gap :as gap]
             [nesmacs.git :as git]
+            [nesmacs.githunk :as githunk]
             [nesmacs.testutil :as tu]))
 
 (deftest current-dir-precedence
@@ -22,6 +26,26 @@
     (is (clojure.string/includes? (:patch (second hunks)) "diff --git a/x b/x"))
     (is (clojure.string/includes? (:patch (second hunks)) "-c"))
     (is (not (clojure.string/includes? (:patch (first hunks)) "-c")))))
+
+(deftest refreshed-staged-hunks-can-still-be-unstaged
+  (let [dir "/repo"
+        path "/repo/file.txt"
+        hunk {:index 0 :label "@@ -1 +1 @@" :patch "patch"}
+        s {:buf "*Hunks*"
+           :bufs {"*Hunks*" (assoc (buf/make "*Hunks*")
+                                   :git-dir dir :hunk-path path :hunk-staged? true)}}]
+    (with-redefs [git/staged-hunks (fn [root file]
+                                    (is (= [dir path] [root file]))
+                                    [hunk])
+                  git/apply-cached (fn [root patch reverse?]
+                                     (is (= [dir "patch" true] [root patch reverse?]))
+                                     "")]
+      (let [s (githunk/refresh s)
+            s (cmd/update-cur s #(assoc % :point (gap/nth-line-start (:text %) 1)))
+            result (githunk/unstage s)]
+        (is (= "Unstaged hunk 0" (:msg result)))
+        (is (= [(assoc hunk :path path :staged true)]
+               (:listbuf-entries (cmd/cur result))))))))
 
 (deftest blame-parses-line-porcelain
   (let [dir (tu/temp-dir "nesmacs-blame")

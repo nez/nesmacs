@@ -16,13 +16,13 @@
 
 (defn repo-root [dir]
   (let [out (run ["git" "rev-parse" "--show-toplevel"] dir)]
-    (when-not (str/starts-with? out "Error:") (str/trim out))))
+    (when-not (or (str/blank? out) (str/starts-with? out "Error:"))
+      (str/trim out))))
 
 (defn current-dir
-  "Best directory to run git in for a buffer: an explicit :git-dir, a job's
-   :job-dir, the parent of its file, or the JVM cwd."
+  "Best directory to run git in for a buffer, falling back to the JVM cwd."
   [b]
-  (or (:git-dir b) (:job-dir b)
+  (or (:git-dir b) (:job-dir b) (:dired-dir b)
       (some-> (:file b) java.io.File. .getParent)
       (System/getProperty "user.dir")))
 
@@ -59,8 +59,8 @@
   "Run `argv` in the repo containing `dir`, or return a plain error string."
   [dir argv]
   (if-let [root (repo-root dir)]
-    (run argv root)
-    "Not in a git repository"))
+    (proc/run argv root {:merge-stderr? true :check-exit? true})
+    "Error: not in a git repository"))
 
 (defn add [dir path]
   (in-root dir ["git" "add" "--" path]))
@@ -164,21 +164,26 @@
          :patch (str (str/join "\n" (concat header hunk)) "\n")})
       hunks)))
 
+(defn hunk-diff-argv [path staged?]
+  (cond-> ["git" "diff"]
+    staged? (conj "--cached")
+    true (conj "--no-color" "--" path)))
+
+(defn- read-hunks [dir path staged?]
+  (when-let [root (repo-root dir)]
+    (let [out (run (hunk-diff-argv path staged?) root)]
+      (when (and out (not (str/starts-with? out "Error:")))
+        (vec (parse-hunks out))))))
+
 (defn diff-hunks
   "Unstaged hunks for `path` (what `git diff` shows)."
   [dir path]
-  (let [root (repo-root dir)
-        out (when root (run ["git" "diff" "--no-color" "--" path] root))]
-    (when (and root out (not (str/starts-with? out "Error:")))
-      (vec (parse-hunks out)))))
+  (read-hunks dir path false))
 
 (defn staged-hunks
   "Staged hunks for `path` (what `git diff --cached` shows)."
   [dir path]
-  (let [root (repo-root dir)
-        out (when root (run ["git" "diff" "--cached" "--no-color" "--" path] root))]
-    (when (and root out (not (str/starts-with? out "Error:")))
-      (vec (parse-hunks out)))))
+  (read-hunks dir path true))
 
 (defn apply-cached
   "Stage one hunk patch (or unstage it with `reverse?`)."

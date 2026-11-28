@@ -23,7 +23,8 @@ same idea; share the primitive instead of duplicating it.
 - Bytecode, user native extension modules, GUI frames. A vetted native library
   behind an optional backend (Tree-sitter) is not a user extension module.
 
-Packages are Clojure libraries on `deps.edn`.
+Nesmacs extensions are Clojure JARs managed by `M-x hub` using a static EDN
+catalog. Project and development dependencies use `deps.edn`.
 
 ## Current state
 

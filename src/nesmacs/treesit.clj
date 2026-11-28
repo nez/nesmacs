@@ -136,30 +136,30 @@
                      (+ bi (utf8-width cp))
                      ts acc))))))))
 
-(defn- captures
-  "All captures of `q` over `tree` as [capture-name TSNode]."
-  [^TSQuery q ^TSTree tree ^String text]
+(defn- collect-captures
+  "Project query captures while the cursor is open, skipping nil results."
+  [^TSQuery q ^TSTree tree ^String text capture-value]
   (let [cursor (TSQueryCursor.)
         match (TSQueryMatch.)]
     (try
       (.exec cursor q (.getRootNode tree) text)
       (loop [acc (transient [])]
         (if (.nextCapture cursor match)
-          (let [cap ^TSQueryCapture (first (.getCaptures match))
-                node (.getNode cap)
-                name (.getCaptureNameForId q (.getIndex cap))]
-            (recur (conj! acc [name node])))
+          (let [value (capture-value (first (.getCaptures match)))]
+            (recur (if (some? value) (conj! acc value) acc)))
           (persistent! acc)))
       (finally (.close cursor)))))
 
 (defn- highlight-spans [^TSQuery q ^TSTree tree ^String text]
-  (let [mapped (keep (fn [[name ^TSNode node]]
-                       (let [from (.getStartByte node)
+  (let [mapped (collect-captures q tree text
+                 (fn [^TSQueryCapture capture]
+                   (let [name (.getCaptureNameForId q (.getIndex capture))]
+                     (when-let [face (capture-face name)]
+                       (let [node (.getNode capture)
+                             from (.getStartByte node)
                              to (.getEndByte node)]
-                         (when-let [face (capture-face name)]
-                           (when (< (long from) (long to))
-                             [from to face (capture-priority name)]))))
-                     (captures q tree text))
+                         (when (< from to)
+                           [from to face (capture-priority name)]))))))
         char-map (byte->char text (mapcat (fn [[f t _ _]] [f t]) mapped))]
     (->> mapped
          (keep (fn [[from to face prio]]
@@ -171,27 +171,16 @@
 
 ;; --- Folds ---
 
-(defn- node-lines [^TSNode node]
-  (let [sp (.getStartPoint node)
-        ep (.getEndPoint node)]
-    [(.getRow sp) (.getRow ep) (.getColumn ep)]))
+(defn- node-fold-range [^TSNode node]
+  (let [start (long (.getRow (.getStartPoint node)))
+        end-point (.getEndPoint node)
+        end (long (.getRow end-point))
+        end (if (zero? (.getColumn end-point)) (dec end) end)]
+    (when (< start end) [start end])))
 
 (defn- fold-ranges [^TSQuery q ^TSTree tree ^String text]
-  (let [cursor (TSQueryCursor.)
-        match (TSQueryMatch.)]
-    (try
-      (.exec cursor q (.getRootNode tree) text)
-      (loop [acc (transient [])]
-        (if (.nextCapture cursor match)
-          (let [cap ^TSQueryCapture (first (.getCaptures match))
-                node (.getNode cap)
-                [start-line end-line end-col] (node-lines node)
-                end-line (if (zero? (long end-col)) (dec (long end-line)) (long end-line))]
-            (recur (if (> end-line (long start-line))
-                     (conj! acc [(long start-line) end-line])
-                     acc)))
-          (->> (persistent! acc) distinct vec)))
-      (finally (.close cursor)))))
+  (into [] (distinct)
+        (collect-captures q tree text #(node-fold-range (.getNode ^TSQueryCapture %)))))
 
 (def ^:private leaf-lit
   #{"sym_lit" "kwd_lit" "num_lit" "str_lit" "char_lit" "regex_lit"
@@ -208,11 +197,9 @@
   (let [acc (loop [i 0 acc acc]
               (if (< i (.getNamedChildCount node))
                 (recur (inc i) (collect-lit-folds (.getNamedChild node i) acc))
-                acc))
-        [sl el ec] (node-lines node)
-        end (if (zero? (long ec)) (dec (long el)) (long el))]
-    (if (and (form-lit? (.getType node)) (> (long end) (long sl)))
-      (conj acc [(long sl) end])
+                acc))]
+    (if-let [range (when (form-lit? (.getType node)) (node-fold-range node))]
+      (conj acc range)
       acc)))
 
 ;; --- Per-buffer state ---
@@ -354,22 +341,23 @@
           (recur (inc i) (conj acc (nth v i)))
           acc)))))
 
+(defn- close-parse! [{:keys [tree parser]}]
+  (when tree (try (.close ^TSTree tree) (catch Throwable _)))
+  (when parser (try (.close ^TSParser parser) (catch Throwable _))))
+
 (defn forget!
   "Release native memory for `key` (buffer killed)."
   [key]
-  (when-let [st (get @states key)]
-    (doseq [k [:tree :parser]]
-      (when-let [o (get st k)]
-        (try (.close o) (catch Throwable _))))
-    (swap! states dissoc key)))
+  (locking states-lock
+    (when-let [st (parse-state key)]
+      (close-parse! st)
+      (swap! states dissoc key))))
 
 (defn reset-cache!
   "Test helper: drop parsers, trees and compiled queries."
   []
-  (doseq [[_ st] @states]
-    (doseq [k [:tree :parser]]
-      (when-let [o (get st k)]
-        (try (.close o) (catch Throwable _)))))
-  (reset! states {})
-  (reset! queries {})
-  (reset! grammars {}))
+  (locking states-lock
+    (run! close-parse! (vals @states))
+    (reset! states {})
+    (reset! queries {})
+    (reset! grammars {})))

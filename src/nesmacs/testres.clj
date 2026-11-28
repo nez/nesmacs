@@ -4,7 +4,8 @@
 
    `run-tests` starts the project's test command as a normal job. When the job
    finishes, `tick!` parses its output once and opens *Test Results*."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [nesmacs.cmd :as cmd]
             [nesmacs.job :as job]
             [nesmacs.listbuf :as listbuf]
@@ -40,8 +41,7 @@
                  {:ok (nil? bad?)
                   :name (attr attrs "name")
                   :class (attr attrs "classname")
-                  :message msg})))
-       vec))
+                  :message msg})))))
 
 (defn parse-text
   "Failures and totals from the human output of `clojure.test` (cognitect
@@ -51,7 +51,7 @@
                           {:ok false
                            :name name
                            :message (str file ":" line " " kind)})
-                        (re-seq #"(?m)^(FAIL|ERROR) in \(([^)]*)\) \(([^:\s)]+):(\d+)\)" text))
+                        (re-seq #"(?m)^(FAIL|ERROR) in \(([^)]*)\) \(([^\r\n]+):(\d+)\)" text))
         py-loc (re-seq #"(?m)^(\S+\.py):(\d+): (.+)$" text)
         py-fails (if (seq py-loc)
                    (mapv (fn [[_ file line msg]]
@@ -90,6 +90,13 @@
   (some->> (re-find (re-pattern (str "(?i)(\\d+)\\s+(?:" words ")\\b")) text)
            second Long/parseLong))
 
+(defn- file-line
+  "First file:line in a failure message, for jumping."
+  [^String message]
+  (when message
+    (when-let [[_ file line] (re-find #"([\w./-]+\.\w+):(\d+)" message)]
+      {:file file :line (Long/parseLong line)})))
+
 (defn- generic-failures
   "Lines that name a file:line and read like a failure. Deduplicated by
    location, so a runner that prints both a summary line and a traceback does
@@ -98,9 +105,8 @@
   (->> (str/split-lines text)
        (keep (fn [line]
                (when (re-find #"(?i)\b(fail(?:ed|ure|ing)?|error|exception|panic|assert)" line)
-                 (when-let [[_ f l] (re-find #"([\w./-]+\.\w+):(\d+)" line)]
-                   {:ok false :name (str/trim line)
-                    :file f :line (Long/parseLong l)}))))
+                 (when-let [location (file-line line)]
+                   (assoc location :ok false :name (str/trim line))))))
        (reduce (fn [acc e]
                  (if (some #(and (= (:file %) (:file e)) (= (:line %) (:line e))) acc)
                    acc (conj acc e)))
@@ -122,21 +128,18 @@
        :total (if (pos? passed) (+ passed failed) failed)
        :failed failed})))
 
+(defn- summarize [kind tests]
+  {:kind kind :tests tests :total (count tests) :failed (count (remove :ok tests))})
+
 (defn parse
   "Parse test output. Returns {:kind :tests :total :failed} or nil."
   [^String text]
   (cond
     (re-find #"(?s)<testcase\b" text)
-    (let [tests (parse-junit text)]
-      {:kind :junit :tests tests
-       :total (count tests)
-       :failed (count (remove :ok tests))})
+    (summarize :junit (parse-junit text))
 
     (re-find #"(?m)^\s*(not ok|ok)\s+\d+" text)
-    (let [tests (parse-tap text)]
-      {:kind :tap :tests tests
-       :total (count tests)
-       :failed (count (remove :ok tests))})
+    (summarize :tap (parse-tap text))
 
     :else (let [known (parse-text text)
                 generic (parse-generic text)]
@@ -146,58 +149,76 @@
               known
               (or generic known)))))
 
-(defn- file-line
-  "First file:line in a failure message, for jumping.
-   Handles both relative and absolute paths."
-  [^String message]
-  (when message
-    (when-let [[_ f l] (re-find #"([/\w./-]+\.\w+):(\d+)" message)]
-      {:file f :line (Long/parseLong l)})))
-
 (defn failure-entries [parsed]
   (vec (keep (fn [t]
                (when-not (:ok t)
                  (merge {:name (str/trim (str (:class t) " " (:name t)))
                          :message (:message t)}
-                        (select-keys t [:file :line])
-                        (file-line (:message t)))))
+                        (file-line (:message t))
+                        (select-keys t [:file :line]))))
              (:tests parsed))))
+
+(defn- resolve-locations [root entries]
+  ;; clojure.test can report a classpath-relative path or just a filename.
+  (let [by-name (delay (group-by #(.getName (io/file %)) (project/files root)))]
+    (mapv (fn [{:keys [file] :as entry}]
+            (if-let [path (some-> file io/file)]
+              (let [absolute? (.isAbsolute path)
+                    target (if absolute? path (io/file root file))
+                    basename (.getName path)
+                    exists? (.isFile target)
+                    matches (when-not (or absolute? exists?)
+                              (filter #(or (= file basename)
+                                           (str/ends-with? % (str "/" file)))
+                                      (get @by-name basename)))]
+                (cond
+                  exists? entry
+                  (= 1 (count matches)) (assoc entry :file (first matches))
+                  :else (assoc (dissoc entry :file) :location-error
+                               (if (seq matches)
+                                 (str "Multiple project files match " file)
+                                 (str "Test source not found: " file)))))
+              entry))
+          entries)))
 
 (def ^:private results-name "*Test Results*")
 
 (defn show-results
-  [s parsed root]
-  (let [entries (failure-entries parsed)]
-    (-> (listbuf/open s results-name
-                      {:name results-name
-                       :mode :nav-mode
-                       :header (str (:failed parsed) " failed / " (:total parsed)
-                                    " tests (" (name (:kind parsed)) ")")
-                       :entries entries
-                       :format-entry (fn [{:keys [name message]}]
-                                       (format "%s  %s" name (str/replace message #"\s+" " ")))
-                       :extras {:nav-root root}})
-        (cmd/msg (str (:failed parsed) " failed / " (:total parsed) " tests")))))
+  ([s parsed root]
+   (show-results s parsed root (resolve-locations root (failure-entries parsed))))
+  ([s parsed root entries]
+   (-> (listbuf/open s results-name
+                     {:name results-name
+                      :mode :nav-mode
+                      :header (str (:failed parsed) " failed / " (:total parsed)
+                                   " tests (" (name (:kind parsed)) ")"
+                                   (when (seq entries) "   C-n select  RET jump"))
+                      :entries entries
+                      :format-entry (fn [{:keys [name message]}]
+                                      (format "%s  %s" name (str/replace message #"\s+" " ")))
+                      :extras {:nav-root root}})
+       (cmd/msg (str (:failed parsed) " failed / " (:total parsed) " tests")))))
+
+(defn- pending? [b]
+  (and (:test-report? b) (= :done (:job-status b)) (not (:test-parsed? b))))
+
+(defn- parse-report [b]
+  (when-let [parsed (try (parse (str (:text b))) (catch Exception _ nil))]
+    (when (pos? (:total parsed))
+      [parsed (resolve-locations (:test-root b) (failure-entries parsed))])))
+
+(defn- publish-report [s name b report]
+  (let [s (assoc-in s [:bufs name :test-parsed?] true)]
+    (if-let [[parsed entries] report]
+      (show-results s parsed (:test-root b) entries)
+      (cmd/msg s (if (zero? (long (or (:job-exit b) -1)))
+                   "Tests passed (exit 0); the output format had no failure lines"
+                   "Test output not recognized (looked for TAP, JUnit, clojure.test, pytest, or file:line failures)")))))
 
 (defn tick!
   "Editor-loop step: parse finished test jobs once."
   [editor]
-  (let [s @editor
-        pending (keep (fn [[name b]]
-                        (when (and (:test-report? b)
-                                   (= :done (:job-status b))
-                                   (not (:test-parsed? b)))
-                          [name b]))
-                      (:bufs s))]
-    (doseq [[name b] pending]
-      (let [parsed (try (parse (str (:text b))) (catch Exception _ nil))]
-        (swap! editor update-in [:bufs name] assoc :test-parsed? true)
-        (if (and parsed (pos? (:total parsed)))
-          (swap! editor show-results parsed (:test-root b))
-          (swap! editor cmd/msg
-                 (if (zero? (long (or (:job-exit b) -1)))
-                   "Tests passed (exit 0); the output format had no failure lines"
-                   "Test output not recognized (looked for TAP, JUnit, clojure.test, pytest, or file:line failures)")))))))
+  (job/consume-results! editor pending? parse-report publish-report))
 
 ;; --- Command ---
 

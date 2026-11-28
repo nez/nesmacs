@@ -1,0 +1,10 @@
+{:id :nesmacs/project-notes
+ :name "Project Notes"
+ :description "Open the notes file for the current project from M-x."
+ :version "1.0.0"
+ :api 1
+ :entry nesmacs-example.project-notes/start!
+ :options [{:key :file
+            :label "Project notes file"
+            :type :string
+            :default "NOTES.md"}]}
