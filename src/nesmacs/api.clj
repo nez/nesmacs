@@ -98,6 +98,13 @@
   [argv]
   (apply! assoc :agent-command (mapv str argv)))
 
+(defn register-project-task!
+  "Register a task for a project root. The task has the same shape as .nesmacs.edn."
+  [root task spec]
+  (when-not (and (simple-keyword? task) (map? spec))
+    (throw (IllegalArgumentException. "Expected a task keyword and a task map")))
+  (apply! assoc-in [:project-task-overrides (.getCanonicalPath (java.io.File. (str root))) task] spec))
+
 (defn use-theme!
   "Switch to a named palette (:default or :light). The editor loop applies it,
    so this also works from init.clj and persists with the session."

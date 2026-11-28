@@ -192,19 +192,22 @@
   "Open a terminal buffer running `argv` (default: $SHELL) in the current
    directory. The client starts on the next `tick!`."
   ([s] (open s (shell-argv)))
-  ([s argv]
+  ([s argv] (open s argv nil nil))
+  ([s argv root dir] (open s argv root dir nil))
+  ([s argv root dir env]
    (let [layout (:layout (win/frame-geometry s))
          [cols rows] (body-size (get layout (:cur-window s) {:rows 24 :cols 80}))
          name (unique-name s)
-         dir  (or (some-> (:file (cmd/cur s)) java.io.File. .getParent)
+         dir  (or dir (some-> (:file (cmd/cur s)) java.io.File. .getParent)
                   (System/getProperty "user.dir"))
          b    (-> (buf/make name "" nil)
-                  (assoc :mode :terminal-mode :read-only true :journal? false
+                  (assoc :mode :terminal-mode :read-only true :journal? false :project-root root
                          :props [] :font-lock [] :font-lock-window nil
                          :large-file false
                          :terminal {:id (str "nesmacs-" (subs (str (UUID/randomUUID)) 0 8))
                                     :argv (vec argv)
                                     :dir dir
+                                    :env env
                                     :status :starting
                                     :create? true
                                     :cols cols

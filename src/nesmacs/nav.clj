@@ -59,7 +59,7 @@
   (when-let [[_ file ln] (re-find #"^([^:]+):(\d+):" line)]
     {:file file :line (Long/parseLong ln)}))
 
-(defn jump
+(defn- visit
   "Visit a location from a listing, language server, or debugger."
   [s root {:keys [file buf line character location-error]}]
   (let [position #(if line (cmd/goto-line % line (or character 0)) %)]
@@ -76,6 +76,30 @@
             (position (cmd/set-cur-buffer s buf))
             (cmd/msg s "Source buffer is gone"))
       :else (cmd/msg s "This entry has no source location"))))
+
+(defn- position [s]
+  (let [{:keys [file text point]} (cmd/cur s)
+        line (when text (gap/line-of text (or point 0)))]
+    (cond-> {:file file :buf (:buf s)}
+      line (assoc :line (inc line) :character (- (or point 0) (gap/nth-line-start text line))))))
+
+(defn jump [s root entry]
+  (let [origin (position s)
+        dest (visit s root entry)]
+    (if (= origin (position dest)) dest
+        (-> dest
+            (update :nav-back #(vec (take-last 100 (conj (or % []) origin))))
+            (dissoc :nav-forward)))))
+
+(defn- history [s from to]
+  (if-let [destination (peek (from s))]
+    (let [origin (position s)
+          next (visit s nil destination)]
+      (-> next (update from pop) (update to (fnil conj []) origin)))
+    (cmd/msg s "No navigation history")))
+
+(defn back [s] (history s :nav-back :nav-forward))
+(defn forward [s] (history s :nav-forward :nav-back))
 
 (defn jump-at-point [s]
   (let [{:keys [text mode nav-root job-dir]} (cmd/cur s)]

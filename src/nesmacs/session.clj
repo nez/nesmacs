@@ -36,6 +36,7 @@
        :point (:point b)
        :mark (:mark b)
        :file file
+       :project-root (:project-root b)
        :dired-dir (:dired-dir b)
        :read-only (:read-only b)
        :journal? (:journal? b)
@@ -98,6 +99,7 @@
       ;; only with session text, since their offsets would otherwise be stale.
       (let [b (-> (buf/make (:name d) (or text "") file (or (:line-ending disk) (:line-ending d)))
                   (assoc :modified (:modified d)
+                         :project-root (when (string? (:project-root d)) (:project-root d))
                          :read-only (true? (:read-only d))
                          :journal? (not (false? (:journal? d)))
                          :journal-id (when (uuid? (:journal-id d)) (:journal-id d))
@@ -193,6 +195,7 @@
                  [name (:journal-id b) (:version b) (:point b) (:modified b)])
                (session-buffers s))
          (:windows s) (:cur-window s)
+         (:project-root s) (:project-recent s) (:project-views s)
          (:recentf s) (:bookmarks s) (:mini-history s) (:theme s :default)
          (dap/snapshot-breakpoints)]))
 
@@ -213,6 +216,9 @@
      :bufs (into {} (map (fn [[name b]] [name (buffer->data b)])) (session-buffers state))
      :windows (window-tree->data (:windows state))
      :cur-window (:cur-window state)
+     :project-root (:project-root state)
+     :project-recent (:project-recent state)
+     :project-views (:project-views state)
      :recentf (:recentf state [])
      :bookmarks (:bookmarks state {})
      :mini-history (:mini-history state [])
@@ -415,6 +421,11 @@
       {:bufs bufs
        :windows windows
        :cur-window cur-window
+       :project-root (when (string? (:project-root data)) (:project-root data))
+       :project-recent (vec (take 40 (sanitize-strings (:project-recent data))))
+       :project-views (into {} (filter (fn [[root view]]
+                                       (and (string? root) (map? view) (window-tree? (:windows view)))))
+                            (when (map? (:project-views data)) (:project-views data)))
        :recentf (sanitize-strings (:recentf data))
        :bookmarks (sanitize-bookmarks (:bookmarks data))
        :theme (when (keyword? (:theme data)) (:theme data))
@@ -457,7 +468,13 @@
           paths (win/leaves windows)
           path (or (some #{cur-window} paths) (first paths))]
       [(-> state
-           (merge (select-keys session-data [:recentf :bookmarks :mini-history]))
+           (merge (select-keys session-data [:recentf :bookmarks :mini-history :project-root :project-recent]))
+           (assoc :project-views
+                  (update-vals (:project-views session-data {})
+                               (fn [{:keys [windows cur-window]}]
+                                 (let [tree (restore-window windows bufs (first (keys bufs)))
+                                       paths (win/leaves tree)]
+                                   {:windows tree :cur-window (or (some #{cur-window} paths) (first paths))}))))
            (assoc :bufs bufs :windows windows :cur-window path
                   :theme (or theme (:theme state :default))
                   :buf (get-in windows (conj path :buffer))))

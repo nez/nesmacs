@@ -90,7 +90,7 @@
        vec))
 
 (defn- project-root [state]
-  (project/root-for (:file (cmd/cur state))))
+  (project/context state))
 
 ;; --- Cache ---
 

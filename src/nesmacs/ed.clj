@@ -32,8 +32,10 @@
             [nesmacs.persist :as persist]
             [nesmacs.proc :as proc]
             [nesmacs.project :as project]
+            [nesmacs.project-git :as project-git]
             [nesmacs.rect :as rect]
             [nesmacs.register :as register]
+            [nesmacs.repl :as repl]
             [nesmacs.search :as search]
             [nesmacs.session :as session]
             [nesmacs.term :as t]
@@ -43,6 +45,7 @@
             [nesmacs.text :as text]
             [nesmacs.view :as view]
             [nesmacs.window :as win]
+            [nesmacs.workspace :as workspace]
             [nesmacs.log :as log]
             [nrepl.server :as nrepl]
             [nesmacs.dev :as dev])
@@ -654,7 +657,7 @@
 ;; --- Projects, occur, imenu ---
 
 (defn- project-root [s]
-  (project/root-for (:file (cur s))))
+  (project/context s))
 
 (defn- project-find-file
   "C-x p f: pick a file anywhere in the project by fuzzy name.
@@ -680,7 +683,7 @@
 (defn- git-status
   "C-x g: open the git status buffer for the current project."
   [s]
-  (if-let [root (git/repo-root (git/current-dir (cur s)))]
+  (if-let [root (git/repo-root (or (project/context s) (git/current-dir (cur s))))]
     (gitstatus/open s root)
     (msg s "Not a git repository")))
 
@@ -696,6 +699,13 @@
 (defn lsp-format [s] (language/lsp-format editor s))
 (defn lsp-format-region [s] (language/lsp-format-region editor s))
 (defn lsp-rename [s] (language/lsp-rename editor s))
+(defn- project-problems [s] (workspace/problems editor s))
+(defn- project-code-action [s]
+  (let [entry (listbuf/entry-at-point s)]
+    (if (= "LSP" (:source entry))
+      (let [next (nav/jump s (project/context s) entry)]
+        (if (= (:file entry) (:file (cur next))) (lsp-code-action next) next))
+      (msg s "Select an LSP diagnostic"))))
 
 (defn- project-search
   "C-x p g: run rg over the project as a job; RET on a hit opens it."
@@ -718,6 +728,10 @@
 (def nav-jump nav/jump-at-point)
 
 (defn debug-start [s] (debug/start editor s))
+(defn- project-debug [s] (debug/project-debug editor s))
+(defn- eval-project-form [s] (repl/evaluate s :form))
+(defn- eval-project-region [s] (repl/evaluate s :region))
+(defn- eval-project-buffer [s] (repl/evaluate s :buffer))
 (def debug-breakpoint debug/breakpoint)
 (def debug-continue debug/continue)
 (def debug-next debug/next-line)
@@ -948,6 +962,29 @@
    ["query-replace-regexp" query-replace-regexp-cmd "Interactively replace regex matches (use \\1 etc. in replacement)."]
    ["project-find-file" project-find-file "Find a file in the current project by fuzzy name." "C-x p f"]
    ["project-search" project-search "Search the current project with ripgrep." "C-x p g"]
+   ["project-open" workspace/open "Open or switch to a project." "C-x p p"]
+   ["project-menu" workspace/menu "Show commands for the current project." "C-x p m"]
+   ["project-tasks" workspace/tasks "Run a named project task." "C-x p t"]
+   ["project-test" workspace/test-project "Run the project's test task."]
+   ["project-test-file" #(workspace/test-scope % :test-file) "Run the test task for the active file."]
+   ["project-test-at-point" #(workspace/test-scope % :test-at-point) "Run the test task at point."]
+   ["project-test-failed" #(workspace/test-scope % :test-failed) "Rerun failing tests for the project."]
+   ["project-status" workspace/status "Show project tools and tasks."]
+   ["project-problems" project-problems "List project diagnostics and task failures." "C-x p e"]
+   ["project-symbols" language/project-symbols "Search workspace symbols through LSP." "C-x p s"]
+   ["project-terminal" workspace/terminal "Open a shell in the project root."]
+   ["project-debug" project-debug "Start a project debug profile."]
+   ["project-repl" repl/start "Start the project's nREPL server."]
+   ["project-repl-connect" repl/connect "Connect to a project nREPL on localhost."]
+   ["project-eval-form" eval-project-form "Evaluate the top-level form in the project REPL."]
+   ["project-eval-region" eval-project-region "Evaluate the region in the project REPL."]
+   ["project-eval-buffer" eval-project-buffer "Evaluate the buffer in the project REPL."]
+   ["project-git" project-git/menu "Show Git commands for the project."]
+   ["project-git-switch" project-git/switch-branch "Switch to a local branch."]
+   ["project-git-compare" project-git/compare-branch "Compare the current branch against another."]
+   ["project-git-conflicts" project-git/conflicts "Open the working file and the three Git conflict versions."]
+   ["project-git-pull" project-git/pull "Fast-forward the project branch from its upstream."]
+   ["project-git-push" project-git/push "Push the current project branch."]
    ["occur" occur-cmd "List lines matching a regex in the current buffer." "M-s o"]
    ["imenu" imenu "List definitions in the current buffer." "M-i"]
    ["reload-config" reload-config "Re-run ~/.nesmacs/init.clj."]
@@ -979,6 +1016,8 @@
    ["run-tests" run-tests "Run the project's tests and parse TAP/JUnit output."]
    ["lsp-hover" lsp-hover "Show hover information at point." "C-c h"]
    ["lsp-definition" lsp-definition "Jump to the definition at point." "M-."]
+   ["jump-back" nav/back "Go back to the previous source location."]
+   ["jump-forward" nav/forward "Go forward in source navigation history."]
    ["lsp-references" lsp-references "List references to the symbol at point." "C-c r"]
    ["lsp-rename" lsp-rename "Rename the symbol at point across the project." "C-c R"]
    ["lsp-code-action" lsp-code-action "Choose a code action at point." "C-c a"]
@@ -1251,6 +1290,9 @@
                              (run-key s key))))]
     (when-let [clip (cmd/new-clipboard-text before after)]
       (clipboard! clip))
+    (when (and (:project-root after) (not= (:buf before) (:buf after)))
+      (try (language/ensure-focused! after)
+           (catch Exception e (log/log "Project LSP startup:" (.getMessage e)))))
     (session/journal-tick! editor)))
 
 (defn- persist-quit! [editor]
@@ -1318,6 +1360,11 @@
       (mode/register :job-mode :major :keymap job-keymap)
       (mode/register :terminal-mode :major)
       (mode/register :nav-mode :major :keymap nav-keys)
+      (mode/register :project-mode :major :keymap {:return workspace/select-entry \g workspace/menu})
+      (mode/register :project-problems-mode :major
+                     :keymap {:return nav-jump \g project-problems \a project-code-action})
+      (mode/register :workspace-edit-mode :major
+                     :keymap {:return nav-jump \y language/review-apply \q language/review-cancel})
       (mode/register :rg-mode :major :keymap rg-keys
                      :hint "RET jump  |  g rerun  |  C-c C-k stop")
       (mode/register :gitstatus-mode :major :keymap gitstatus-keymap)
@@ -1412,6 +1459,7 @@
 (defn- stop-services! [{:keys [nrepl web dev]}]
   (run-all [#(terminal/shutdown-all! tmux/backend)
             dap/shutdown-all!
+            repl/close-all!
             #(dev/stop-watcher! dev)
             #(web-stop web)
             #(nrepl/stop-server nrepl)]))

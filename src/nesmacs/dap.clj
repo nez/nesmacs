@@ -416,7 +416,7 @@
      :dap      adapter config, overriding the language's `:dap`
      :on-stop  (fn [state frame] state) — jump to the stopped frame
    Returns a message string for the caller to show."
-  [{:keys [root file language dap] :as opts}]
+  [{:keys [root file language dap request arguments] :or {request "launch"} :as opts}]
   (let [dap (or dap (:dap language))]
     (cond
       (nil? dap)
@@ -454,9 +454,9 @@
                 (bump-markers!)
                 (if-let [err (request! s "initialize" (initialize-args s)
                                        (fn [_]
-                                         (request! s "launch"
-                                                   (merge (:launch dap)
-                                                          {:program file :cwd root})
+                                         (request! s request
+                                                   (merge (when (= request "launch") {:program file :cwd root})
+                                                          (:launch dap) arguments)
                                                    nil)))]
                   (do (stop!) err)
                     (str "Starting " (:id language) " debugger...")))

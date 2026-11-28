@@ -249,11 +249,15 @@
 (defn- diag-face [severity]
   (case severity 1 :diag-error 2 :diag-warning 3 :diag-info :diag-info))
 
-(defn- apply-diagnostics! [editor path diags]
-  (let [buf-key (first (keep (fn [[k b]] (when (= path (:file b)) k)) (:bufs @editor)))]
-    (when buf-key
-      (swap! editor update-in [:bufs buf-key]
-             (fn [b]
+(defn- apply-diagnostics! [editor root path diags]
+  (when path
+    (swap! editor
+           (fn [s]
+             (let [s (assoc-in s [:project-diagnostics root path] diags)
+                   buf-key (some (fn [[k b]] (when (= path (:file b)) k)) (:bufs s))]
+               (if-not buf-key s
+                 (update-in s [:bufs buf-key]
+                   (fn [b]
                (let [text   (:text b)
                      ranges (for [{:keys [range severity message]} diags
                                   :let [offs (range->offsets text range)]
@@ -262,13 +266,13 @@
                                           (diag-face severity)
                                           {:owner :lsp :message message
                                            :severity severity}))]
-                 (assoc b :props (props/add-all (props/remove-owner (:props b) :lsp) ranges))))))))
+                     (assoc b :props (props/add-all (props/remove-owner (:props b) :lsp) ranges)))))))))))
 
 (defn- on-notification [editor root-id {:keys [method params]}]
   (case method
     "textDocument/publishDiagnostics"
     (when params
-      (apply-diagnostics! editor
+      (apply-diagnostics! editor (:root (srv root-id))
                           (uri->path (:uri params))
                           (:diagnostics params)))
     "window/showMessage" (when-let [m (:message params)] (log/log "LSP:" root-id m))
@@ -344,7 +348,7 @@
                             :completion {:completionItem {:snippetSupport true
                                                           :documentationFormat ["plaintext"]}}
                             :publishDiagnostics {}}
-                           :workspace {:workspaceEdit {:documentChanges false}}}}
+                           :workspace {:symbol {} :diagnostics {} :workspaceEdit {:documentChanges false}}}}
                          (fn [result]
                            (swap! servers update root-id
                                   assoc :initialized? true
@@ -396,6 +400,21 @@
 (defn document-symbol [root-id path cb]
   (request! root-id "textDocument/documentSymbol"
             {:textDocument {:uri (path->uri path)}} cb))
+
+(defn workspace-symbols [root-id query cb]
+  (if (get-in (srv root-id) [:capabilities :workspaceSymbolProvider])
+    (request! root-id "workspace/symbol" {:query query} cb)
+    (cb nil)))
+
+(defn workspace-diagnostics! [editor root on-result]
+  (doseq [[id server] @servers
+          :when (and (= root (:root server))
+                     (get-in server [:capabilities :diagnosticProvider :workspaceDiagnostics]))]
+    (request! id "workspace/diagnostic" {:previousResultIds []}
+              (fn [{:keys [items]}]
+                (doseq [{:keys [uri kind] :as item} items :when (= "full" kind)]
+                  (apply-diagnostics! editor root (uri->path uri) (:items item)))
+                (on-result)))))
 
 (defn formatting [root-id path opts cb]
   (request! root-id "textDocument/formatting"

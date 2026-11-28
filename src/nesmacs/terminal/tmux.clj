@@ -256,7 +256,7 @@
       false)))
 
 (defn attach!
-  [_ {:keys [id argv dir cols rows create?]}]
+  [_ {:keys [id argv dir env cols rows create?]}]
   (ensure-config!)
   (try
     (let [base (tmux-args "-C")
@@ -264,6 +264,7 @@
                  (-> (into base ["new-session" "-A" "-s" id
                                  "-x" (str (long cols)) "-y" (str (long rows))])
                      (into (when dir ["-c" dir]))
+                     (into (mapcat (fn [[key value]] ["-e" (str key "=" value)]) env))
                      (into (concat ["--"] argv)))
                  (into base ["attach" "-t" id]))
           h (proc/start {:argv (vec args) :dir dir :keep-stdin? true

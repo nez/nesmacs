@@ -5,11 +5,12 @@
    patterns, accumulated from the root down. No `!` negation, no `**`, no
    path patterns. shortcut: upgrade to a real matcher when a repo in real use
    needs those."
-  (:require [clojure.string :as str])
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str])
   (:import [java.io File]
            [java.nio.file Files]))
 
-(def ^:private markers [".git" "deps.edn" "project.clj" ".project"
+(def ^:private markers [".nesmacs.edn" ".git" "deps.edn" "project.clj" ".project"
                         "pyproject.toml" "setup.py" "package.json"])
 
 (defn root
@@ -19,13 +20,29 @@
   (loop [f (.getAbsoluteFile (File. (str start)))]
     (when f
       (if (some #(.exists (File. f ^String %)) markers)
-        (.getPath f)
+        (.getCanonicalPath f)
         (recur (.getParentFile f))))))
 
 (defn root-for
   "Project root of a file path, or of the process cwd when `file` is nil."
   [file]
   (root (or file (System/getProperty "user.dir"))))
+
+(defn context [s]
+  (let [key (or (get-in s [:mini :prev-buf]) (:buf s))
+        {:keys [project-root file nav-root git-dir job-dir]} (get-in s [:bufs key])]
+    (or project-root (some-> file root) nav-root git-dir (some-> job-dir root)
+        (:project-root s) (root-for nil))))
+
+(defn profile [root]
+  (let [f (File. ^String root ".nesmacs.edn")]
+    (when (.isFile f)
+      (let [data (edn/read-string (slurp f :encoding "UTF-8"))]
+        (when-not (map? data) (throw (ex-info "Expected an EDN map in .nesmacs.edn" {:file f})))
+        data))))
+
+(defn argv? [argv]
+  (and (vector? argv) (seq argv) (every? string? argv) (not (str/blank? (first argv)))))
 
 (defn- ignore-patterns [^File dir]
   (let [f (File. dir ".gitignore")]

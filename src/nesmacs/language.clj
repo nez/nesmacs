@@ -7,11 +7,14 @@
             [nesmacs.complete :as complete]
             [nesmacs.files :as files]
             [nesmacs.gap :as gap]
+            [nesmacs.lang :as lang]
             [nesmacs.listbuf :as listbuf]
             [nesmacs.log :as log]
             [nesmacs.lsp :as lsp]
             [nesmacs.mini :as mini]
             [nesmacs.nav :as nav]
+            [nesmacs.persist :as persist]
+            [nesmacs.project :as project]
             [nesmacs.snippet :as snippet]))
 
 (defn- symbol-prefix [text p]
@@ -130,6 +133,42 @@
     (when-let [file (and uri start (lsp/uri->path uri))]
       {:file file :line (inc (max 0 (:line start 0))) :character (:character start)})))
 
+(defn ensure-focused! [s]
+  (when-let [{:keys [root-id argv root language]} (lsp-session s)]
+    (when (and (not (lsp/ready? root-id)) (lsp/on-path? argv))
+      (lsp/ensure! root-id argv root (:id language) (fn [_] nil)))))
+
+(defn project-symbols [s]
+  (if-let [root (project/context s)]
+    (let [language (or (some (fn [b] (let [session (lsp/document-session b)]
+                                        (when (= root (:root session)) (:language session))))
+                             (cons (cmd/cur s) (vals (:bufs s))))
+                       (some (fn [path] (let [l (lang/language-for-file path)] (when (:lsp l) l)))
+                             (project/files root)))
+          argv (when language (lsp-argv s language))
+          root-id (when language (lsp/server-id root (:id language)))
+          name (str "*Symbols " root "*")]
+      (if-not (and argv (lsp/on-path? argv))
+        (cmd/msg s "No project language server on PATH")
+        (mini/start s "Project symbol: "
+          (fn [state query]
+            (api/after-command (cmd/msg state "Searching project symbols…")
+              (fn [publish!]
+                (lsp/ensure! root-id argv root (:id language)
+                  (fn [_]
+                    (lsp/workspace-symbols root-id query
+                      (fn [items]
+                        (let [entries (into [] (keep (fn [item]
+                                                     (when-let [location (location->entry (:location item))]
+                                                       (assoc location :name (:name item))))) items)
+                              spec {:name name :mode :nav-mode :header (str "Symbols matching " query)
+                                    :entries entries :format-entry :name :extras {:project-root root :nav-root root}}]
+                          (publish! (fn [live]
+                                      (if (= root (project/context live))
+                                        (listbuf/open live name spec)
+                                        (listbuf/refresh live name spec)))))))))))))))
+    (cmd/msg s "Open a project first")))
+
 (defn- jump-to-definition [editor res]
   (when-let [entry (location->entry (if (vector? res) (first res) res))]
     (swap! editor nav/jump nil entry)))
@@ -194,14 +233,13 @@
                                  b edits))))
     state))
 
-(defn apply-workspace-edit!
-  "Apply a WorkspaceEdit to open buffers, writing previously unopened files
-   only if their source on disk still matches the bytes used for the edit."
-  [editor edit]
-  (let [initial @editor
-        source (memoize #(workspace-source initial %))
-        groups (mapv #(assoc % :source (source (:path %)))
-                     (lsp/workspace-edits edit #(:text (source %))))]
+(defn- prepare-edit [state edit]
+  (let [source (memoize #(workspace-source state %))]
+    (mapv #(assoc % :source (source (:path %)))
+          (lsp/workspace-edits edit #(:text (source %))))))
+
+(defn- apply-prepared-edit! [editor groups]
+  (let [groups (vec groups)]
     (if (empty? groups)
       (swap! editor cmd/msg "No edits to apply")
       (let [[before after] (swap-vals! editor #(reduce apply-edit-group % groups))
@@ -221,13 +259,58 @@
                                (when (< (count applied) (count groups))
                                  " (some buffers changed)")))))))
 
+(defn apply-workspace-edit!
+  "Apply an LSP workspace edit with version and disk checks."
+  [editor edit]
+  (apply-prepared-edit! editor (prepare-edit @editor edit)))
+
+(defn- preview-edit! [editor root edit after]
+  (let [groups (prepare-edit @editor edit)]
+    (if (<= (count groups) 1)
+      (do (apply-prepared-edit! editor groups) (when after (after)))
+      (let [name (str "*Workspace Edit " root "*")
+            entries (vec (for [{:keys [path source edits]} groups
+                               {:keys [from to text]} edits]
+                           {:file path :line (inc (gap/line-of (:text source) from))
+                            :before (gap/substr (:text source) from to) :after text}))
+            approve (fn []
+                      (try
+                        (if (every? (fn [{:keys [path source]}]
+                                      (and (workspace-source-current? @editor path source)
+                                           (or (nil? (:expected source))
+                                               (= (:expected source) (persist/file-revision path)))))
+                                    groups)
+                          (do (apply-prepared-edit! editor groups) (when after (after)))
+                          (swap! editor cmd/msg "Files changed since preview. Request the edit again."))
+                        (catch Exception e (swap! editor cmd/msg-error "Workspace edit failed" e))))]
+        (swap! editor
+          (fn [s]
+            (let [spec {:name name :mode :workspace-edit-mode
+                        :header (str (count groups) " files — y apply, q cancel, RET visit")
+                        :entries entries
+                        :format-entry (fn [{:keys [file line before after]}]
+                                        (str file ":" line "  " (pr-str before) " → " (pr-str after)))
+                        :extras {:project-root root :nav-root root :edit-approve approve :edit-return (:buf s)}}]
+              ((if (= root (project/context s)) listbuf/open listbuf/refresh) s name spec))))))))
+
+(defn review-apply [s]
+  (if-let [approve (:edit-approve (cmd/cur s))]
+    (-> s (cmd/update-cur #(dissoc % :edit-approve)) (api/after-command (fn [_] (approve))))
+    (cmd/msg s "No pending workspace edit")))
+
+(defn review-cancel [s]
+  (let [target (:edit-return (cmd/cur s))]
+    (cond-> (-> s (cmd/update-cur #(dissoc % :edit-approve)) (cmd/msg "Workspace edit canceled"))
+      (cmd/buf s target) (cmd/set-cur-buffer target))))
+
 (defn- apply-code-action!
   [editor sess action]
-  (let [cmd (:command action)]
-    (when-let [edit (:edit action)] (apply-workspace-edit! editor edit))
-    (when cmd
-      (lsp/execute-command (:root-id sess) (:command cmd) (:arguments cmd)
-                           (fn [r] (when (map? r) (apply-workspace-edit! editor r)))))))
+  (let [after (when-let [cmd (:command action)]
+                #(lsp/execute-command (:root-id sess) (:command cmd) (:arguments cmd)
+                                     (fn [r] (when (map? r) (preview-edit! editor (:root sess) r nil)))))]
+    (if-let [edit (:edit action)]
+      (preview-edit! editor (:root sess) edit after)
+      (when after (after)))))
 
 (defn- diags-in-range
   "LSP diagnostics from the buffer's LSP props overlapping [lo hi), with
@@ -365,7 +448,7 @@
                        (fn [edit]
                          (when (source-current? @editor key source)
                            (if edit
-                             (apply-workspace-edit! editor edit)
+                             (preview-edit! editor (:root sess) edit nil)
                              (swap! editor cmd/msg "Rename failed")))))))))))))))
 
 ;; Completion is cache + push, never blocking: a cache miss starts one async

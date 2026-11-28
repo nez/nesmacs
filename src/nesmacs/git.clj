@@ -22,7 +22,7 @@
 (defn current-dir
   "Best directory to run git in for a buffer, falling back to the JVM cwd."
   [b]
-  (or (:git-dir b) (:job-dir b) (:dired-dir b)
+  (or (:git-dir b) (:project-root b) (:job-dir b) (:dired-dir b)
       (some-> (:file b) java.io.File. .getParent)
       (System/getProperty "user.dir")))
 

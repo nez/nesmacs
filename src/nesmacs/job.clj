@@ -30,12 +30,12 @@
   (cond-> s
     id (api/after-command (fn [_] (proc/kill! (proc/by-id id))))))
 
-(defn- launch! [publish! {:keys [argv dir buf-name]} token]
+(defn- launch! [publish! {:keys [argv dir env buf-name]} token]
   (let [path [:bufs buf-name]
         current? #(identical? token (get-in % (conj path :job-token)))]
     (when (current? (publish! identity))
       (let [{:keys [handle error]}
-            (try {:handle (proc/start {:argv argv :dir dir :kind :job})}
+            (try {:handle (proc/start {:argv argv :dir dir :env env :kind :job})}
                  (catch Exception e {:error (str "Error: " (.getMessage e) "\n")}))
             state (publish! (fn [s]
                               (if (current? s)

@@ -1,12 +1,14 @@
 (ns nesmacs.debug
   "Editor commands for the debug adapter."
-  (:require [nesmacs.api :as api]
+  (:require [clojure.java.io :as io]
+            [nesmacs.api :as api]
             [nesmacs.cmd :as cmd]
             [nesmacs.dap :as dap]
             [nesmacs.lang :as lang]
             [nesmacs.mini :as mini]
             [nesmacs.nav :as nav]
-            [nesmacs.project :as project]))
+            [nesmacs.project :as project]
+            [nesmacs.workspace :as workspace]))
 
 (defn- debug-jump [s {:keys [file line]}]
   (if file (nav/jump s nil {:file file :line (some-> line inc)}) s))
@@ -41,6 +43,41 @@
       (debug-effect s #(format "%s:%d — %d breakpoint(s)" file (inc line)
                                (count (dap/toggle-breakpoint! file line)))))
     (cmd/msg s "Buffer has no file")))
+
+(defn project-debug [editor s]
+  (if-let [root (project/context s)]
+    (let [profiles (:launch (project/profile root))]
+      (cond
+        (empty? profiles) (start editor s)
+        (not (and (map? profiles) (every? simple-keyword? (keys profiles))))
+        (cmd/msg s "Project :launch must be a map keyed by keywords")
+        :else
+        (mini/start s "Debug profile: "
+          (fn [s input]
+            (let [{:keys [program language request cwd args env arguments] :or {request :launch}}
+                  (get profiles (keyword input))
+                  f (when (string? program) (io/file program))
+                  file (when f (.getCanonicalPath (if (.isAbsolute f) f (io/file root program))))
+                  lang (or (lang/language language) (lang/language-for-file file))]
+              (cond
+                (not (#{:launch :attach} request)) (cmd/msg s "Debug request must be :launch or :attach")
+                (not (:dap lang)) (cmd/msg s "Choose a profile with a supported debugger")
+                (and (= :launch request) (not (and file (.isFile (io/file file)))))
+                (cmd/msg s "Debug program does not exist")
+                (and args (not (and (vector? args) (every? string? args))))
+                (cmd/msg s "Debug :args must be a vector of strings")
+                (and env (not (and (map? env) (every? string? (keys env)) (every? string? (vals env)))))
+                (cmd/msg s "Debug :env must map strings to strings")
+                (and arguments (not (map? arguments))) (cmd/msg s "Debug :arguments must be a map")
+                :else
+                (let [arguments (cond-> arguments
+                                  cwd (assoc :cwd (workspace/directory root cwd))
+                                  args (assoc :args args)
+                                  env (assoc :env env))]
+                  (debug-effect s #(dap/start! {:editor editor :root root :file file :language lang
+                                                :request (name request) :arguments arguments :on-stop debug-jump}))))))
+          (fn [input _] (mini/complete-prefix input (sort (map name (keys profiles))))))))
+    (cmd/msg s "Open a project first")))
 
 (defn continue [s] (debug-effect s dap/continue-run!))
 (defn next-line     [s] (debug-effect s dap/next!))

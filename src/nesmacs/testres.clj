@@ -183,12 +183,8 @@
 
 (def ^:private results-name "*Test Results*")
 
-(defn show-results
-  ([s parsed root]
-   (show-results s parsed root (resolve-locations root (failure-entries parsed))))
-  ([s parsed root entries]
-   (-> (listbuf/open s results-name
-                     {:name results-name
+(defn- result-spec [buffer-name parsed root entries]
+  {:name buffer-name
                       :mode :nav-mode
                       :header (str (:failed parsed) " failed / " (:total parsed)
                                    " tests (" (name (:kind parsed)) ")"
@@ -196,8 +192,32 @@
                       :entries entries
                       :format-entry (fn [{:keys [name message]}]
                                       (format "%s  %s" name (str/replace (or message "") #"\s+" " ")))
-                      :extras {:nav-root root}})
+                      :extras {:nav-root root :project-root root}})
+
+(defn show-results
+  ([s parsed root]
+   (show-results s parsed root (resolve-locations root (failure-entries parsed))))
+  ([s parsed root entries]
+   (-> (listbuf/open s results-name (result-spec results-name parsed root entries))
        (cmd/msg (str (:failed parsed) " failed / " (:total parsed) " tests")))))
+
+(defn task-report [root dir name report b]
+  (let [output (str (:text b))
+        parsed (when (= :tests report) (parse output))
+        entries (mapv (fn [{:keys [file] :as entry}]
+                        (cond-> entry file (assoc :file (.getCanonicalPath
+                                                          (let [f (io/file file)]
+                                                            (if (.isAbsolute f) f (io/file dir file)))))))
+                      (resolve-locations dir
+                        (if parsed (failure-entries parsed) (failure-entries (parse-generic output)))))]
+    (fn [s job-name]
+      (let [s (assoc-in s [:bufs job-name :problem-entries] entries)]
+        (if parsed
+          (let [spec (result-spec name parsed root entries)]
+            (if (= job-name (:buf s))
+              (listbuf/open s name spec)
+              (listbuf/refresh s name spec)))
+          s)))))
 
 (defn- finish-report [root b]
   (if (= :failed (:job-status b))
@@ -226,8 +246,7 @@
   [s cmd]
   (if (str/blank? cmd)
     (cmd/msg s "No test command")
-    (let [b (cmd/cur s)
-          root (or (project/root-for (:file b))
+    (let [root (or (project/context s)
                    (System/getProperty "user.dir"))
           name "*Tests*"]
       (job/start s {:argv ["sh" "-c" cmd] :dir root :buf-name name
