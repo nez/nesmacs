@@ -5,19 +5,15 @@ Run with `make pty`. Uses a temp HOME (and -Duser.home) so it never touches the
 real ~/.nesmacs. Asserts the startup log (config loaded, clean exit) and that a
 M-! job streams into its buffer while the editor keeps accepting keys.
 """
-import fcntl
 import os
-import pty
-import select
 import signal
-import struct
 import sys
 import tempfile
-import termios
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+from editor_pty import read_chunk, start
+
 TIMEOUT = 180
 
 home = Path(tempfile.mkdtemp(prefix="nesmacs-pty-"))
@@ -28,14 +24,7 @@ home = Path(tempfile.mkdtemp(prefix="nesmacs-pty-"))
     "(api/bind! \"C-c h\" #'hello)\n"
 )
 
-pid, fd = pty.fork()
-if pid == 0:
-    os.chdir(ROOT)
-    os.environ["HOME"] = str(home)
-    os.environ["NESMACS_NREPL_PORT"] = "0"
-    os.execvp("clojure", ["clojure", "-J-Duser.home=" + str(home), "-M:run"])
-
-fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+pid, fd = start(home)
 
 out = b""
 start = time.time()
@@ -44,16 +33,11 @@ job_seen_at = None
 sent_exit = False
 exited = False
 while time.time() - start < TIMEOUT:
-    r, _, _ = select.select([fd], [], [], 0.2)
-    if r:
-        try:
-            data = os.read(fd, 65536)
-        except OSError:
-            exited = True
-            break
-        if not data:
-            exited = True
-            break
+    data = read_chunk(fd)
+    if data == b"":
+        exited = True
+        break
+    if data:
         out += data
     if not sent_job and b"*scratch*" in out:
         # M-! yes | head -c 300000 RET: a firehose into a job buffer.

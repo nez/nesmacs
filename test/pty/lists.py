@@ -6,23 +6,19 @@ prints the same JSON the real CLI emits: the test has no GitHub credentials,
 but it still exercises nesmacs.forge's parse and list buffer. Run with `make pty`.
 Uses a temp HOME (and -Duser.home) so it never touches the real ~/.nesmacs.
 """
-import fcntl
 import os
-import pty
 import re
-import select
 import shutil
 import signal
 import stat
-import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+from editor_pty import read_chunk, read_until as wait_for_output, start
+
 TIMEOUT = 60
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]")
 
@@ -75,15 +71,7 @@ gh.write_text(
 )
 gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
 
-pid, fd = pty.fork()
-if pid == 0:
-    os.chdir(ROOT)
-    os.environ["HOME"] = str(home)
-    os.environ["PATH"] = str(bin_dir) + ":" + os.environ["PATH"]
-    os.environ["NESMACS_NREPL_PORT"] = "0"
-    os.execvp("clojure", ["clojure", "-J-Duser.home=" + str(home), "-M:run", str(doc)])
-
-fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+pid, fd = start(home, doc, cols=100, env={"PATH": str(bin_dir) + ":" + os.environ["PATH"]})
 
 out = b""
 checks = []
@@ -93,47 +81,23 @@ def plain(b):
     return ANSI.sub(b"", b)
 
 
-def seen(needle):
-    return (needle.encode() if isinstance(needle, str) else needle) in plain(out)
-
-
 def read_until(needle, seconds=TIMEOUT, label=None):
     global out
-    end = time.time() + seconds
-    while time.time() < end:
-        r, _, _ = select.select([fd], [], [], 0.2)
-        if r:
-            try:
-                data = os.read(fd, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            out += data
-        # A full redraw can land in several reads; check after each read and
-        # once more before giving up, so a needle split across reads is not lost.
-        if seen(needle):
-            checks.append((label or needle, True))
-            return True
-    if seen(needle):
-        checks.append((label or needle, True))
-        return True
-    checks.append((label or needle, False))
-    return False
+    target = needle.encode() if isinstance(needle, str) else needle
+    out, found = wait_for_output(fd, lambda data: target in plain(data),
+                                 time.monotonic() + seconds, out)
+    checks.append((label or needle, found))
+    return found
 
 
 def wait_exit(seconds=30):
     global out
     end = time.time() + seconds
     while time.time() < end:
-        r, _, _ = select.select([fd], [], [], 0.2)
-        if r:
-            try:
-                data = os.read(fd, 65536)
-            except OSError:
-                return True
-            if not data:
-                return True
+        data = read_chunk(fd)
+        if data == b"":
+            return True
+        if data:
             out += data
         done, _ = os.waitpid(pid, os.WNOHANG)
         if done:
