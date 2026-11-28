@@ -1,10 +1,7 @@
 (ns nesmacs.rpc-test
-  (:require [clojure.data.json :as json]
-            [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is testing]]
+            [nesmacs.proc :as proc]
             [nesmacs.rpc :as rpc]))
-
-(defn- body-of [^String framed]
-  (subs framed (+ 4 (.indexOf framed "\r\n\r\n"))))
 
 (deftest frame-round-trips
   (let [msg {:seq 1 :type "request" :command "initialize"}
@@ -44,10 +41,13 @@
         [msgs rest*] (rpc/decode-msgs framed)]
     (is (= [{:seq 3}] msgs))
     (is (= "" rest*))))
-(deftest a-multibyte-character-split-across-reads-is-not-corrupted
-  ;; read-tcp decodes complete chunks and keeps the partial character.
-  (let [bs (.getBytes "añ€𝄞" "UTF-8")
-        cut (#'rpc/complete-utf8 bs (dec (alength bs)))]
-    (is (< cut (alength bs)) "the last character is incomplete, so kept")
-    (is (= "añ€" (String. bs 0 cut "UTF-8")))
-    (is (= (alength bs) (#'rpc/complete-utf8 bs (alength bs))))))
+(deftest every-byte-can-arrive-in-a-separate-read
+  (let [body "{\"output\":\"añ€𝄞\"}"
+        frame (str "Content-Length: " (alength (.getBytes body "UTF-8")) "\r\n\r\n" body)
+        conn {:kind :stdio :inbox (atom (byte-array 0))}
+        msgs (mapcat (fn [byte]
+                       (with-redefs [proc/drain-bytes! (fn [_ _] (byte-array [byte]))]
+                         (rpc/read! conn)))
+                     (.getBytes frame "UTF-8"))]
+    (is (= [{:output "añ€𝄞"}] msgs))
+    (is (zero? (alength ^bytes @(:inbox conn))))))

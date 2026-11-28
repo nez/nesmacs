@@ -1,6 +1,8 @@
 (ns nesmacs.proc-test
   (:require [clojure.test :refer [deftest is]]
-            [nesmacs.proc :as proc]))
+            [nesmacs.proc :as proc]
+            [nesmacs.testutil :as tu])
+  (:import [java.util.concurrent TimeUnit]))
 
 (defn- collect-until-finished
   "Poll `drain!` like the editor loop does. Returns [handle text code]."
@@ -56,9 +58,5 @@
     (is (some? (proc/by-id (:id h))))
     (proc/kill! h)
     (is (nil? (proc/by-id (:id h))))
-    (loop [i 0]
-      (when (and (nil? (proc/exit-code h)) (< i 500))
-        (Thread/sleep 10)
-        (recur (inc i))))
-    (is (some? (proc/exit-code h)))
-    (is (not (.isAlive ^Process (:process h))))))
+    (is (.waitFor ^Process (:process h) 5 TimeUnit/SECONDS))
+    (is (tu/pump-until! (constantly nil) 10 nil #(some? (proc/exit-code h)) 5000))))

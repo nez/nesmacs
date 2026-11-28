@@ -10,7 +10,8 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [nesmacs.log :as log])
-  (:import [java.io InputStreamReader]
+  (:import [java.io ByteArrayOutputStream InputStream InputStreamReader]
+           [java.util Arrays]
            [java.util.concurrent CountDownLatch LinkedBlockingQueue]))
 
 (defonce ^:private procs (atom {}))
@@ -48,10 +49,22 @@
           (consume (String. buf 0 n))
           (recur))))))
 
+(defn- pump-bytes [^InputStream input consume]
+  (let [buffer (byte-array 8192)]
+    (loop []
+      (let [n (.read input buffer)]
+        (when-not (neg? n)
+          (consume (Arrays/copyOf buffer n))
+          (recur))))))
+
 (defn- reader-loop
-  [^InputStreamReader r ^LinkedBlockingQueue q ^Process p on-exit ^CountDownLatch done]
+  [^LinkedBlockingQueue q ^Process p on-exit ^CountDownLatch done binary?]
   (try
-    (pump r #(.put q %))
+    (let [input (.getInputStream p)
+          consume #(.put q %)]
+      (if binary?
+        (pump-bytes input consume)
+        (pump (InputStreamReader. input "UTF-8") consume)))
     (on-exit (.waitFor p))
     (catch InterruptedException _ (on-exit -1))
     (catch Exception e
@@ -82,12 +95,15 @@
    long-lived servers (LSP) that read requests from stdin.
 
    stderr defaults to :merge so job buffers show compiler/test errors; LSP
-   passes :log to keep the JSON-RPC stream clean.
+   passes :log to keep the JSON-RPC stream clean. :binary? keeps stdout
+   as bytes and requires :stderr :log.
 
    `kind` scopes orphan reaping: only a caller that owns a kind reaps it, so
    job cleanup cannot kill LSP servers or terminal clients."
-  [{:keys [argv ^String dir env keep-stdin? stderr kind]
+  [{:keys [argv ^String dir env keep-stdin? stderr kind binary?]
     :or {stderr :merge}}]
+  (when (and binary? (not= stderr :log))
+    (throw (IllegalArgumentException. "Binary stdout requires :stderr :log")))
   (let [pb (ProcessBuilder. (into-array String argv))
         _  (when dir (.directory pb (java.io.File. dir)))
         _  (when env (.putAll (.environment pb)
@@ -99,8 +115,7 @@
         exit (atom nil)
         done (CountDownLatch. 2)
         on-exit (fn [code] (reset! exit code))
-        t (doto (Thread. #(reader-loop (InputStreamReader. (.getInputStream p) "UTF-8")
-                                       q p on-exit done))
+        t (doto (Thread. #(reader-loop q p on-exit done binary?))
             (.setDaemon true)
             (.setName (str "nesmacs-proc-" id))
             (.start))
@@ -116,19 +131,24 @@
 
 (defn by-id [id] (get @procs id))
 
+(defn- drain-chunks! [h limit size add!]
+  (loop []
+    (when (< (long (size)) (long limit))
+      (when-let [chunk (.poll ^LinkedBlockingQueue (:queue h))]
+        (add! chunk)
+        (recur)))))
+
 (defn drain!
-  "Drain buffered output, stopping once `limit` characters are buffered. A
-   reader chunk is never split, so the result can exceed `limit` by up to
-   one 8 KiB chunk. Non-blocking."
+  "Drain buffered text without blocking. The soft limit never splits a chunk."
   [h limit]
-  (let [sb (StringBuilder.)]
-    (loop []
-      (when (and (< (.length sb) (long limit))
-                 (when-let [s (.poll (:queue h))]
-                   (.append sb ^String s)
-                   true))
-        (recur)))
-    (.toString sb)))
+  (let [out (StringBuilder.)]
+    (drain-chunks! h limit #(.length out) #(.append out ^String %))
+    (.toString out)))
+
+(defn drain-bytes! [h limit]
+  (let [out (ByteArrayOutputStream.)]
+    (drain-chunks! h limit #(.size out) #(.writeBytes out ^bytes %))
+    (.toByteArray out)))
 
 (defn exit-code [h] @(:exit h))
 

@@ -5,11 +5,11 @@
    Only framing and transport live here. Each protocol owns its envelope
    (JSON-RPC `id`/`method` vs DAP `seq`/`type`) and its own request bookkeeping."
   (:require [clojure.data.json :as json]
-            [clojure.string :as str]
             [nesmacs.log :as log]
             [nesmacs.proc :as proc])
-  (:import [java.io ByteArrayOutputStream InputStream OutputStream]
-           [java.net InetSocketAddress Socket]))
+  (:import [java.io InputStream OutputStream]
+           [java.net InetSocketAddress Socket]
+           [java.util Arrays]))
 
 ;; --- Wire format ---
 
@@ -24,29 +24,38 @@
 (defn- slice-bytes [^bytes bs ^long from ^long to]
   (String. bs (int from) (int (- to from)) "UTF-8"))
 
+(defn- header-end [^bytes buffer from]
+  (let [limit (- (alength buffer) 3)]
+    (loop [i (int from)]
+      (when (< i limit)
+        (if (and (= 13 (aget buffer i)) (= 10 (aget buffer (+ i 1)))
+                 (= 13 (aget buffer (+ i 2))) (= 10 (aget buffer (+ i 3))))
+          i
+          (recur (inc i)))))))
+
+(defn- decode-bytes [^bytes buffer]
+  (let [size (alength buffer)]
+    (loop [from 0 messages []]
+      (let [header (header-end buffer from)
+            start (when header (+ header 4))
+            length (when header
+                     (some-> (re-find #"(?im)^Content-Length:[ \t]*(\d+)[ \t]*\r?$"
+                                      (slice-bytes buffer from header))
+                             second parse-long))]
+        (if (and length (<= length (- size start)))
+          (let [end (+ start length)
+                msg (try (json/read-str (slice-bytes buffer start end) {:key-fn keyword})
+                         (catch Exception e
+                           (log/log "rpc json parse:" (.getMessage e))
+                           nil))]
+            (recur end (cond-> messages msg (conj msg))))
+          [messages (if (zero? from) buffer (Arrays/copyOfRange buffer (int from) size))])))))
+
 (defn decode-msgs
-  "Parse as many complete messages as `buffer` holds. Returns [messages rest].
-   `buffer` is a String; Content-Length counts UTF-8 bytes."
+  "Parse complete frames from a string. Returns [messages rest]."
   [^String buffer]
-  (loop [buf buffer
-         msgs []]
-    (let [hp (str/index-of buf "\r\n\r\n")]
-      (if hp
-        (let [header (subs buf 0 hp)
-              after  (subs buf (+ hp 4))
-              lm     (re-find #"(?i)Content-Length:\s*(\d+)" header)
-              have   (utf8-len after)]
-          (if (and lm (>= have (Long/parseLong (nth lm 1))))
-            (let [len   (Long/parseLong (nth lm 1))
-                  bytes (.getBytes after "UTF-8")
-                  body  (slice-bytes bytes 0 len)
-                  rest* (slice-bytes bytes len (alength bytes))
-                  msg   (try (json/read-str body {:key-fn keyword})
-                             (catch Exception e
-                               (log/log "rpc json parse:" (.getMessage e)) nil))]
-              (recur rest* (cond-> msgs msg (conj msg))))
-            [msgs buf]))
-        [msgs buf]))))
+  (let [[msgs remaining] (decode-bytes (.getBytes buffer "UTF-8"))]
+    [msgs (String. ^bytes remaining "UTF-8")]))
 
 ;; --- Transports ---
 
@@ -55,8 +64,8 @@
    `kill-all!` reaps it on exit."
   [{:keys [argv dir]}]
   {:kind :stdio
-   :handle (proc/start {:argv argv :dir dir :keep-stdin? true :stderr :log})
-   :inbox (atom "")})
+   :handle (proc/start {:argv argv :dir dir :keep-stdin? true :stderr :log :binary? true})
+   :inbox (atom (byte-array 0))})
 
 (defn start-adapter
   "Start a TCP adapter that prints its own output; returns the handle so the
@@ -89,8 +98,7 @@
           {:kind :tcp :socket s
            :out (.getOutputStream ^Socket s)
            :in (.getInputStream ^Socket s)
-           :raw (ByteArrayOutputStream.)
-           :inbox (atom "")})))))
+           :inbox (atom (byte-array 0))})))))
 
 (defn send!
   "Write one message, locking the stream so concurrent sends cannot interleave."
@@ -100,52 +108,27 @@
       (.write stream (.getBytes (encode-msg msg) "UTF-8"))
       (.flush stream))))
 
-(defn- complete-utf8
-  "Length of the longest prefix of `bs[0,len)` that does not end inside a
-   multibyte UTF-8 sequence."
-  ^long [^bytes bs ^long len]
-  (loop [i (dec len) cont 0]
-    (cond
-      (neg? i) len
-      (> cont 3) len
-      (<= 0x80 (bit-and (int (aget bs i)) 0xff) 0xBF) (recur (dec i) (inc cont))
-      :else
-      (let [b (bit-and (int (aget bs i)) 0xff)
-            need (cond (< b 0x80) 1 (>= b 0xF0) 4 (>= b 0xE0) 3 (>= b 0xC0) 2
-                       :else 1)]
-        (if (> (+ i need) len) i len)))))
-
-(defn- read-tcp
-  "Decode the complete-UTF-8 prefix of whatever arrived, keeping a character
-   split across two socket reads for the next call. Decoding each chunk on its
-   own turned such a character into U+FFFD and shifted every Content-Length."
-  [{:keys [^ByteArrayOutputStream raw ^InputStream in]}]
-  (let [n (.available in)]
+(defn- read-tcp [^InputStream in]
+  (let [n (min 100000 (.available in))]
     (when (pos? n)
-      (let [buf (byte-array n)
-            got (.read in buf)]
-        (when (pos? got) (.write raw buf 0 got))))
-    (let [bs  (.toByteArray raw)
-          len (alength bs)
-          cut (complete-utf8 bs len)]
-      (when (pos? cut)
-        (let [text (String. bs 0 cut "UTF-8")
-              rest-bytes (java.util.Arrays/copyOfRange bs cut len)]
-          (.reset raw)
-          (.write raw rest-bytes)
-          text)))))
+      (let [buffer (byte-array n)
+            got (.read in buffer)]
+        (when (pos? got)
+          (if (= got n) buffer (Arrays/copyOf buffer got)))))))
 
 (defn read!
-  "Non-blocking read of every complete message available. Never blocks the
-   caller (the editor loop)."
-  [{:keys [kind inbox] :as conn}]
-  (let [chunk (if (= kind :tcp)
-                (read-tcp conn)
-                (proc/drain! (:handle conn) 100000))]
-    (when (seq chunk) (swap! inbox str chunk))
-    (let [[msgs rest*] (decode-msgs @inbox)]
-      (reset! inbox rest*)
-      msgs)))
+  "Read available frames without blocking the editor loop."
+  [{:keys [kind in handle inbox]}]
+  (let [^bytes chunk (if (= kind :tcp) (read-tcp in) (proc/drain-bytes! handle 100000))]
+    (if (and chunk (pos? (alength chunk)))
+      (let [^bytes pending @inbox
+            size (alength pending)
+            buffer (Arrays/copyOf pending (+ size (alength chunk)))]
+        (System/arraycopy chunk 0 buffer size (alength chunk))
+        (let [[msgs rest] (decode-bytes buffer)]
+          (reset! inbox rest)
+          msgs))
+      [])))
 
 (defn closed?
   [{:keys [kind handle socket]}]
