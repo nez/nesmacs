@@ -31,8 +31,7 @@ Run `nesmacs path/to/file.clj` to open a file directly. Pass several paths to
 open them in separate buffers with the first file visible.
 
 `C-x C-c` exits; it asks to save each modified buffer. First launch creates
-`~/.nesmacs/` for config, session and the crash journal. If you have an old
-`~/.xmas/`, the installer renames it once.
+`~/.nesmacs/` for config, session and the crash journal.
 
 From a checkout, `./install.sh` uses `target/nesmacs.jar` or builds it with the
 Clojure CLI. `make setup` is the contributor bootstrap (Clojure CLI, linter,

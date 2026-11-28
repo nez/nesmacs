@@ -122,11 +122,6 @@ exec java -jar "$JAR" "\$@"
 EOF
 chmod +x "$LAUNCHER"
 
-# --- Migrate a pre-rebrand config dir ---
-if [ -d "$HOME/.xmas" ] && [ ! -e "$HOME/.nesmacs" ]; then
-  mv "$HOME/.xmas" "$HOME/.nesmacs"
-  echo "[ok] moved ~/.xmas to ~/.nesmacs"
-fi
 mkdir -p "$HOME/.nesmacs"
 
 echo ""
