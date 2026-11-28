@@ -119,8 +119,10 @@
                 from " with " to ": (y/n/!/q)"))))
 
 (defn- qr-exit [s]
-  (let [n (get-in s [:query-replace :count] 0)]
-    (-> s (clear-prop :qr)
+  (let [{:keys [buffer] n :count :or {n 0}} (:query-replace s)
+        buffer (or buffer (:buf s))]
+    (-> (cond-> s (cmd/buf s buffer)
+          (update-in [:bufs buffer :props] props/remove-owner :qr))
           (dissoc :query-replace)
           (cmd/msg (str "Replaced " n " occurrence(s)")))))
 
@@ -141,7 +143,8 @@
   (if-let [[start end groups] found]
     (-> s (cmd/goto-char start)
           (set-prop :qr :match start end)
-          (update :query-replace assoc :match-end end :groups groups)
+          (update :query-replace assoc :match-start start :match-end end :groups groups
+                  :version (:version (cmd/cur s)))
           qr-msg)
     (qr-exit s)))
 
@@ -180,7 +183,8 @@
   [s from to regex?]
   (try
     (let [pattern (when regex? (re-pattern from))
-          s (assoc s :query-replace {:from from :to to :count 0 :regex? regex? :pattern pattern})]
+          s (assoc s :query-replace {:from from :to to :count 0 :regex? regex? :pattern pattern
+                                    :buffer (:buf s)})]
       (if-let [found (qr-find-from s (:point (cmd/cur s)))]
         (qr-show s found)
         (cmd/msg (dissoc s :query-replace) "No match")))
@@ -199,10 +203,14 @@
 (defn query-replace-regexp [s input] (qr-prompt-to s input true))
 
 (defn query-replace-cmd [s]
-  (mini/start s "Query replace: " query-replace))
+  (if (:read-only (cmd/cur s))
+    (cmd/msg s "Buffer is read-only")
+    (mini/start s "Query replace: " query-replace)))
 
 (defn query-replace-regexp-cmd [s]
-  (mini/start s "Query replace regexp: " query-replace-regexp))
+  (if (:read-only (cmd/cur s))
+    (cmd/msg s "Buffer is read-only")
+    (mini/start s "Query replace regexp: " query-replace-regexp)))
 
 (def ^:private qr-keys
   {\y qr-replace-here
@@ -213,4 +221,9 @@
    :escape qr-exit})
 
 (defn handle-replace [s key]
-  ((get qr-keys key qr-exit) s))
+  (let [{:keys [buffer version match-start]} (:query-replace s)
+        b (cmd/cur s)]
+    (if (and (= buffer (:buf s)) (= version (:version b)) (= match-start (:point b))
+             (not (:read-only b)))
+      ((get qr-keys key qr-exit) s)
+      (cmd/msg (qr-exit s) "Replace canceled: buffer or match changed"))))

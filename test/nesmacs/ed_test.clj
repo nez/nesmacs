@@ -578,6 +578,12 @@
         s2 (ed/handle-key s1 [:ctrl \q])]
     (is (.contains ^String (:msg s2) "undefined"))))
 
+(deftest describe-key-consumes-the-whole-sequence
+  (let [s (with-commands (make-state "hello"))
+        result (reduce ed/handle-key s [[:ctrl \h] \k [:ctrl \x] \b])]
+    (is (re-find #"switch-to-buffer" (:msg result)))
+    (is (= "hello" (text result)))))
+
 (deftest describe-function-found
   (let [s (with-commands (make-state "hello"))
         s' (#'nesmacs.ed/describe-function s "yank")]
@@ -606,6 +612,21 @@
     (is (= "HI" (get-in s [:query-replace :to])))
     (is (= 0 (:count (:query-replace s))))
     (is (= 0 (:point (ed/cur s))))))
+
+(deftest query-replace-cannot-edit-a-different-pane
+  (let [s (-> (make-state "CAT") ed/split-window-right ed/other-window
+              (ed/switch-buffer "right") (ed/edit 0 0 "DOG") ed/other-window)
+        replacing (#'search/query-replace-begin s "CAT" "fox" false)
+        col (get-in (win/frame-geometry replacing) [:layout [:b] :col])
+        closed (reduce ed/handle-key replacing [{:type :mouse :action :press :button 0 :row 0 :col col} \y])]
+    (is (= "DOG" (text closed)))
+    (is (= "CAT" (str (get-in closed [:bufs "*test*" :text]))))
+    (is (nil? (:query-replace closed)))))
+
+(deftest query-replace-refuses-read-only-buffers
+  (let [s (assoc-in (make-state "CAT") [:bufs "*test*" :read-only] true)]
+    (is (= "Buffer is read-only" (:msg (ed/handle-key s [:meta \%]))))
+    (is (= "Buffer is read-only" (:msg (ed/query-replace-regexp-cmd s))))))
 
 (deftest query-replace-begin-no-match
   (let [s (#'search/query-replace-begin (make-state "hello" 0) "zzz" "!" false)]
@@ -1065,6 +1086,70 @@
                (ed/handle-key [:ctrl \x])
                (ed/handle-key [:ctrl \c]))]
     (is (:exit s'))))
+
+(deftest undo-and-redo-recognize-the-save-point
+  (let [file (java.io.File. persist/*dir* "undo-save.txt")
+        path (.getPath file)
+        s (-> (make-state "") (ed/find-file path) (ed/handle-key \a)
+              ed/save-buffer with-effects)
+        edited (reduce ed/handle-key s [\b \c])
+        undone (ed/undo edited)]
+    (is (= "a" (text undone)))
+    (is (false? (:modified (ed/cur undone))))
+    (is (true? (:modified (ed/cur (ed/redo undone)))))
+    (is (:exit (reduce ed/handle-key undone [[:ctrl \x] [:ctrl \c]])))))
+
+(deftest changing-panes-during-a-prompt-keeps-typing-in-the-prompt
+  (let [s (-> (make-state "left") ed/split-window-right ed/other-window
+              (ed/switch-buffer "right") (ed/edit 0 0 "right") ed/other-window)
+        result (reduce ed/handle-key s [[:meta \x] [:ctrl \x] \o \Z])]
+    (is (= "Z" (text result)))
+    (is (= "right" (str (get-in result [:bufs "right" :text]))))
+    (is (= [:a] (:cur-window result)))))
+
+(deftest buffer-picker-requires-a-path-for-duplicate-names
+  (let [file (fn [dir] (java.io.File. persist/*dir* (str dir "/index.js")))
+        a (file "a") b (file "b")]
+    (doseq [f [a b]] (.mkdirs (.getParentFile f)) (spit f "contents"))
+    (let [s (-> (make-state "") (ed/find-file (.getPath a)) (ed/find-file (.getPath b)))]
+      (doseq [key [\b \k]]
+        (let [result (answer-mini (reduce ed/handle-key s [[:ctrl \x] key]) "index.js")]
+          (is (= (:buf s) (:buf result)))
+          (is (re-find #"Multiple buffers" (:msg result)))))
+      (is (= (.getPath a) (:buf (ed/switch-buffer s (.getPath a))))))))
+
+(deftest save-preserves-an-external-edit
+  (let [file (java.io.File. persist/*dir* "external-save.txt")
+        path (.getPath file)]
+    (spit file "old")
+    (let [s (-> (make-state "") (ed/find-file path) (ed/handle-key \x))]
+      (spit file "external")
+      (let [saved (with-effects (reduce ed/handle-key s [[:ctrl \x] [:ctrl \s]]))]
+        (is (= "external" (slurp file)))
+        (is (true? (:modified (ed/cur saved))))
+        (is (re-find #"File changed on disk" (:msg saved)))))))
+
+(deftest kill-modified-buffer-requires-an-explicit-choice
+  (let [file (java.io.File. persist/*dir* "dirty.txt")
+        path (.getPath file)
+        s (-> (make-state "") (ed/find-file path) (ed/handle-key \x))
+        close (reduce ed/handle-key s [[:ctrl \x] \k :return])]
+    (is (contains? (:bufs close) path))
+    (is (:mini (answer-mini close "")))
+    (is (contains? (:bufs (answer-mini close "c")) path))
+    (is (not (contains? (:bufs (answer-mini close "s")) path)))
+    (is (= "x" (slurp file)))))
+
+(deftest recovery-backup-survives-an-empty-answer
+  (let [file (java.io.File. persist/*dir* "draft.txt")
+        backup (java.io.File. persist/*dir* "#draft.txt#")]
+    (spit backup "unsaved")
+    (let [s (files/recover-ask (make-state "") [(.getPath file)])
+          empty-answer (answer-mini s "")]
+      (is (:mini empty-answer))
+      (is (.exists backup))
+      (is (nil? (:mini (answer-mini empty-answer "n"))))
+      (is (not (.exists backup))))))
 
 (deftest ctrl-x-ctrl-c-closes-the-focused-pane-before-quitting
   (let [s (-> (make-state "abc")

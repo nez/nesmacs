@@ -38,7 +38,7 @@
   ([name text file line-ending]
    (let [b {:name name :text (gap/of text) :point 0 :mark nil :file file
             :modified false :mode :fundamental :undo [] :redo []
-            :version 0 :journal? true :props [] :font-lock []
+            :version 0 :saved-revision 0 :journal? true :props [] :font-lock []
             :font-lock-window nil}]
      (cond-> (assoc b :large-file (large-file? b))
        line-ending (assoc :line-ending line-ending)))))
@@ -114,8 +114,17 @@
              (= "" (:old entry)) (= "" pold) (string? pnew)
              (string? (:new entry)) (not= "" (:new entry))
              (= (:from entry) (+ pf (count pnew))))
-      (conj (pop undo) (assoc (peek undo) :new (str pnew (:new entry))))
+      (conj (pop undo) (assoc (peek undo) :new (str pnew (:new entry))
+                                          :after (:after entry)))
       (bounded-conj undo undo-limit entry))))
+
+(defn revision [b] (or (:revision b) (:version b) 0))
+
+(defn mark-saved [b saved]
+  (let [saved-revision (revision saved)
+        clean? (= saved-revision (revision b))]
+    (cond-> (assoc b :saved-revision saved-revision :modified (not clean?))
+      clean? (assoc :edit-count 0))))
 
 (defn edit
   ([b from to repl] (edit b from to repl false))
@@ -127,10 +136,13 @@
                    ""
                    (gap/substr (:text b) from to))
              had-redo? (seq (:redo b))
-             entry (cond-> {:from from :old old :new repl}
+             changed (apply-change b from to repl)
+             after (:version changed)
+             entry (cond-> {:from from :old old :new repl :before (revision b) :after after}
                      separate-undo? (assoc :separate? true))]
-         (-> (apply-change b from to repl)
-             (update :undo push-undo entry had-redo?)
+         (-> changed
+             (assoc :revision after)
+             (update :undo push-undo entry (or had-redo? (not (:modified b))))
              (assoc :redo [])))))))
 
 (defn replace-text
@@ -141,16 +153,18 @@
 (defn- replay
   "Pop the latest entry from src-key, swap its `gone` text for its `kept` text,
    move point to the tail of the kept text, and push the entry onto dst-key."
-  [b src-key dst-key gone-key kept-key]
+  [b src-key dst-key gone-key kept-key revision-key]
   (if-let [{:keys [from] :as entry} (peek (get b src-key))]
     (let [to       (+ from (count (gone-key entry)))
           kept     (kept-key entry)
-          kept-len (count kept)]
+          kept-len (count kept)
+          revision (revision-key entry)]
       (-> (apply-change b from to kept)
+          (assoc :revision revision :modified (or (nil? revision) (not= revision (:saved-revision b))))
           (update src-key pop)
           (update dst-key bounded-conj undo-limit entry)
           (assoc :point (+ from kept-len))))
     b))
 
-(defn undo [b] (replay b :undo :redo :new :old))
-(defn redo [b] (replay b :redo :undo :old :new))
+(defn undo [b] (replay b :undo :redo :new :old :before))
+(defn redo [b] (replay b :redo :undo :old :new :after))

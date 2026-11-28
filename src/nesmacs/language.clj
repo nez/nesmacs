@@ -171,8 +171,8 @@
     (let [b (cmd/buf state key)]
       {:key key :buffer b :text (:text b)})
     (try
-      (let [{:keys [raw buffer]} (files/read-document (.getName (java.io.File. ^String path)) path)]
-        {:key path :expected raw :buffer buffer :text (:text buffer)})
+      (let [buffer (files/read-document (.getName (java.io.File. ^String path)) path)]
+        {:key path :expected (:disk-revision buffer) :buffer buffer :text (:text buffer)})
       (catch Exception e
         (log/log "workspace edit read failed:" path (.getMessage e))
         nil))))

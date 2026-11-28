@@ -37,6 +37,7 @@
        :file file
        :line-ending (:line-ending b)
        :modified (:modified b)
+       :disk-revision (:disk-revision b)
        :mode (:mode b)
        :version (:version b)
        :edit-count (:edit-count b 0)
@@ -79,7 +80,9 @@
   (let [file (when (string? (:file d)) (:file d))
         saved (when (string? (:text d)) (:text d))
         term (sanitize-terminal (:terminal d))
-        disk (when (and file (or (nil? saved) (nil? (:line-ending d))))
+        stored-revision (:disk-revision d)
+        stored-revision (when (or (= :missing stored-revision) (string? stored-revision)) stored-revision)
+        disk (when (and file (or (nil? saved) (nil? stored-revision) (nil? (:line-ending d))))
                (read-buffer-file file))
         text (or saved (:text disk))]
     (when (or text (nil? file))
@@ -90,6 +93,8 @@
       ;; only with session text, since their offsets would otherwise be stale.
       (let [b (-> (buf/make (:name d) (or text "") file (or (:line-ending disk) (:line-ending d)))
                   (assoc :modified (:modified d)
+                         :disk-revision (if (nil? saved) (:revision disk) (or stored-revision (:revision disk)))
+                         :saved-revision (when-not (:modified d) (safe-int (:version d)))
                          :mode (:mode d)
                          :version (safe-int (:version d))
                          :edit-count (safe-int (:edit-count d))

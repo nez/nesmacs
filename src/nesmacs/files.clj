@@ -101,12 +101,16 @@
        (identical? (:text b) (:text saved))))
 
 (defn write-buffer! [publish! name b expected]
-  (persist/write-file! (:file b) (str (:text b)) (:line-ending b) expected)
-  (session/note-saved! name (:version b))
-  (let [state (publish! (fn [s]
-                         (if (same-buffer-version? (cmd/buf s name) b)
-                           (update-in s [:bufs name] assoc :modified false :edit-count 0)
-                           s)))]
+  (let [revision (persist/write-file! (:file b) (str (:text b)) (:line-ending b) expected)
+        _ (session/note-saved! name (:version b))
+        state (publish! (fn [s]
+                         (let [current (cmd/buf s name)]
+                           (if (or (same-buffer-version? current b)
+                                   (and (= (:file current) (:file b))
+                                        (= (:disk-revision current) (:disk-revision b))
+                                        (> (:version current 0) (:version b 0))))
+                             (assoc-in s [:bufs name] (assoc (buf/mark-saved current b) :disk-revision revision))
+                             s))))]
     (same-buffer-version? (cmd/buf state name) b)))
 
 (defn save-buffer-named
@@ -135,7 +139,8 @@
                     b)]
               (if to-save
                 (do
-                  (when (write-buffer! publish! name to-save nil)
+                  (when (write-buffer! publish! name to-save
+                                       (or (:disk-revision b) (persist/file-revision file)))
                     (try
                       (java.nio.file.Files/deleteIfExists (.toPath (auto-save-file file)))
                       (catch Exception e
@@ -170,8 +175,8 @@
       (some (fn [[key b]] (when (= (:file b) path) key)) (:bufs s))))
 
 (defn read-document [name path]
-  (let [{:keys [raw text line-ending]} (persist/read-file path)]
-    {:raw raw :buffer (buf/make name text path line-ending)}))
+  (let [{:keys [revision text line-ending]} (persist/read-file path)]
+    (assoc (buf/make name text path line-ending) :disk-revision revision)))
 
 (defn visit [s {:keys [path name exists dir?]}]
   (let [key (file-buffer-key s path)]
@@ -183,12 +188,11 @@
       dir? (dired/open s path)
 
       exists
-      (try (let [{:keys [buffer]} (read-document name path)]
-             (-> (open-buf s path buffer)
-                 (bump-recentf path)))
+      (try (-> (open-buf s path (read-document name path))
+               (bump-recentf path))
            (catch Exception e (cmd/msg-error s (str "Error reading " path) e)))
 
-      :else (-> (open-buf s path (buf/make name "" path))
+      :else (-> (open-buf s path (assoc (buf/make name "" path) :disk-revision :missing))
                 (bump-recentf path)
                 (cmd/msg "(New file)")))))
 
@@ -216,6 +220,7 @@
             s    (find-file s f)]
         (-> (cmd/update-cur s #(assoc % :text (gap/of text) :point 0
                                         :modified true
+                                        :revision nil
                                         ;; The backup is different text: cached
                                         ;; spans, props and undo offsets from the
                                         ;; file no longer describe it.
@@ -231,12 +236,13 @@
   (if-let [[f & more] (seq paths)]
     (mini/start s (str "Recover unsaved changes to " f "? (y/n) ")
       (fn [s ans]
-        (if (= "y" (str/lower-case (str/trim ans)))
-          (recover-ask (recover-file s f) more)
-          (-> s
-              (api/after-command (fn [_]
-                                   (java.nio.file.Files/deleteIfExists (.toPath (auto-save-file f)))))
-              (recover-ask more)))))
+        (case (str/lower-case (str/trim ans))
+          "y" (recover-ask (recover-file s f) more)
+          "n" (-> s
+                  (api/after-command (fn [_]
+                                       (java.nio.file.Files/deleteIfExists (.toPath (auto-save-file f)))))
+                  (recover-ask more))
+          (recover-ask s paths))))
     s))
 
 ;; Scratch and other non-file buffers are kept in the session.

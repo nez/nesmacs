@@ -54,5 +54,5 @@
   "Kill the buffer on the current line, then refresh the list."
   [s]
   (if-let [b (listbuf/entry-at-point s)]
-    (-> s (lifecycle/kill-buffer (:key b) buflist-name) revert)
+    (lifecycle/kill-buffer s (:key b) buflist-name revert)
     s))

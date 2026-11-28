@@ -185,7 +185,7 @@
 (def redo (replay-cmd :redo buf/redo "redo"))
 
 (defn keyboard-quit [s]
-  (let [s (dissoc s :pending :prefix-arg :capture-next :escape-count)]
+  (let [s (dissoc s :pending :prefix-arg :capture-next :describe-prefix :escape-count)]
     (cond
       (:isearch s) (search/isearch-cancel s)
       (:query-replace s) (search/handle-replace s :escape)
@@ -265,6 +265,12 @@
 (def auto-save! files/auto-save!)
 (def confirm-quit files/confirm-quit)
 
+(defn- matching-buffers [s name]
+  (if (contains? (:bufs s) name)
+    [name]
+    (into [] (keep (fn [[key b]] (when (and (= name (:name b)) (not (buf/internal-name? key))) key)))
+          (:bufs s))))
+
 (defn switch-buffer [s name]
   (cond
     (str/blank? name) s
@@ -275,10 +281,11 @@
     :else
     ;; find-file keys buffers by path; the mode line shows the file name, so
     ;; accept either and never create a second empty buffer for a real one.
-    (if-let [k (or (when (contains? (:bufs s) name) name)
-                   (some (fn [[k b]] (when (= name (:name b)) k)) (:bufs s)))]
-      (cmd/set-cur-buffer s k)
-      (-> s (assoc-in [:bufs name] (buf/make name)) (cmd/set-cur-buffer name)))))
+    (let [[buffer & more] (matching-buffers s name)]
+      (cond
+        (seq more) (msg s (str "Multiple buffers named " name ". Choose a full path."))
+        buffer (cmd/set-cur-buffer s buffer)
+        :else (-> s (assoc-in [:bufs name] (buf/make name)) (cmd/set-cur-buffer name))))))
 
 (defn- switch-to-buffer [s]
   (mini/start s "Buffer: " switch-buffer {:sources [complete/buffers]}))
@@ -288,9 +295,10 @@
    Windows showing the killed buffer fall back to the next visible buffer
    (or *scratch* if none remain)."
   [s name]
-  (let [target (if (str/blank? name) (:buf s) (str/trim name))]
+  (let [[target & more] (if (str/blank? name) [(:buf s)] (matching-buffers s (str/trim name)))]
     (cond
-      (not (contains? (:bufs s) target)) (msg s (str "No buffer: " target))
+      (seq more) (msg s (str "Multiple buffers named " name ". Choose a full path."))
+      (not (contains? (:bufs s) target)) (msg s (str "No buffer: " name))
       (= 1 (count (:bufs s)))             (msg s "Cannot kill last buffer")
       :else (lifecycle/kill-buffer s target nil))))
 
@@ -370,15 +378,18 @@
 (defn split-window-right [s] (do-split s :side-by-side))
 
 (defn other-window [s]
-  (let [path (win/next-leaf (:windows s) (:cur-window s))]
-    (cmd/switch-window s path)))
+  (if (:mini s)
+    s
+    (cmd/switch-window s (win/next-leaf (:windows s) (:cur-window s)))))
 
 (defn delete-window [s]
-  (let [s (cmd/save-cur-point s)
-        [tree path] (win/delete-window (:windows s) (:cur-window s))]
-    (-> s
-        (assoc :windows tree :cur-window path :buf (get-in tree (conj path :buffer)))
-        cmd/load-window-point)))
+  (if (:mini s)
+    s
+    (let [s (cmd/save-cur-point s)
+          [tree path] (win/delete-window (:windows s) (:cur-window s))]
+      (-> s
+          (assoc :windows tree :cur-window path :buf (get-in tree (conj path :buffer)))
+          cmd/load-window-point))))
 
 (defn- close-window-or-quit [s]
   (let [s (cond-> s (:mini s) mini/close)]
@@ -588,7 +599,7 @@
   (mode/lookup-key s key (keymap/inherit (get bindings key) (get (:bindings s) key))))
 
 (defn describe-key
-  "C-h k: capture the next keypress and report what it is bound to."
+  "C-h k: capture a key sequence and report what it is bound to."
   [s]
   (-> s (assoc :capture-next :describe-key)
         (msg "Describe key: ")))
@@ -599,16 +610,19 @@
   (some (fn [[n {:keys [fn]}]] (when (= fn f) n)) (:commands s)))
 
 (defn- capture-describe-key [s key]
-  (let [b (resolve-binding s key)
-        desc (cond
-               (map? b) "prefix key"
-               (fn? b)  (if-let [n (name-of-fn s b)]
-                          (str n " -- " (get-in s [:commands n :doc]))
-                          "(anonymous)")
-               (nil? b) "undefined"
-               :else    (pr-str b))]
-    (-> s (dissoc :capture-next)
-          (msg (str (pr-str key) " runs " desc)))))
+  (let [{:keys [keys bindings]} (:describe-prefix s)
+        b (if bindings (get bindings key) (resolve-binding s key))
+        keys (conj (or keys []) key)]
+    (if (map? b)
+      (-> s (assoc :describe-prefix {:keys keys :bindings b})
+            (msg (str "Describe key: " (pr-str keys) " …")))
+      (let [desc (if (fn? b)
+                   (if-let [n (name-of-fn s b)]
+                     (str n " -- " (get-in s [:commands n :doc]))
+                     "(anonymous)")
+                   "undefined")]
+        (-> s (dissoc :capture-next :describe-prefix)
+              (msg (str (pr-str keys) " runs " desc)))))))
 
 (defn- describe-function [s name]
   (let [n  (trim-name name)
@@ -1088,7 +1102,7 @@
            [:ctrl \x] {[:ctrl \f] (prompt "Find file: " find-file mini/file-completer)
                        [:ctrl \b] buflist/open
                        \d (prompt "Dired: " dired/open mini/file-completer)
-                       \k (prompt "Kill buffer: " kill-buffer)
+                       \k (prompt "Kill buffer: " kill-buffer {:sources [complete/buffers]})
                        \r cx-r-map
                        \( start-kbd-macro
                        \) end-kbd-macro
@@ -1164,7 +1178,7 @@
 
              ;; capture-next: consume the key as data, don't dispatch
              (= :describe-key (:capture-next s))
-             (capture-describe-key (dissoc s :capture-next) key)
+             (capture-describe-key s key)
 
              (register/capturing? s) (register/capture s key)
 

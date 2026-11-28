@@ -99,7 +99,7 @@
   (let [b (buf/make "t" "hello" nil)
         b' (buf/edit b 1 3 "X")]
     (is (= 1 (count (:undo b'))))
-    (is (= {:from 1 :old "el" :new "X"} (first (:undo b'))))))
+    (is (= {:from 1 :old "el" :new "X" :before 0 :after 1} (first (:undo b'))))))
 
 (deftest adjacent-inserts-coalesce
   (let [b (-> (buf/make "t" "" nil)
@@ -107,7 +107,7 @@
               (buf/edit 1 1 "b")
               (buf/edit 2 2 "c"))]
     (is (= 1 (count (:undo b))))
-    (is (= {:from 0 :old "" :new "abc"} (peek (:undo b))))
+    (is (= {:from 0 :old "" :new "abc" :before 0 :after 3} (peek (:undo b))))
     (is (= "" (str (:text (buf/undo b)))))))
 
 (deftest non-adjacent-insert-starts-new-entry

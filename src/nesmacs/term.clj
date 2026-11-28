@@ -173,6 +173,7 @@
     (= b 9)   :tab
     (= b 13)  :return
     (= b 10)  :return
+    (= b 31)  [:ctrl \/]
     (= b 127) :backspace
     ;; NUL is what a terminal sends for C-SPC / C-@ (byte 0), not "C-`".
     (= b 0)   [:ctrl \space]

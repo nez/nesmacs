@@ -21,6 +21,9 @@
       (is (= [:escape :escape :escape :up [:meta \x]]
              (vec (repeatedly 5 #(term/read-key-timeout 0))))))))
 
+(deftest legacy-control-slash-is-undo
+  (is (= [:ctrl \/] (#'term/byte->key 31))))
+
 (deftest paste-reader-strips-markers
   (is (= "abc"
          (#'term/read-paste-from

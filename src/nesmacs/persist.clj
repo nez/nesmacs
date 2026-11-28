@@ -9,7 +9,10 @@
             [nesmacs.buf :as buf]
             [nesmacs.log :as log])
   (:import [java.io PushbackReader]
-           [java.nio.file Files StandardCopyOption]))
+           [java.nio.charset StandardCharsets]
+           [java.nio.file Files NoSuchFileException StandardCopyOption]
+           [java.security MessageDigest]
+           [java.util HexFormat]))
 
 (def ^:dynamic *dir*
   "Override the persistence directory; tests bind it to a temp dir."
@@ -51,21 +54,32 @@
          (when-not @done?
            (try (Files/deleteIfExists tmp) (catch Exception _))))))))
 
-(defn read-file
-  "Read a UTF-8 document once, retaining the raw source for guarded writes."
-  [path]
-  (let [raw (slurp path :encoding "UTF-8")]
-    {:raw raw :text (buf/normalize-eol raw) :line-ending (buf/detect-eol raw)}))
+(defn- read-utf8 [path]
+  (Files/readString (.toPath (io/file path))))
+
+(defn- text-revision [^String raw]
+  (.formatHex (HexFormat/of)
+              (.digest (MessageDigest/getInstance "SHA-256") (.getBytes raw StandardCharsets/UTF_8))))
+
+(defn file-revision [path]
+  (try (text-revision (read-utf8 path))
+       (catch NoSuchFileException _ :missing)))
+
+(defn read-file [path]
+  (let [raw (read-utf8 path)]
+    {:revision (text-revision raw) :text (buf/normalize-eol raw) :line-ending (buf/detect-eol raw)}))
 
 (defn write-file!
   "Atomically write normalized document text using its original line ending.
-   When supplied, expected is the raw disk text used to derive the edit."
+   When supplied, expected is the disk revision used to derive the edit."
   ([path text line-ending] (write-file! path text line-ending nil))
   ([path text line-ending expected]
-   (atomic-spit path (if (= :crlf line-ending) (str/replace text "\n" "\r\n") text)
-                (when (some? expected)
-                  #(when (not= expected (slurp path :encoding "UTF-8"))
-                     (throw (ex-info "File changed on disk" {:path path})))))))
+   (let [raw (if (= :crlf line-ending) (str/replace text "\n" "\r\n") text)]
+     (atomic-spit path raw
+                  (when (some? expected)
+                    #(when (not= expected (file-revision path))
+                       (throw (ex-info "File changed on disk" {:path path})))))
+     (text-revision raw))))
 
 (defn load!
   "Read EDN from name; return default on any failure."
