@@ -94,6 +94,12 @@
 
 (declare initialize-args)
 
+(defn- session-arguments [{:keys [dap file root]} request overrides]
+  (merge (if (= request "launch")
+           (merge {:program file :cwd root} (:launch dap))
+           (:attach dap))
+         overrides))
+
 (defn- start-child!
   "js-debug starts the debuggee as a child target and asks the client to open a
    second DAP connection for it (`startDebugging`). Move the session to that
@@ -115,11 +121,10 @@
                    :state (atom :starting))
             (request! child-s "initialize" (initialize-args s)
                       (fn [_]
-                        (request! child-s "launch"
-                                  (merge (:launch dap)
-                                         {:program (:file s) :cwd (:root s)}
-                                         configuration)
-                                  nil))))
+                        (let [request (get-in msg [:arguments :request] "launch")]
+                          (request! child-s request
+                                    (session-arguments child-s request configuration)
+                                    nil)))))
           (catch Exception e
             (log/log "DAP child session:" (.getMessage e))
             (message! s (str "Debug adapter child session failed: " (.getMessage e)))))))))
@@ -414,23 +419,26 @@
      :file     the file to debug
      :language language entry from `nesmacs.lang`
      :dap      adapter config, overriding the language's `:dap`
+     :request  launch or attach (as a string)
+     :arguments adapter-specific request arguments
+     :adapter-port connect to an existing local TCP adapter
      :on-stop  (fn [state frame] state) — jump to the stopped frame
    Returns a message string for the caller to show."
-  [{:keys [root file language dap request arguments] :or {request "launch"} :as opts}]
+  [{:keys [root language dap request arguments adapter-port] :or {request "launch"} :as opts}]
   (let [dap (or dap (:dap language))]
     (cond
       (nil? dap)
       (str "No debug adapter for " (:id language) " (add :dap to nesmacs.lang)")
 
       :else
-      (let [tcp? (= :tcp (:transport dap))
-            port (when tcp? (proc/free-port))
-            argv (adapter-argv dap port)]
+      (let [tcp? (or adapter-port (= :tcp (:transport dap)))
+            port (or adapter-port (when tcp? (proc/free-port)))
+            argv (when-not adapter-port (adapter-argv dap port))]
         (cond
-          (nil? argv)
+          (and (not adapter-port) (nil? argv))
           "Debug adapter needs an unavailable setting (check {env:...} in nesmacs.lang)"
 
-          (not (proc/executable? argv))
+          (and (not adapter-port) (not (proc/executable? argv)))
           (str "Debug adapter not executable: " (first argv))
 
           :else
@@ -438,7 +446,7 @@
             (when @session (stop!))
             (let [started-adapter (atom nil)]
               (try
-                (let [adapter (when tcp?
+                (let [adapter (when (and tcp? (not adapter-port))
                                 (let [a (rpc/start-adapter {:argv argv :dir root})]
                                   (reset! started-adapter a)
                                   a))
@@ -446,7 +454,7 @@
                              (rpc/open-tcp {:port port})
                              (rpc/open-stdio {:argv argv :dir root}))
                     s (merge opts
-                             {:conn conn :adapter adapter :port port :dap dap
+                             {:conn conn :adapter adapter :port port :dap dap :request request
                               :state (atom :starting) :seq (atom 0)
                               :pending (atom {}) :thread-id (atom nil)
                               :frame (atom nil) :vars (atom {})})]
@@ -455,10 +463,7 @@
                 (if-let [err (request! s "initialize" (initialize-args s)
                                        (fn [_]
                                          (request! s request
-                                                   (merge (if (= request "launch")
-                                                            (merge {:program file :cwd root} (:launch dap))
-                                                            (:attach dap))
-                                                          arguments)
+                                                   (session-arguments s request arguments)
                                                    nil)))]
                   (do (stop!) err)
                     (str "Starting " (:id language) " debugger...")))
@@ -470,15 +475,15 @@
                   (str "Debug adapter failed to start: " (.getMessage e)))))))))))
 
 (defn stop!
-  "Disconnect (terminating the debuggee), close the transport and forget the
+  "Disconnect, terminating a debuggee launched here, and forget the
    session. Safe to call with no session. Async handlers (a terminate event)
    are the ones that report the end of the session to the user."
   []
   (when-let [s @session]
     (try (rpc/send! (:conn s) {:seq (swap! (:seq s) inc) :type "request"
                                :command "disconnect"
-                               :arguments {:terminateDebuggee true}})
-         (catch Exception _))
+                               :arguments {:terminateDebuggee (not= "attach" (:request s))}})
+         (catch Exception e (log/log "DAP disconnect:" (.getMessage e))))
     (close-conns! s)
     (when-let [a (:adapter s)] (proc/kill! a))
     (reset! session nil)

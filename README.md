@@ -226,8 +226,11 @@ tasks. The profile can choose the runner's own arguments or wrapper script.
 `M-x project-debug` reads named profiles from `:launch`. For example, a Python
 profile can be `{:launch {:app {:program "app.py" :args ["--dev"]}}}`. Profiles
 accept `:cwd`, `:env`, `:language` and adapter-specific `:arguments`. Use
-`:request :attach` with arguments for the running program. `M-x project-repl`
-starts the project REPL. `M-x project-repl-connect` selects a local nREPL
+`:request :attach` with arguments for the running program, or include
+`:adapter-port` to connect directly to a local DAP server. For an existing
+debugpy listener, use `{:language :python :request :attach :adapter-port 5678}`
+as the profile. `M-x project-repl` starts the project REPL.
+`M-x project-repl-connect` selects a local nREPL
 port, and `M-x project-eval-form`, `project-eval-region` and
 `project-eval-buffer` evaluate source in that project. `M-x project-repl-output`
 opens the output buffer.
@@ -271,7 +274,7 @@ with a known limit carries a `shortcut:` comment naming when to upgrade it.
 
 ```sh
 make dev     # run from source
-make test    # 671 tests / 6,554 assertions
+make test    # lint and editor tests
 make check   # lint + tests + pty smoke + kill -9 recovery + require
 make web     # live browser workflow, including Git, LSP and crash recovery
 make bench   # timing gates (kept out of test so a loaded box can't fail CI)

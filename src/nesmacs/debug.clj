@@ -55,13 +55,15 @@
         :else
         (mini/start s "Debug profile: "
           (fn [s input]
-            (let [{:keys [program language request cwd args env arguments] :or {request :launch}}
+            (let [{:keys [program language request cwd args env arguments adapter-port] :or {request :launch}}
                   (get profiles (keyword input))
                   f (when (string? program) (io/file program))
                   file (when f (.getCanonicalPath (if (.isAbsolute f) f (io/file root program))))
                   lang (or (lang/language language) (lang/language-for-file file))]
               (cond
                 (not (#{:launch :attach} request)) (cmd/msg s "Debug request must be :launch or :attach")
+                (and adapter-port (not (and (= :attach request) (int? adapter-port) (<= 1 adapter-port 65535))))
+                (cmd/msg s "Use :adapter-port from 1 to 65535 with :request :attach")
                 (not (:dap lang)) (cmd/msg s "Choose a profile with a supported debugger")
                 (and (= :launch request) (not (and file (.isFile (io/file file)))))
                 (cmd/msg s "Debug program does not exist")
@@ -76,7 +78,8 @@
                                   args (assoc :args args)
                                   env (assoc :env env))]
                   (debug-effect s #(dap/start! {:editor editor :root root :file file :language lang
-                                                :request (name request) :arguments arguments :on-stop debug-jump}))))))
+                                                :request (name request) :arguments arguments :adapter-port adapter-port
+                                                :on-stop debug-jump}))))))
           (fn [input _] (mini/complete-prefix input (sort (map name (keys profiles))))))))
     (cmd/msg s "Open a project first")))
 
@@ -86,7 +89,7 @@
 (defn step-out [s] (debug-effect s dap/step-out!))
 
 (defn quit
-  "C-c d q: disconnect and terminate the debuggee."
+  "C-c d q: stop or detach from the debuggee."
   [s]
   (debug-effect s #(do (dap/stop!) "Debug session stopped")))
 

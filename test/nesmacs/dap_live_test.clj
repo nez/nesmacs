@@ -10,6 +10,7 @@
             [nesmacs.buf :as buf]
             [nesmacs.dap :as dap]
             [nesmacs.lang :as lang]
+            [nesmacs.proc :as proc]
             [nesmacs.testutil :as tu]))
 
 (defn- python-with-debugpy []
@@ -25,6 +26,38 @@
 
 (defn- text-of [editor name]
   (some-> (get-in @editor [:bufs name :text]) str))
+
+(deftest debugpy-attach-leaves-the-program-running-after-detach
+  (when-let [python (python-with-debugpy)]
+    (let [dir (tu/temp-dir "nesmacs-dap-attach")
+          program (java.io.File. dir "prog.py")
+          path (.getCanonicalPath program)
+          _ (spit program "x = 20\ny = x + 22\nprint('DETACHED', y, flush=True)\n")
+          launch (str "import debugpy,runpy,sys; "
+                      "address=debugpy.listen(('127.0.0.1',0)); print(f'PORT={address[1]}',flush=True); "
+                      "debugpy.wait_for_client(); runpy.run_path(sys.argv[1])")
+          child (proc/start {:argv [python "-c" launch path] :dir (.getPath dir)})
+          output (atom "")
+          poll (fn [_] (swap! output str (proc/drain! child 10000)))
+          listening #(some-> (re-find #"PORT=(\d+)" @output) second parse-long)
+          editor (atom {:bufs {path (buf/make path (slurp program) path)} :rows 24 :cols 80})]
+      (try
+        (is (tu/pump-until! poll 50 nil listening 12000))
+        (when-let [port (listening)]
+          (dap/restore-breakpoints! {})
+          (dap/set-breakpoints! path [1])
+          (dap/start! {:editor editor :root (.getPath dir) :file path :language (lang/language :python)
+                       :request "attach" :adapter-port port
+                       :on-stop (fn [s frame] (assoc s :stopped-frame frame))})
+          (is (pump! editor #(= path (get-in @editor [:stopped-frame :file])) 18000)
+              (str "Attach status: " (:msg @editor)))
+          (dap/stop!)
+          (is (tu/pump-until! poll 50 nil #(str/includes? @output "DETACHED 42") 5000)))
+        (finally
+          (dap/stop!)
+          (dap/restore-breakpoints! {})
+          (proc/kill! child)
+          (tu/delete-tree dir))))))
 
 (deftest debugpy-session-hits-a-breakpoint-and-reports-state
   (if-let [py (python-with-debugpy)]

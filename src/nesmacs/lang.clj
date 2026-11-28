@@ -34,7 +34,8 @@
     :formatter {:argv ["ruff" "format" "-"]}
     :dap {:transport :stdio
           :argv ["python3" "-m" "debugpy.adapter"]
-          :launch {:console "internalConsole"}}
+          :launch {:console "internalConsole"}
+          :attach {:justMyCode true}}
     :indent 4}
 
    :javascript
