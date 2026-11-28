@@ -135,3 +135,43 @@
 
 (defmethod tokenize :gitdiff-mode [_ line _]
   [(diff-spans line) :normal])
+
+(def ^:private def-keywords
+  #{"defn" "defn-" "def" "defmacro" "defmulti" "defmethod" "defprotocol"
+    "defrecord" "deftype" "defonce" "deftest" "defspec"
+    "defun" "defvar" "defconst" "defcustom" "defgroup" "defsubst"
+    "define-derived-mode" "define-minor-mode"})
+
+(defn- symbol-after
+  "First symbol on `line` at or after `from`, skipping whitespace, opening
+   parens and quote characters."
+  [^String line ^long from]
+  (let [n (.length line)
+        i (loop [i from]
+            (if (and (< i n)
+                     (let [c (.charAt line i)]
+                       (or (Character/isWhitespace c) (= c \() (= c \'))))
+              (recur (inc i)) i))]
+    (when (< i n)
+      (let [end (loop [j i]
+                  (if (and (< j n)
+                           (not (Character/isWhitespace (.charAt line j)))
+                           (not (contains? #{\( \) \[ \] \{ \} \, \" \;}
+                                           (.charAt line j))))
+                    (recur (inc j)) j))]
+        (subs line i end)))))
+
+(defn definition-lines
+  [{:keys [mode]} ^String text]
+  (->> (str/split-lines text)
+       (keep-indexed
+         (fn [i line]
+           (let [[toks _] (tokenize mode line :normal)]
+             (when-let [name (some (fn [[from to f]]
+                                     (when (and (= :builtin f)
+                                                (contains? def-keywords
+                                                           (subs line from to)))
+                                       (symbol-after line to)))
+                                   toks)]
+               {:line (inc i) :name name}))))
+       vec))

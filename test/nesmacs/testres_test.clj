@@ -129,20 +129,20 @@
 (deftest a-passing-run-with-an-unknown-format-is-not-reported-as-unparsed
   ;; A runner that prints "All good" used to look like a parser failure.
   (let [ed (atom {:bufs {"*Tests*" (assoc (buf/make "*Tests*" "All good\n" nil)
-                                          :test-report? true
+                                          :job-finish (partial @#'testres/finish-report nil)
                                           :job-status :done :job-exit 0)}})]
-    (testres/tick! ed)
+    (job/consume-results! ed)
     (is (str/includes? (:msg @ed) "passed"))
     (is (nil? (get-in @ed [:bufs "*Test Results*"])))))
 
 (deftest a-closed-test-job-cannot-publish-a-report
   (let [editor (atom {:bufs {"*Tests*" (assoc (buf/make "*Tests*" "ok 1 - passing\n" nil)
-                                              :test-report? true :job-status :done)}})
+                                              :job-finish (partial @#'testres/finish-report nil) :job-status :done)}})
         parse testres/parse]
     (with-redefs [testres/parse (fn [output]
                                  (swap! editor update :bufs dissoc "*Tests*")
                                  (parse output))]
-      (testres/tick! editor))
+      (job/consume-results! editor))
     (is (= {:bufs {}} @editor))))
 
 (deftest rerunning-the-test-job-builds-a-fresh-report
@@ -159,12 +159,12 @@
                       (Thread/sleep 10)
                       (swap! editor job/apply-drain (job/drain! (:bufs @editor)))
                       (recur (dec remaining))))
-                  (testres/tick! editor))]
+                  (job/consume-results! editor))]
     (finish!)
     (let [first-report (cmd/buf @editor "*Test Results*")]
       (is (some? first-report))
       (swap! editor #(-> % (cmd/set-cur-buffer name) job/rerun))
-      (is (nil? (get-in @editor [:bufs name :test-parsed?])))
+      (is (fn? (get-in @editor [:bufs name :job-finish])))
       (finish!)
       (is (= "1 failed / 1 tests" (:msg @editor)))
       (is (= "*Test Results*" (:buf @editor)))

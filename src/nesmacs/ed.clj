@@ -6,11 +6,11 @@
             [nesmacs.buflist :as buflist]
             [nesmacs.cmd :as cmd]
             [nesmacs.complete :as complete]
-            [nesmacs.deferred :as deferred]
             [nesmacs.dap :as dap]
+            [nesmacs.debug :as debug]
             [nesmacs.dired :as dired]
             [nesmacs.fold :as fold]
-            [nesmacs.format :as format]
+            [nesmacs.files :as files]
             [nesmacs.git :as git]
             [nesmacs.gitblame :as gitblame]
             [nesmacs.gitcommit :as gitcommit]
@@ -21,6 +21,7 @@
             [nesmacs.job :as job]
             [nesmacs.keymap :as keymap]
             [nesmacs.lang :as lang]
+            [nesmacs.language :as language]
             [nesmacs.listbuf :as listbuf]
             [nesmacs.lsp :as lsp]
             [nesmacs.mini :as mini]
@@ -31,11 +32,10 @@
             [nesmacs.persist :as persist]
             [nesmacs.proc :as proc]
             [nesmacs.project :as project]
-            [nesmacs.props :as props]
             [nesmacs.rect :as rect]
             [nesmacs.register :as register]
+            [nesmacs.search :as search]
             [nesmacs.session :as session]
-            [nesmacs.snippet :as snippet]
             [nesmacs.term :as t]
             [nesmacs.terminal :as terminal]
             [nesmacs.terminal.tmux :as tmux]
@@ -192,21 +192,8 @@
 
 (defn goto-line [s input]
   (if-let [n (try (Integer/parseInt (str/trim input)) (catch Exception _ nil))]
-    (set-point s (fn [t _]
-      (gap/nth-line-start t (-> n dec (max 0) (min (dec (gap/line-count t)))))))
+    (cmd/goto-line s n)
     (msg s "Not a number")))
-
-(defn- auto-save-path
-  "#file# backup path for a buffer file."
-  [^String file]
-  (let [f (java.io.File. file)
-        parent (or (.getParent f) ".")]
-    (str parent "/#" (.getName f) "#")))
-
-(defn- auto-save-file ^java.io.File [^String file]
-  (java.io.File. (auto-save-path file)))
-
-(def ^:private auto-save-threshold 300)
 
 ;; --- Shell command (M-!) ---
 
@@ -270,169 +257,11 @@
                                (str/trim) (not-empty) (str/split #"\s+"))
                        ["claude"])))
 
-(defn- auto-save-due
-  "Pure: return [[buf-name file text version] ...] for every buffer at or above the
-   auto-save threshold."
-  [s]
-  (keep (fn [[name b]]
-          (when (and (:file b) (>= (or (:edit-count b) 0) auto-save-threshold))
-            [name (:file b) (str (:text b)) (:version b)]))
-        (:bufs s)))
-
-(defn- reset-edit-counts
-  "Pure: reset :edit-count to 0 for each buf still at or above threshold.
-   Guards against racing edits: a concurrent save-buffer that already
-   zeroed the counter is respected."
-  [s due]
-  (reduce (fn [s [name _ _ version]]
-            (cond-> s
-              (and (= version (get-in s [:bufs name :version]))
-                   (>= (or (get-in s [:bufs name :edit-count]) 0)
-                       auto-save-threshold))
-              (assoc-in [:bufs name :edit-count] 0)))
-          s due))
-
-(defn- spit-due!
-  "Write each [_ file text version] tuple to its auto-save path. Returns the
-   entries written successfully and logs failures.
-   Uses atomic-spit so a crash mid-write can't leave the backup truncated —
-   the whole point of the backup is to be usable after unclean shutdown."
-  [due]
-  (keep (fn [[_ file text :as entry]]
-          (try
-            (persist/atomic-spit (auto-save-path file) text)
-            entry
-            (catch Exception e
-              (log/log "auto-save failed:" file (.getMessage e))
-              nil)))
-        due))
-
-(defn auto-save!
-  "For each file-backed buffer whose edit-count crossed the threshold,
-   write its #name# backup and reset the counter. Returns the updated state.
-   Do not call from inside a `swap!` — a CAS retry would re-spit the file."
-  [s]
-  (let [due (auto-save-due s)]
-    (reset-edit-counts s (spit-due! due))))
-
-(defn- remember-auto-saves!
-  "Persist the set of files with a live `#file#` backup, so the next start can
-   offer recovery. Entries whose backup is gone are pruned."
-  [saved]
-  (when (seq saved)
-    (let [paths (->> (concat (persist/load! "auto-saved" [])
-                             (map second saved))
-                     (filter string?)
-                     distinct
-                     (filter #(.exists (auto-save-file %)))
-                     vec)]
-      (persist/save-quiet! "auto-saved" paths))))
-
-(defn- auto-save-tick!
-  "Drive auto-save against the editor atom. Spits happen once per tick
-   (outside `swap!`), then the counter reset is swapped in atomically."
-  [editor-atom]
-  (let [due (auto-save-due @editor-atom)]
-    (when (seq due)
-      (let [saved (spit-due! due)]
-        (when (seq saved)
-          (remember-auto-saves! saved)
-          (swap! editor-atom reset-edit-counts saved))))))
-
-(defn- cli-formatted-text [{:keys [language text file]}]
-  (some-> (format/format-text language (str text) file
-                             (some-> ^String file java.io.File. .getParent))
-          buf/normalize-eol))
-
-(defn- same-buffer-version? [b saved]
-  (and (= (:file b) (:file saved))
-       (= (:version b) (:version saved))
-       (identical? (:text b) (:text saved))))
-
-(defn- write-buffer! [publish! name b expected]
-  (persist/write-file! (:file b) (str (:text b)) (:line-ending b) expected)
-  (session/note-saved! name (:version b))
-  (let [state (publish! (fn [s]
-                         (if (same-buffer-version? (cmd/buf s name) b)
-                           (update-in s [:bufs name] assoc :modified false :edit-count 0)
-                           s)))]
-    (same-buffer-version? (cmd/buf state name) b)))
-
-(defn save-buffer-named
-  "Queue a save of buffer `name` (a :bufs key). Formatting and disk writes run
-   after the command commits."
-  [s name]
-  (let [b (cmd/buf s name)
-        file (:file b)
-        format? (:format-on-save s)]
-    (cond
-      (nil? b) (msg s (str "No buffer: " name))
-      (str/blank? file) (msg s "No file")
-      :else
-      (api/after-command s
-        (fn [publish!]
-          (try
-            (let [to-save
-                  (if-let [fmt (when format? (cli-formatted-text b))]
-                    (let [state (publish! (fn [state]
-                                            (if (same-buffer-version? (cmd/buf state name) b)
-                                              (update-in state [:bufs name] buf/replace-text fmt)
-                                              state)))
-                          formatted (cmd/buf state name)]
-                      (when (and (= file (:file formatted)) (= fmt (str (:text formatted))))
-                        formatted))
-                    b)]
-              (if to-save
-                (do
-                  (when (write-buffer! publish! name to-save nil)
-                    (try
-                      (java.nio.file.Files/deleteIfExists (.toPath (auto-save-file file)))
-                      (catch Exception e
-                        (log/log "auto-save cleanup failed:" file (.getMessage e)))))
-                  (publish! msg (str "Wrote " file)))
-                (publish! msg "Save canceled: buffer changed during formatting")))
-            (catch Exception e (publish! msg-error "Save failed" e))))))))
-
-(defn save-buffer [s] (save-buffer-named s (:buf s)))
-
-(defn- open-buf [s path b]
-  (let [b (lang/with-file-language b)
-        s (-> s (assoc-in [:bufs path] b) (cmd/set-cur-buffer path))
-        m (get-in b [:language :mode])]
-    (cond-> s m (mode/set-major-mode m))))
-
-(defn- file-info [filename]
-  (let [f (.getAbsoluteFile (java.io.File. filename))]
-    {:path (.getCanonicalPath f) :name (.getName f)
-     :exists (.exists f) :dir? (.isDirectory f)}))
-
-(def ^:private recentf-limit 50)
-
-(defn- bump-recentf [s path]
-  (-> s
-      (assoc :recentf (vec (take recentf-limit
-                                (cons path (remove #{path} (:recentf s))))))
-      (api/persist-setting :recentf)))
-
-(defn find-file [s filename]
-  (let [{:keys [path name exists dir?]} (file-info filename)]
-    (cond
-      ;; already open — just switch to it, don't clobber in-memory edits
-      (contains? (:bufs s) path) (-> s (cmd/set-cur-buffer path) (bump-recentf path))
-
-      ;; Opening a directory drops into dired, matching Emacs's C-x C-f.
-      dir? (dired/open s path)
-
-      exists
-      (try (let [{:keys [text line-ending]} (persist/read-file path)]
-             (-> (open-buf s path (assoc (buf/make name text path)
-                                        :line-ending line-ending))
-                 (bump-recentf path)))
-           (catch Exception e (msg-error s (str "Error reading " path) e)))
-
-      :else (-> (open-buf s path (buf/make name "" path))
-                (bump-recentf path)
-                (msg "(New file)")))))
+(def find-file files/find-file)
+(def save-buffer files/save-buffer)
+(def save-buffer-named files/save-buffer-named)
+(def auto-save! files/auto-save!)
+(def confirm-quit files/confirm-quit)
 
 (defn switch-buffer [s name]
   (cond
@@ -492,141 +321,13 @@
 (def mini-start mini/start)
 (def mini-accept mini/accept)
 
-;; --- Crash recovery ---
-
-(defn- pending-recoveries
-  "Files with an auto-save backup left by a previous run."
-  []
-  (->> (persist/load! "auto-saved" [])
-       (filter string?)
-       distinct
-       (filter #(.exists (auto-save-file %)))
-       vec))
-
-(defn- recover-file
-  "Open `f` and replace its text with the auto-save backup, leaving it marked
-   modified so the user can inspect it before C-x C-s."
-  [s f]
-  (let [backup (auto-save-file f)]
-    (if (.exists backup)
-      (let [text (slurp backup :encoding "UTF-8")
-            s    (find-file s f)]
-        (-> (cmd/update-cur s #(assoc % :text (gap/of text) :point 0
-                                        :modified true
-                                        ;; The backup is different text: cached
-                                        ;; spans, props and undo offsets from the
-                                        ;; file no longer describe it.
-                                        :version (inc (or (:version %) 0))
-                                        :props [] :font-lock [] :font-lock-window nil
-                                        :undo [] :redo [] :journal []))
-            (msg (str "Recovered " f " from auto-save — C-x C-s to keep"))))
-      (msg s (str "No auto-save for " f)))))
-
-(defn- recover-ask
-  "Prompt for each pending backup. `y` restores it, `n` deletes it."
-  [s paths]
-  (if-let [[f & more] (seq paths)]
-    (mini-start s (str "Recover unsaved changes to " f "? (y/n) ")
-      (fn [s ans]
-        (if (= "y" (str/lower-case (str/trim ans)))
-          (recover-ask (recover-file s f) more)
-          (-> s
-              (api/after-command (fn [_]
-                                   (java.nio.file.Files/deleteIfExists (.toPath (auto-save-file f)))))
-              (recover-ask more)))))
-    s))
-
 (declare handle-key)
 
-;; --- Buffer props ---
-
-(defn- set-prop
-  "Replace every prop owned by `owner` in the current buffer with one range."
-  [s owner face from to]
-  (cmd/update-cur s #(assoc % :props (props/set-owner (:props %) owner from to face {}))))
-
-(defn- clear-prop [s owner]
-  (cmd/update-cur s #(assoc % :props (props/remove-owner (:props %) owner))))
-
-;; --- Incremental search ---
-
-(defn- isearch-do
-  "Search from current point in :isearch's direction. When :extend? is true
-   (pattern just grew or shrank), include the current point as a candidate so
-   a match anchored there can grow/shrink; otherwise advance past the current
-   match so C-s/C-r finds the next occurrence."
-  [s]
-  (let [{:keys [pattern direction extend?]} (:isearch s)
-        b (cur s) t (:text b) p (:point b)
-        tn (count t) pn (count pattern)]
-    (if (empty? pattern)
-      (clear-prop s :isearch)
-      (let [found (if (= direction :forward)
-                    (text/search-forward  t pattern (if extend? p (min (+ p pn) tn)))
-                    ;; Extend: allow the match starting at p (ending at p+pn)
-                    ;; to stay anchored. (inc p) only worked for pn=1 — multi-
-                    ;; char patterns were yanked away from the current match.
-                    (text/search-backward t pattern (if extend? (+ p pn) p)))]
-        (if found
-          (-> (set-point s (fn [_ _] found))
-              (set-prop :isearch :match found (+ found pn)))
-          (msg s (str "Failing I-search: " pattern)))))))
-
-(defn isearch-start [s direction]
-  (if (:mini s)
-    ;; Isearch and the minibuffer can't sensibly share an editor state —
-    ;; isearch would operate on the minibuffer text, and the minibuffer's
-    ;; prompt would remain live underneath. Refuse.
-    (msg s "Command attempted to use disabled command in minibuffer")
-    (-> s (assoc :isearch {:pattern "" :direction direction
-                           :origin (:point (cur s))}))))
-
-(defn- isearch-accept [s]
-  ;; Clear :msg too — otherwise a "Failing I-search: foo" from the final
-  ;; keystroke survives into the normal echo area after RET.
-  (-> s (clear-prop :isearch) (dissoc :isearch) (assoc :msg nil)))
-
-(defn- isearch-cancel [s]
-  (let [origin (get-in s [:isearch :origin])]
-    (-> s (clear-prop :isearch)
-          (dissoc :isearch)
-          (set-point (fn [_ _] origin))
-          (msg "Quit"))))
-
-(defn- isearch-edit
-  "Update the pattern via `f`, then re-search from the current match."
-  [s f]
-  (-> s (update :isearch assoc :extend? true)
-        (update-in [:isearch :pattern] f)
-        isearch-do))
-
-(defn- isearch-append [s ch]
-  (isearch-edit s #(str % ch)))
-
-(defn- isearch-next [s direction]
-  (-> s (update :isearch assoc :direction direction :extend? false)
-        isearch-do))
-
-(def ^:private isearch-keys
-  {[:ctrl \s]  #(isearch-next % :forward)
-   [:ctrl \r]  #(isearch-next % :backward)
-   :return    isearch-accept
-   [:ctrl \g]  isearch-cancel})
-
-(defn- isearch-backspace [s]
-  (if (seq (get-in s [:isearch :pattern]))
-    (isearch-edit s #(subs % 0 (dec (count %))))
-    (isearch-cancel s)))
-
-(defn- handle-isearch
-  "Handle a key during incremental search. Returns updated state."
-  [s key]
-  (cond
-    (isearch-keys key)   ((isearch-keys key) s)
-    (= key :backspace)   (isearch-backspace s)
-    (and (char? key) (>= (int key) 32)) (isearch-append s (str key))
-    (string? key)        (isearch-append s key)
-    :else                (-> (isearch-accept s) (handle-key key))))
+(def isearch-start search/isearch-start)
+(def query-replace search/query-replace)
+(def query-replace-regexp search/query-replace-regexp)
+(def query-replace-cmd search/query-replace-cmd)
+(def query-replace-regexp-cmd search/query-replace-regexp-cmd)
 
 ;; --- Eval expression (M-:) ---
 
@@ -647,69 +348,6 @@
   "Return a command that opens a minibuffer with `p` as prompt and `on-done` as handler."
   [p on-done & [completer]]
   (fn [s] (mini-start s p on-done completer)))
-
-;; --- Quit: offer to save each modified buffer ---
-
-(defn- modified-bufs [s]
-  (->> (:bufs s)
-       (keep (fn [[name b]]
-               ;; Hidden buffers (leading space) are editor-owned — the
-               ;; minibuffer in particular is always "modified" while you type
-               ;; in it, and quitting must not ask to save it.
-               (when (and (:modified b)
-                          (not (buf/internal-name? name)))
-                 name)))
-       sort))
-
-(defn- quit-finish [s] (assoc s :exit true))
-
-(defn- quit-save-all
-  "`!` answer: save every modified file buffer, discard the rest, then quit.
-   A failed save cancels the quit rather than losing the buffer."
-  [s names]
-  (let [files (filter #(:file (cmd/buf s %)) names)]
-    (-> (reduce save-buffer-named s files)
-        (api/after-command
-          (fn [publish!]
-            (publish! (fn [s]
-                        (if (some #(:modified (cmd/buf s %)) files)
-                          (msg s "Quit canceled: a buffer could not be saved")
-                          (quit-finish s)))))))))
-
-
-(defn- quit-ask
-  "Ask about one modified buffer at a time. `y` saves (or discards a buffer
-   with no file), `n` skips it, `!` saves the rest; any other answer cancels."
-  [s names]
-  (if-let [[n & more] (seq names)]
-    (let [b (:file (cmd/buf s n)) ]
-      (if b
-        (mini-start s (str "Save " b "? (y/n/!) ")
-          (fn [s ans]
-            (case (str/lower-case (str/trim ans))
-              "y" (-> (save-buffer-named s n)
-                      (api/after-command
-                        (fn [publish!]
-                          (publish! (fn [s]
-                                      (if (:modified (cmd/buf s n))
-                                        (msg s (str "Quit canceled: " b " was not saved"))
-                                        (quit-ask s more)))))))
-              "n" (quit-ask s more)
-              "!" (quit-save-all s names)
-              (msg s "Quit canceled"))))
-        (mini-start s (str "Discard changes to " (:name (cmd/buf s n)) "? (y/n/!) ")
-          (fn [s ans]
-            (case (str/lower-case (str/trim ans))
-              "y" (quit-ask s more)
-              "n" (quit-ask s more)
-              "!" (quit-save-all s names)
-              (msg s "Quit canceled"))))))
-    (quit-finish s)))
-
-(defn confirm-quit [s]
-  (if-let [names (seq (modified-bufs s))]
-    (quit-ask (dissoc s :exit-pending :exit) names)
-    (quit-finish s)))
 
 (defn suspend
   "Request suspend. The command loop performs it outside swap! so no state
@@ -836,122 +474,6 @@
               (and (= path (:cur-window s)) (not= point-row new-point-row))
               (assoc-in [:bufs buffer :point] (line-start new-point-row)))))))
     s))
-
-;; --- Query replace (M-%) ---
-
-(defn- regex-find
-  "Return [start end groups] for the next match of `pattern` at or after `from`, or nil."
-  [^CharSequence t ^String pattern ^long from]
-  (let [m (re-matcher (re-pattern pattern) t)]
-    (when (.find m (int from))
-      [(.start m) (.end m)
-       (vec (for [i (range (inc (.groupCount m)))]
-              (or (.group m (int i)) "")))])))
-
-(defn- expand-replacement
-  "Replace \\N in `template` with the corresponding match group."
-  [^String template groups]
-  (str/replace template #"\\(\d)"
-               (fn [[_ d]] (or (get groups (Integer/parseInt d)) ""))))
-
-(defn- qr-msg [s]
-  (let [{:keys [from to regex?]} (:query-replace s)]
-    (msg s (str (if regex? "Query replacing regexp " "Query replacing ")
-                from " with " to ": (y/n/!/q)"))))
-
-(defn- qr-exit [s]
-  (let [n (get-in s [:query-replace :count] 0)]
-    (-> s (clear-prop :qr)
-          (dissoc :query-replace)
-          (msg (str "Replaced " n " occurrence(s)")))))
-
-(defn- qr-find-from
-  "Return [start end groups] for the first match at or after `pos`, or nil."
-  [s ^long pos]
-  (let [{:keys [from regex?]} (:query-replace s)
-        t (:text (cur s))]
-    (when (<= pos (count t))
-      (if regex?
-        (regex-find t from pos)
-        (when-let [start (text/search-forward t from pos)]
-          [start (+ start (count from)) nil])))))
-
-(defn- qr-show
-  "Move point to the match `found` ([start end groups]), or exit when nil."
-  [s found]
-  (if-let [[start end groups] found]
-    (-> s (cmd/goto-char start)
-          (set-prop :qr :match start end)
-          (update :query-replace assoc :match-end end :groups groups)
-          qr-msg)
-    (qr-exit s)))
-
-(defn- qr-advance
-  "Skip the current match and show the next one. Search starts past the
-   current match's end (past a zero-width match) so `n` always progresses."
-  [s]
-  (let [{:keys [match-end]} (:query-replace s)
-        p (:point (cur s))]
-    (qr-show s (qr-find-from s (max (inc (long p)) (long (or match-end 0)))))))
-
-(defn- qr-replace-here [s]
-  (let [{:keys [to regex? match-end groups]} (:query-replace s)
-        p (long (:point (cur s)))
-        replacement (if regex? (expand-replacement to groups) to)
-        zero-width? (= p (long match-end))
-        s2 (-> s (edit p match-end replacement)
-                 (update-in [:query-replace :count] (fnil inc 0)))]
-    (if zero-width?
-      ;; A zero-width match (e.g. regex `$` or `a*`) would be refound at the
-      ;; same spot. Step past it — and exit at EOF — so neither the search
-      ;; nor replace-all can loop forever.
-      (let [s3 (update-cur s2 #(update % :point inc))
-            b  (cur s3)]
-        (if (>= (long (:point b)) (count (:text b)))
-          (qr-exit s2)
-          (qr-show s3 (qr-find-from s3 (:point b)))))
-      (qr-show s2 (qr-find-from s2 (:point (cur s2)))))))
-
-(defn- qr-replace-all [s]
-  (loop [s (qr-replace-here s)]
-    (if (:query-replace s) (recur (qr-replace-here s)) s)))
-
-(defn- query-replace-begin
-  "Enter query-replace mode at the first match from point."
-  [s from to regex?]
-  (if-let [error (when regex?
-                   (try (let [_pattern (re-pattern from)] nil)
-                        (catch java.util.regex.PatternSyntaxException e e)))]
-    (msg s (str "Invalid regexp: " (.getDescription error)))
-    (let [s (assoc s :query-replace {:from from :to to :count 0 :regex? regex?})]
-      (if-let [found (qr-find-from s (:point (cur s)))]
-        (qr-show s found)
-        (msg (dissoc s :query-replace) "No match")))))
-
-(defn- qr-prompt-to
-  "Having read FROM, prompt for TO and kick off the interactive loop."
-  [s input regex?]
-  (if (str/blank? input)
-    s
-    (mini-start s (str "Query replace " (when regex? "regexp ") input " with: ")
-      (fn [s to] (query-replace-begin s input to regex?)))))
-
-(defn query-replace        [s input] (qr-prompt-to s input false))
-(defn query-replace-regexp [s input] (qr-prompt-to s input true))
-
-(defn query-replace-cmd [s]
-  (mini-start s "Query replace: " query-replace))
-
-(defn query-replace-regexp-cmd [s]
-  (mini-start s "Query replace regexp: " query-replace-regexp))
-
-(def ^:private qr-keys
-  {\y qr-replace-here
-   \n qr-advance
-   \! qr-replace-all
-   \q qr-exit
-   :return qr-exit
-   :escape qr-exit})
 
 ;; --- Keyboard macros ---
 
@@ -1103,54 +625,6 @@
         {:sources [complete/project-files]}))
     (msg s "Not in a project")))
 
-(defn- symbol-prefix [text p]
-  (let [before (gap/substr text (gap/line-start text p) p)]
-    (re-find #"[$\w\-\*\+!\?\./#]*$" before)))
-
-(defn- offset->pos
-  "LSP position {:line :character} (both 0-based) for char offset `i`."
-  [text i]
-  (let [l (gap/line-of text i)]
-    {:line l :character (- i (gap/nth-line-start text l))}))
-
-(defn- completion-replacement
-  "Compute [from to text caret] for accepting `item` with `prefix` at point."
-  [s item prefix p]
-  (let [edit (:textEdit item)
-        range (lsp/range->offsets (:text (cur s)) (:range edit))
-        [from to] (or range [(- p (count prefix)) p])
-        text (buf/normalize-eol
-               (str (or (when range (:newText edit)) (:insertText item) (:label item))))
-        [text caret] (if (= 2 (:insertTextFormat item))
-                       (snippet/expand text)
-                       [text nil])]
-    [from to text caret]))
-
-(defn complete-symbol-at-point
-  "C-c i: complete the symbol at point asynchronously from buffers and the
-   project. The candidate is inserted replacing the prefix; LSP items honour
-   textEdit and snippet insertTextFormat."
-  [s]
-  (let [b (cur s) p (:point b)
-        source (:buf s)
-        version (:version b)
-        prefix (symbol-prefix (:text b) p)
-        {:keys [line character]} (offset->pos (:text b) p)
-        ch character]
-    (mini-start s "Complete: "
-      (fn [s chosen]
-        (let [b (cur s)
-              item (get (complete/document-items b [line ch]) chosen)]
-          (if (and (= source (:buf s)) (= version (:version b)) (= p (:point b))
-                   (= prefix (gap/substr (:text b) (- p (count prefix)) p)))
-            (if item
-              (let [[from to repl caret] (completion-replacement s item prefix p)]
-                (-> s (cmd/edit from to repl)
-                      (cmd/goto-char (+ from (long (or caret (count repl)))))))
-              (cmd/edit s (- p (count prefix)) p chosen))
-            (msg s "Buffer moved; completion skipped"))))
-      {:sources (complete/sources-for s)})))
-
 (defn- git-status
   "C-x g: open the git status buffer for the current project."
   [s]
@@ -1158,343 +632,18 @@
     (gitstatus/open s root)
     (msg s "Not a git repository")))
 
-;; --- LSP commands ---
-
-(defn- lsp-argv
-  "Server argv for language `l`: per-language config wins, then the legacy
-   global override, then the registry default."
-  [s l]
-  (or (get-in s [:lsp-commands (:id l)])
-      (:lsp-command s)
-      (:lsp l)))
-
-(defn- lsp-session
-  "Resolve the current buffer's server and its configured command."
-  [s]
-  (when-let [sess (lsp/document-session (cur s))]
-    (assoc sess :argv (lsp-argv s (:language sess)))))
-
-(defn- char-col
-  "0-based UTF-16 character index of point within its line — what LSP wants."
-  [s]
-  (let [b (cur s)]
-    (:character (offset->pos (:text b) (:point b)))))
-
-(defn- lsp-request-at-point
-  "Run `(f state session)` once the language server for the current buffer is
-   ready. `f` returns the new editor state and is applied with swap! because
-   the initialize handshake completes later, on the editor loop."
-  [s f]
-  (let [path (:file (cur s))]
-    (cond
-      (nil? path)                (msg s "Buffer has no file")
-      (:large-file (cur s))      (msg s "LSP is disabled in large-file buffers")
-      (not (lsp/supports? path)) (msg s "No language server for this file")
-      :else
-      (if-let [sess (lsp-session s)]
-        (if (lsp/on-path? (:argv sess))
-          (do (lsp/ensure! (:root-id sess) (:argv sess) (:root sess)
-                           (:id (:language sess))
-                           (fn [_]
-                             (swap! editor
-                                    (fn [state]
-                                      (let [b (cur state)]
-                                        (if (and (= path (:file b))
-                                                 (= (:root-id sess)
-                                                    (:root-id (lsp/document-session b))))
-                                          (f state sess)
-                                          state))))))
-              s)
-          (msg s (str "Language server not on PATH: " (first (:argv sess)))))
-        (msg s "Not in a project")))))
-
-(defn- show-hover
-  "Echo an LSP Hover result in the message bar."
-  [result]
-  (let [c   (:contents result)
-        txt (cond (string? c) c
-                  (map? c)   (:value c)
-                  (seq c)    (str/join "\n" (map :value c)))
-        txt (some-> txt (str/replace #"\s+" " "))]
-    (when txt
-      (swap! editor assoc :msg (str "LSP: " (subs txt 0 (min 200 (count txt))))))))
-
-(defn- location->entry
-  [loc]
-  (let [uri   (or (:uri loc) (:targetUri loc))
-        range (or (:range loc) (:targetRange loc))]
-    (when (and uri range)
-      {:file (lsp/uri->path uri)
-       :line (inc (max 0 (get-in range [:start :line] 0)))})))
-
-(defn- jump-to-definition
-  "Move point to an LSP Location / LocationLink, exact line and column."
-  [res]
-  (let [loc   (if (vector? res) (first res) res)
-        uri   (or (:uri loc) (:targetUri loc))
-        range (or (:range loc) (:targetRange loc))]
-    (when (and uri range)
-      (swap! editor
-             (fn [s]
-               (let [s (find-file s (lsp/uri->path uri))
-                     t (:text (cur s))]
-                 (if-let [offset (lsp/position->offset t (:start range))]
-                   (cmd/goto-char s offset)
-                   s)))))))
-
-
-(defn- lsp-position-request [s request on-result]
-  (lsp-request-at-point s
-    (fn [state {:keys [root-id]}]
-      (request root-id (:file (cur state))
-               (cmd/line-idx state) (char-col state) on-result)
-      state)))
-
-(defn lsp-hover [s]
-  (lsp-position-request s lsp/hover show-hover))
-
-(defn lsp-definition [s]
-  (lsp-position-request s lsp/definition jump-to-definition))
-
-(defn- show-references [res]
-  (let [entries (vec (keep location->entry res))]
-    (swap! editor
-           (fn [s]
-             (if (empty? entries)
-               (msg s "No references")
-               (listbuf/open s "*References*"
-                             {:name "*References*"
-                              :mode :nav-mode
-                              :header (str (count entries) " references")
-                              :entries entries
-                              :format-entry (fn [{:keys [file line]}]
-                                              (format "%s:%d" file line))
-                              :extras {:nav-root nil}}))))))
-
-(defn lsp-references [s]
-  (lsp-position-request s lsp/references show-references))
-
-;; --- Workspace edits (rename, code actions, formatting) ---
-
-(defn- workspace-buffer-key [state path]
-  (or (when (contains? (:bufs state) path) path)
-      (some (fn [[key b]] (when (= (:file b) path) key)) (:bufs state))))
-
-(defn- workspace-source [state path]
-  (if-let [key (workspace-buffer-key state path)]
-    (let [b (cmd/buf state key)]
-      {:key key :buffer b :text (:text b)})
-    (try
-      (let [{:keys [raw text line-ending]} (persist/read-file path)
-            b (assoc (buf/make (.getName (java.io.File. ^String path)) text path)
-                     :line-ending line-ending)]
-        {:key path :expected raw :buffer b :text (:text b)})
-      (catch Exception e
-        (log/log "workspace edit read failed:" path (.getMessage e))
-        nil))))
-
-(defn- workspace-source-current? [state path {:keys [key buffer expected]}]
-  (if expected
-    (nil? (workspace-buffer-key state path))
-    (same-buffer-version? (cmd/buf state key) buffer)))
-
-(defn- apply-edit-group [state {:keys [path edits source]}]
-  (if (workspace-source-current? state path source)
-    (let [state (if (:expected source)
-                  (-> (open-buf state path (:buffer source))
-                      (bump-recentf path))
-                  state)]
-      (update-in state [:bufs (:key source)]
-                 (fn [b] (reduce (fn [b {:keys [from to text]}]
-                                   (buf/edit b from to text))
-                                 b edits))))
-    state))
-
-(defn apply-workspace-edit!
-  "Apply a WorkspaceEdit to open buffers, writing previously unopened files
-   only if their source on disk still matches the bytes used for the edit."
-  [edit]
-  (let [initial @editor
-        source (memoize #(workspace-source initial %))
-        groups (mapv #(assoc % :source (source (:path %)))
-                     (lsp/workspace-edits edit #(:text (source %))))]
-    (if (empty? groups)
-      (swap! editor msg "No edits to apply")
-      (let [[before after] (swap-vals! editor #(reduce apply-edit-group % groups))
-            applied (filter #(workspace-source-current? before (:path %) (:source %)) groups)
-            written (count (filter (fn [{:keys [path source]}]
-                                     (when-let [expected (:expected source)]
-                                       (try
-                                         (write-buffer! (fn [f] (swap! editor f)) path
-                                                        (cmd/buf after path) expected)
-                                         true
-                                         (catch Exception e
-                                           (log/log "workspace edit write failed:" path (.getMessage e))
-                                           false))))
-                                   applied))]
-        (swap! editor msg (str "Applied edits in " (count applied) " file(s)"
-                               (when (pos? written) (str ", " written " written"))
-                               (when (< (count applied) (count groups))
-                                 " (some buffers changed)")))))))
-
-(defn- apply-code-action!
-  [sess action]
-  (let [cmd (:command action)]
-    (when-let [edit (:edit action)] (apply-workspace-edit! edit))
-    (when cmd
-      (lsp/execute-command (:root-id sess) (:command cmd) (:arguments cmd)
-                           (fn [r] (when (map? r) (apply-workspace-edit! r)))))))
-
-(defn- diags-in-range
-  "LSP diagnostics from the buffer's LSP props overlapping [lo hi), with
-   positions as {:line :character} maps built by `pos`."
-  [buf lo hi pos]
-  (->> (:props buf)
-       (filter (fn [p] (and (= :lsp (:owner p))
-                            (<= (long (:from p)) (long hi))
-                            (>= (long (:to p)) (long lo)))))
-       (mapv (fn [p]
-               {:range {:start (pos (:from p)) :end (pos (:to p))}
-                :severity (:severity p)
-                :message (str (:message p))
-                :source "lsp"}))))
-
-(defn lsp-code-action [s]
-  (lsp-request-at-point s
-    (fn [state sess]
-      (let [t (:text (cur state))
-            ln (cmd/line-idx state)
-            [lo hi] (or (cmd/region-bounds state)
-                        [(gap/nth-line-start t ln) (gap/nth-line-end t ln)])
-            pos (fn [i] (offset->pos t i))
-            range {:start (pos lo) :end (pos hi)}
-            diags (diags-in-range (cur state) lo hi pos)]
-        (lsp/code-action (:root-id sess) (:file (cur state)) range diags
-          (fn [res]
-            (let [actions (vec (filter :title res))]
-              (cond
-                (empty? actions) (swap! editor msg "No code actions")
-                (= 1 (count actions)) (apply-code-action! sess (first actions))
-                :else
-                (swap! editor
-                       (fn [s]
-                         (mini-start
-                           s "Code action: "
-                           (fn [st input]
-                             (if-let [a (first (filter #(= input (:title %)) actions))]
-                               (do (apply-code-action! sess a) st)
-                               st))
-                           (fn [input _]
-                             (mini/complete-prefix input (map :title actions))))))))))
-        state))))
-
-(defn- show-signature [{:keys [signatures activeSignature]}]
-  (let [sig (get signatures (max 0 (or activeSignature 0)))]
-    (when-let [label (or (:label sig) (:label (first signatures)))]
-      (swap! editor msg (str "LSP: " label)))))
-
-(defn lsp-signature-help [s]
-  (lsp-position-request s lsp/signature-help show-signature))
-
-(defn- symbol-entries
-  "Flatten DocumentSymbol trees (or a flat SymbolInformation vector)."
-  [res]
-  (letfn [(walk [items]
-            (mapcat (fn [d]
-                      (let [name (str (:name d))
-                            line (or (get-in d [:selectionRange :start :line])
-                                     (get-in d [:location :range :start :line])
-                                     (get-in d [:range :start :line]) 0)
-                            entry (cond-> {:name name :line (inc line)}
-                                    (get-in d [:location :uri])
-                                    (assoc :file (lsp/uri->path (get-in d [:location :uri]))))]
-                        (cons entry (walk (:children d)))))
-                    items))]
-    (vec (walk res))))
-
-(defn lsp-document-symbols [s]
-  (lsp-request-at-point s
-    (fn [state sess]
-      (lsp/document-symbol (:root-id sess) (:file (cur state))
-                           (fn [res]
-                             (let [entries (symbol-entries res)]
-                               (swap! editor
-                                      (fn [s]
-                                        (if (empty? entries)
-                                          (msg s "No symbols")
-                                          (listbuf/open
-                                            s "*Imenu*"
-                                            {:name "*Imenu*"
-                                             :mode :nav-mode
-                                             :header (str (count entries) " symbols")
-                                             :entries (mapv #(assoc % :buf (:file (cur state))) entries)
-                                             :format-entry (fn [{:keys [line name]}]
-                                                             (format "%5d  %s" line name))
-                                             :extras {:nav-root nil}})))))))
-      state)))
-
-(defn- request-format [s region]
-  (lsp-request-at-point s
-    (fn [state {:keys [root-id]}]
-      (let [{:keys [file text language]} (cur state)
-            options {:tabSize (or (:indent language) 2) :insertSpaces true}
-            on-edits (fn [edits]
-                       (if (seq edits)
-                         (apply-workspace-edit! {:changes {(lsp/path->uri file) edits}})
-                         (swap! editor msg "Already formatted")))]
-        (if-let [[lo hi] region]
-          (let [range {:start (offset->pos text lo) :end (offset->pos text hi)}]
-            (lsp/range-formatting root-id file range options on-edits))
-          (lsp/formatting root-id file options on-edits)))
-      state)))
-
-(defn lsp-format [s]
-  (request-format s nil))
-
-(defn lsp-format-region [s]
-  (if-let [region (cmd/region-bounds s)]
-    (request-format s region)
-    (msg s "No region")))
-
-;; --- Rename ---
-
-(defn lsp-rename [s]
-  (lsp-request-at-point s
-    (fn [state sess]
-      (let [path (:file (cur state))
-            line (cmd/line-idx state)
-            ch   (char-col state)]
-        (mini-start
-          state
-          "Rename to: "
-          (fn [st new-name]
-            (when-not (str/blank? new-name)
-              (lsp/rename (:root-id sess) path line ch new-name
-                          (fn [edit] (if edit
-                                       (apply-workspace-edit! edit)
-                                       (swap! editor msg "Rename failed")))))
-            st)))
-      state)))
-
-;; Completion is cache + push, never blocking: a cache miss starts one async
-;; request and returns the cached hits (usually none); when the reply lands we
-;; stash it and nudge the minibuffer to re-run its sources, which now hit the
-;; cache. So a slow server only delays the *list*, never a keystroke.
-(defn lsp-completion-source [prefix {:keys [state]}]
-  (if-let [{:keys [root-id root language argv]} (lsp-session state)]
-    (cond
-      (not (lsp/server-exists? root-id))
-      (do (lsp/ensure! root-id argv root (:id language) (fn [_])) [])
-
-      (lsp/ready? root-id)
-      (let [line (cmd/line-idx state)
-            ch (char-col state)
-            file (:file (cur state))]
-        (complete/document-candidates! editor state [line ch] prefix
-          #(lsp/completion root-id file line ch %)))
-
-      :else [])
-    []))
+(def complete-symbol-at-point language/complete-symbol-at-point)
+(defn lsp-completion-source [prefix context] (language/lsp-completion-source editor prefix context))
+(defn apply-workspace-edit! [edit] (language/apply-workspace-edit! editor edit))
+(defn lsp-hover [s] (language/lsp-hover editor s))
+(defn lsp-definition [s] (language/lsp-definition editor s))
+(defn lsp-references [s] (language/lsp-references editor s))
+(defn lsp-code-action [s] (language/lsp-code-action editor s))
+(defn lsp-signature-help [s] (language/lsp-signature-help editor s))
+(defn lsp-document-symbols [s] (language/lsp-document-symbols editor s))
+(defn lsp-format [s] (language/lsp-format editor s))
+(defn lsp-format-region [s] (language/lsp-format-region editor s))
+(defn lsp-rename [s] (language/lsp-rename editor s))
 
 (defn- project-search
   "C-x p g: run rg over the project as a job; RET on a hit opens it."
@@ -1514,118 +663,18 @@
       (fn [input _s] {:completed input :candidates []}))
     (msg s "Not in a project")))
 
-(defn- line-text [s]
-  (let [t  (:text (cur s))
-        ln (cmd/line-idx s)]
-    (gap/substr t (gap/nth-line-start t ln) (gap/nth-line-end t ln))))
+(def nav-jump nav/jump-at-point)
 
-(defn- nav-file
-  "Resolve an entry's :file against the listing's :nav-root."
-  [root f]
-  (if (or (nil? root) (.isAbsolute (java.io.File. ^String f))) f (str root "/" f)))
-
-(defn- jump-to-file [s root file line]
-  (let [{:keys [path exists dir?]} (file-info (nav-file root file))]
-    (if (or (contains? (:bufs s) path) (and exists (not dir?)))
-      (cond-> (find-file s path)
-        line (goto-line (str line)))
-      (msg s (str "Source file not found: " file)))))
-
-(defn nav-jump
-  "RET in an occur, imenu or rg buffer: go to that location."
-  [s]
-  (if-let [e (listbuf/entry-at-point s)]
-    (cond
-      (:location-error e) (msg s (:location-error e))
-      (:file e) (jump-to-file s (:nav-root (cur s)) (:file e) (:line e))
-      (:buf e)  (if (contains? (:bufs s) (:buf e))
-                  (-> s (cmd/set-cur-buffer (:buf e)) (goto-line (str (:line e))))
-                  (msg s "Source buffer is gone"))
-      :else (msg s "This entry has no source location"))
-    ;; rg buffers stream plain text, so their working directory owns the paths.
-    (if (= :rg-mode (:mode (cur s)))
-      (if-let [{:keys [file line]} (nav/rg-line (line-text s))]
-        (if-let [root (or (:job-dir (cur s)) (:nav-root (cur s)))]
-          (jump-to-file s root file line)
-          (msg s "Run project search again to open these results"))
-        (msg s "No search result on this line"))
-      s)))
-
-;; --- Debugger (DAP) ---
-;; A session at a time. Breakpoints are gutter marks, frames/locals open in list
-;; buffers, and every adapter round trip is async, so a stopped debuggee cannot
-;; freeze the editor.
-
-(defn- debug-jump
-  "Move to the frame the debugger stopped at: that is the point of stopping.
-   The *Debug* buffer keeps the stack for moving around afterwards."
-  [s {:keys [file line]}]
-  (if (and file (.exists (java.io.File. ^String file)))
-    (cond-> (find-file s file)
-      (some? line) (goto-line (str (inc (long line)))))
-    s))
-
-(defn debug-start
-  "C-c d d: start the language's debug adapter for the current buffer."
-  [s]
-  (let [b (cur s)
-        file (:file b)
-        l (when file (lang/language-for-file file))
-        cfg (:dap l)]
-    (msg s
-         (cond
-           (nil? file) "Save the buffer first"
-           (nil? l) "No language for this buffer"
-           (nil? cfg) (str "No debug adapter for " (:id l) " (see nesmacs.lang :dap)")
-           (not (dap/available? l))
-           (str "Debug adapter not installed: " (first (:argv cfg)))
-           :else
-           (dap/start! {:editor editor
-                        :root (or (project/root file)
-                                  (.getParent (java.io.File. ^String file)))
-                        :file file :language l :on-stop debug-jump})))))
-
-(defn debug-breakpoint
-  "C-c d b: toggle a breakpoint on this line."
-  [s]
-  (let [file (:file (cur s))]
-    (if file
-      (let [line (cmd/line-idx s)
-            lines (dap/toggle-breakpoint! file line)]
-        (msg s (format "%s:%d — %d breakpoint(s)" file (inc line) (count lines))))
-      (msg s "Buffer has no file"))))
-
-(defn- debug-result [s result]
-  (if result (msg s result) s))
-
-(defn debug-continue [s] (debug-result s (dap/continue-run!)))
-(defn debug-next     [s] (debug-result s (dap/next!)))
-(defn debug-step-in  [s] (debug-result s (dap/step-in!)))
-(defn debug-step-out [s] (debug-result s (dap/step-out!)))
-
-(defn debug-quit
-  "C-c d q: disconnect and terminate the debuggee."
-  [s]
-  (dap/stop!)
-  (msg s "Debug session stopped"))
-
-(defn debug-stack
-  "C-c d s: show the frames of the last stop."
-  [s]
-  (if (contains? (:bufs s) dap/stack-buffer-name)
-    (cmd/set-cur-buffer s dap/stack-buffer-name)
-    (msg s "No stack yet")))
-
-(defn debug-variables
-  "C-c d v: re-fetch the locals of the stopped frame."
-  [s]
-  (debug-result s (dap/variables!)))
-
-(defn debug-eval
-  "C-c d e: evaluate an expression in the stopped frame."
-  [_s]
-  (prompt "Debug eval: "
-          (fn [s expr] (debug-result s (dap/evaluate! expr)))))
+(defn debug-start [s] (debug/start editor s))
+(def debug-breakpoint debug/breakpoint)
+(def debug-continue debug/continue)
+(def debug-next debug/next-line)
+(def debug-step-in debug/step-in)
+(def debug-step-out debug/step-out)
+(def debug-quit debug/quit)
+(def debug-stack debug/stack)
+(def debug-variables debug/variables)
+(def debug-eval debug/evaluate)
 
 (defn- occur [s input]
   (if (str/blank? input)
@@ -1647,34 +696,6 @@
 
 (declare format-buffer toggle-fold fold-all unfold-all git-blame git-stage-hunk
          git-unstage-hunk)
-
-(def ^:private cx-c-map
-  {\i complete-symbol-at-point
-   \h lsp-hover
-   \t terminal-open
-   \a lsp-code-action
-   \f format-buffer
-   \F lsp-format-region
-   \r lsp-references
-   \R lsp-rename
-   \g lsp-signature-help
-   \m lsp-document-symbols
-   \d {\d debug-start
-       \b debug-breakpoint
-       \c debug-continue
-       \n debug-next
-       \i debug-step-in
-       \o debug-step-out
-       \s debug-stack
-       \v debug-variables
-       \e debug-eval
-       \q debug-quit}
-   :tab toggle-fold})
-
-(def ^:private cx-v-map
-  {\b git-blame
-   \s git-stage-hunk
-   \u git-unstage-hunk})
 
 (def ^:private nav-keys {:return nav-jump})
 
@@ -1725,7 +746,7 @@
 
 (defn- cli-format [s]
   (let [b (cur s)
-        out (cli-formatted-text b)]
+        out (files/cli-formatted-text b)]
     (cond
       (nil? (:language b)) (msg s "No formatter for this buffer")
       out (-> s (update-cur #(buf/replace-text % out)) (msg "Formatted"))
@@ -1735,7 +756,7 @@
   "C-c f: format with the language server when it is installed, else with the
    language's CLI formatter."
   [s]
-  (let [sess (lsp-session s)]
+  (let [sess (language/lsp-session s)]
     (if (and sess (not (:large-file (cur s))) (lsp/on-path? (:argv sess)))
       (lsp-format s)
       (cli-format s))))
@@ -1822,100 +843,101 @@
 
 (declare bookmark-set bookmark-jump recentf-open)
 
-(defn- cmd-entry [f doc] {:fn f :doc doc})
+(defn- builtin-command-specs []
+  [["forward-char" forward-char "Move point forward one character." "C-f" "<right>"]
+   ["backward-char" backward-char "Move point backward one character." "C-b" "<left>"]
+   ["next-line" next-line "Move to the next line." "C-n" "<down>"]
+   ["previous-line" previous-line "Move to the previous line." "C-p" "<up>"]
+   ["beginning-of-line" beginning-of-line "Move to start of current line." "C-a" "<home>"]
+   ["end-of-line" end-of-line "Move to end of current line." "C-e" "<end>"]
+   ["forward-word" forward-word "Move forward one word." "M-f"]
+   ["backward-word" backward-word "Move backward one word." "M-b"]
+   ["beginning-of-buffer" beginning-of-buffer "Move to start of buffer." "M-<"]
+   ["end-of-buffer" end-of-buffer "Move to end of buffer." "M->"]
+   ["scroll-down" scroll-down "Scroll forward one page." "C-v" "<next>"]
+   ["scroll-up" scroll-up "Scroll backward one page." "M-v" "<prior>"]
+   ["insert-newline" insert-newline "Insert a newline at point." "RET"]
+   ["upcase-region" upcase-region "Convert the region to uppercase." "C-x C-u"]
+   ["downcase-region" downcase-region "Convert the region to lowercase." "C-x C-l"]
+   ["capitalize-region" capitalize-region "Capitalize words in the region."]
+   ["mark-whole-buffer" mark-whole-buffer "Select the whole buffer." "C-x h"]
+   ["exchange-point-and-mark" exchange-point-and-mark "Exchange point and mark." "C-x C-x"]
+   ["transpose-chars" transpose-chars "Transpose characters around point." "C-t"]
+   ["transpose-lines" transpose-lines "Transpose this line and the previous line." "C-x C-t"]
+   ["comment-region" comment-region "Comment each line in the region." "M-;"]
+   ["delete-char" delete-char "Delete the character after point." "C-d"]
+   ["delete-backward-char" delete-backward-char "Delete the character before point." "DEL"]
+   ["kill-line" kill-line "Kill from point to end of line." "C-k"]
+   ["kill-region" kill-region "Kill the region between mark and point." "C-w"]
+   ["yank" yank "Reinsert the most recent kill." "C-y"]
+   ["set-mark" set-mark "Set the mark at point." "C-SPC" "C-@"]
+   ["undo" undo "Undo the last change." "C-/"]
+   ["redo" redo "Redo the last undone change." "M-/"]
+   ["keyboard-quit" keyboard-quit "Cancel the current input or minibuffer." "C-g"]
+   ["save-buffer" save-buffer "Save the current buffer to its file." "C-x C-s"]
+   ["split-window-below" split-window-below "Split the current window into top and bottom." "C-x 2"]
+   ["split-window-right" split-window-right "Split the current window into left and right." "C-x 3"]
+   ["other-window" other-window "Switch to the next window." "C-x o"]
+   ["delete-window" delete-window "Delete the current window." "C-x 0"]
+   ["delete-other-windows" delete-other-windows "Delete all windows except the current one." "C-x 1"]
+   ["enlarge-window" enlarge-window "Make the current window one row taller." "C-x ^"]
+   ["shrink-window" shrink-window "Make the current window one row shorter."]
+   ["enlarge-window-horizontally" enlarge-window-horizontally "Make the current window one column wider." "C-x }"]
+   ["shrink-window-horizontally" shrink-window-horizontally "Make the current window one column narrower." "C-x {"]
+   ["bookmark-set" bookmark-set "Save point as a named bookmark." "C-x r m"]
+   ["bookmark-jump" bookmark-jump "Jump to a named bookmark." "C-x r b"]
+   ["recentf-open" recentf-open "Open a recently visited file."]
+   ["name-last-kbd-macro" name-last-kbd-macro-cmd "Save the last recorded macro under a name."]
+   ["execute-kbd-macro" execute-kbd-macro-cmd "Replay a named keyboard macro."]
+   ["query-replace" query-replace-cmd "Interactively replace literal matches." "M-%"]
+   ["query-replace-regexp" query-replace-regexp-cmd "Interactively replace regex matches (use \\1 etc. in replacement)."]
+   ["project-find-file" project-find-file "Find a file in the current project by fuzzy name." "C-x p f"]
+   ["project-search" project-search "Search the current project with ripgrep." "C-x p g"]
+   ["occur" occur-cmd "List lines matching a regex in the current buffer." "M-s o"]
+   ["imenu" imenu "List definitions in the current buffer." "M-i"]
+   ["reload-config" reload-config "Re-run ~/.nesmacs/init.clj."]
+   ["hub" packagehub/open "Explore and manage editor extensions."]
+   ["package-catalog" packagehub/set-source "Set the extension catalog URL or file."]
+   ["package-update-all" packagehub/update-all "Check for and stage all installed package updates."]
+   ["package-upgrade-all" packagehub/update-all "Check for and stage all installed package updates."]
+   ["terminal" terminal-open "Open a terminal buffer running $SHELL." "C-c t"]
+   ["agent" agent-cli "Open a terminal running the AI CLI ($NESMACS_AGENT or claude)."]
+   ["debug" debug-start "Start the language's debug adapter for this file." "C-c d d"]
+   ["debug-breakpoint" debug-breakpoint "Toggle a breakpoint on this line." "C-c d b"]
+   ["debug-continue" debug-continue "Resume the debuggee." "C-c d c"]
+   ["debug-next" debug-next "Step over the next line." "C-c d n"]
+   ["debug-step-in" debug-step-in "Step into the call on this line." "C-c d i"]
+   ["debug-step-out" debug-step-out "Run until the current frame returns." "C-c d o"]
+   ["debug-stack" debug-stack "Show the frames of the last stop." "C-c d s"]
+   ["debug-variables" debug-variables "Show the locals of the stopped frame." "C-c d v"]
+   ["debug-eval" debug-eval "Evaluate an expression in the stopped frame." "C-c d e"]
+   ["debug-quit" debug-quit "Disconnect the debug session." "C-c d q"]
+   ["load-theme" load-theme "Switch the colour palette (default, light)."]
+   ["complete-symbol-at-point" complete-symbol-at-point "Complete the symbol at point." "C-c i"]
+   ["git-status" git-status "Show git status for the current project." "C-x g"]
+   ["git-commit" gitcommit/commit-at-point "Commit staged changes."]
+   ["git-diff" diff-open-at-point "Show diff for the entry at point."]
+   ["git-log" gitlog/show-commit "Show commit log."]
+   ["git-blame" git-blame "Show blame for the current file." "C-x v b"]
+   ["git-stage-hunk" git-stage-hunk "Stage a hunk of the current file." "C-x v s"]
+   ["git-unstage-hunk" git-unstage-hunk "Unstage a hunk of the current file." "C-x v u"]
+   ["run-tests" run-tests "Run the project's tests and parse TAP/JUnit output."]
+   ["lsp-hover" lsp-hover "Show hover information at point." "C-c h"]
+   ["lsp-definition" lsp-definition "Jump to the definition at point." "M-."]
+   ["lsp-references" lsp-references "List references to the symbol at point." "C-c r"]
+   ["lsp-rename" lsp-rename "Rename the symbol at point across the project." "C-c R"]
+   ["lsp-code-action" lsp-code-action "Choose a code action at point." "C-c a"]
+   ["lsp-signature-help" lsp-signature-help "Show the signature at point." "C-c g"]
+   ["lsp-document-symbols" lsp-document-symbols "List symbols from the language server." "C-c m"]
+   ["format-buffer" format-buffer "Format the buffer (LSP, else CLI)." "C-c f"]
+   ["format-region" lsp-format-region "Format the region through the language server." "C-c F"]
+   ["toggle-format-on-save" toggle-format-on-save "Toggle formatting with the CLI formatter before save."]
+   ["toggle-fold" toggle-fold "Fold or unfold the form at point." "C-c TAB"]
+   ["fold-all" fold-all "Fold every range in the buffer."]
+   ["unfold-all" unfold-all "Unfold every range in the buffer."]])
 
 (defn- builtin-commands []
-  {"forward-char"         (cmd-entry forward-char "Move point forward one character.")
-   "backward-char"        (cmd-entry backward-char "Move point backward one character.")
-   "next-line"            (cmd-entry next-line "Move to the next line.")
-   "previous-line"        (cmd-entry previous-line "Move to the previous line.")
-   "beginning-of-line"    (cmd-entry beginning-of-line "Move to start of current line.")
-   "end-of-line"          (cmd-entry end-of-line "Move to end of current line.")
-   "forward-word"         (cmd-entry forward-word "Move forward one word.")
-   "backward-word"        (cmd-entry backward-word "Move backward one word.")
-   "beginning-of-buffer"  (cmd-entry beginning-of-buffer "Move to start of buffer.")
-   "end-of-buffer"        (cmd-entry end-of-buffer "Move to end of buffer.")
-   "scroll-down"          (cmd-entry scroll-down "Scroll forward one page.")
-   "scroll-up"            (cmd-entry scroll-up "Scroll backward one page.")
-   "insert-newline"       (cmd-entry insert-newline "Insert a newline at point.")
-   "upcase-region"        (cmd-entry upcase-region "Convert the region to uppercase.")
-   "downcase-region"      (cmd-entry downcase-region "Convert the region to lowercase.")
-   "capitalize-region"    (cmd-entry capitalize-region "Capitalize words in the region.")
-   "mark-whole-buffer"    (cmd-entry mark-whole-buffer "Select the whole buffer.")
-   "exchange-point-and-mark" (cmd-entry exchange-point-and-mark "Exchange point and mark.")
-   "transpose-chars"      (cmd-entry transpose-chars "Transpose characters around point.")
-   "transpose-lines"      (cmd-entry transpose-lines "Transpose this line and the previous line.")
-   "comment-region"       (cmd-entry comment-region "Comment each line in the region.")
-   "delete-char"          (cmd-entry delete-char "Delete the character after point.")
-   "delete-backward-char" (cmd-entry delete-backward-char "Delete the character before point.")
-   "kill-line"            (cmd-entry kill-line "Kill from point to end of line.")
-   "kill-region"          (cmd-entry kill-region "Kill the region between mark and point.")
-   "yank"                 (cmd-entry yank "Reinsert the most recent kill.")
-   "set-mark"             (cmd-entry set-mark "Set the mark at point.")
-   "undo"                 (cmd-entry undo "Undo the last change.")
-   "redo"                 (cmd-entry redo "Redo the last undone change.")
-   "keyboard-quit"        (cmd-entry keyboard-quit "Cancel the current input or minibuffer.")
-   "save-buffer"          (cmd-entry save-buffer "Save the current buffer to its file.")
-   "split-window-below"   (cmd-entry split-window-below "Split the current window into top and bottom.")
-   "split-window-right"   (cmd-entry split-window-right "Split the current window into left and right.")
-   "other-window"         (cmd-entry other-window "Switch to the next window.")
-   "delete-window"        (cmd-entry delete-window "Delete the current window.")
-   "delete-other-windows" (cmd-entry delete-other-windows "Delete all windows except the current one.")
-   "enlarge-window"              (cmd-entry enlarge-window "Make the current window one row taller.")
-   "shrink-window"               (cmd-entry shrink-window "Make the current window one row shorter.")
-   "enlarge-window-horizontally" (cmd-entry enlarge-window-horizontally "Make the current window one column wider.")
-   "shrink-window-horizontally"  (cmd-entry shrink-window-horizontally "Make the current window one column narrower.")
-   "bookmark-set"                (cmd-entry bookmark-set "Save point as a named bookmark.")
-   "bookmark-jump"               (cmd-entry bookmark-jump "Jump to a named bookmark.")
-   "recentf-open"                (cmd-entry recentf-open "Open a recently visited file.")
-   "name-last-kbd-macro"         (cmd-entry name-last-kbd-macro-cmd "Save the last recorded macro under a name.")
-   "execute-kbd-macro"           (cmd-entry execute-kbd-macro-cmd "Replay a named keyboard macro.")
-   "query-replace"               (cmd-entry query-replace-cmd "Interactively replace literal matches.")
-   "query-replace-regexp"        (cmd-entry query-replace-regexp-cmd "Interactively replace regex matches (use \\1 etc. in replacement).")
-   "project-find-file"           (cmd-entry project-find-file "Find a file in the current project by fuzzy name.")
-   "project-search"              (cmd-entry project-search "Search the current project with ripgrep.")
-   "occur"                       (cmd-entry occur-cmd "List lines matching a regex in the current buffer.")
-   "imenu"                       (cmd-entry imenu "List definitions in the current buffer.")
-   "reload-config"               (cmd-entry reload-config "Re-run ~/.nesmacs/init.clj.")
-   "hub"                         (cmd-entry packagehub/open "Explore and manage editor extensions.")
-   "package-catalog"             (cmd-entry packagehub/set-source "Set the extension catalog URL or file.")
-   "package-update-all"          (cmd-entry packagehub/update-all "Check for and stage all installed package updates.")
-   "package-upgrade-all"         (cmd-entry packagehub/update-all "Check for and stage all installed package updates.")
-   "terminal"                    (cmd-entry terminal-open "Open a terminal buffer running $SHELL.")
-   "agent"                       (cmd-entry agent-cli "Open a terminal running the AI CLI ($NESMACS_AGENT or claude).")
-   "debug"                       (cmd-entry debug-start "Start the language's debug adapter for this file.")
-   "debug-breakpoint"            (cmd-entry debug-breakpoint "Toggle a breakpoint on this line.")
-   "debug-continue"              (cmd-entry debug-continue "Resume the debuggee.")
-   "debug-next"                  (cmd-entry debug-next "Step over the next line.")
-   "debug-step-in"               (cmd-entry debug-step-in "Step into the call on this line.")
-   "debug-step-out"              (cmd-entry debug-step-out "Run until the current frame returns.")
-   "debug-stack"                 (cmd-entry debug-stack "Show the frames of the last stop.")
-   "debug-variables"             (cmd-entry debug-variables "Show the locals of the stopped frame.")
-   "debug-eval"                  (cmd-entry debug-eval "Evaluate an expression in the stopped frame.")
-   "debug-quit"                  (cmd-entry debug-quit "Disconnect the debug session.")
-   "load-theme"                  (cmd-entry load-theme "Switch the colour palette (default, light).")
-   "complete-symbol-at-point"    (cmd-entry complete-symbol-at-point "Complete the symbol at point.")
-   "git-status"                  (cmd-entry git-status "Show git status for the current project.")
-   "git-commit"                  (cmd-entry gitcommit/commit-at-point "Commit staged changes.")
-   "git-diff"                    (cmd-entry diff-open-at-point "Show diff for the entry at point.")
-   "git-log"                     (cmd-entry gitlog/show-commit "Show commit log.")
-   "git-blame"                   (cmd-entry git-blame "Show blame for the current file.")
-   "git-stage-hunk"              (cmd-entry git-stage-hunk "Stage a hunk of the current file.")
-   "git-unstage-hunk"            (cmd-entry git-unstage-hunk "Unstage a hunk of the current file.")
-   "run-tests"                   (cmd-entry run-tests "Run the project's tests and parse TAP/JUnit output.")
-   "lsp-hover"                   (cmd-entry lsp-hover "Show hover information at point.")
-   "lsp-definition"              (cmd-entry lsp-definition "Jump to the definition at point.")
-   "lsp-references"              (cmd-entry lsp-references "List references to the symbol at point.")
-   "lsp-rename"                  (cmd-entry lsp-rename "Rename the symbol at point across the project.")
-   "lsp-code-action"             (cmd-entry lsp-code-action "Choose a code action at point.")
-   "lsp-signature-help"          (cmd-entry lsp-signature-help "Show the signature at point.")
-   "lsp-document-symbols"        (cmd-entry lsp-document-symbols "List symbols from the language server.")
-   "format-buffer"               (cmd-entry format-buffer "Format the buffer (LSP, else CLI).")
-   "format-region"               (cmd-entry lsp-format-region "Format the region through the language server.")
-   "toggle-format-on-save"       (cmd-entry toggle-format-on-save "Toggle formatting with the CLI formatter before save.")
-   "toggle-fold"                 (cmd-entry toggle-fold "Fold or unfold the form at point.")
-   "fold-all"                    (cmd-entry fold-all "Fold every range in the buffer.")
-   "unfold-all"                  (cmd-entry unfold-all "Unfold every range in the buffer.")})
+  (into {} (map (fn [[name f doc]] [name {:fn f :doc doc}])) (builtin-command-specs)))
 
 (defn- register-builtin-commands [s]
   (assoc s :commands (builtin-commands)))
@@ -1992,8 +1014,6 @@
    \s     copy-to-register
    \i     insert-register
    \w     window-configuration-to-register
-   \m     bookmark-set
-   \b     bookmark-jump
    \k     rect/kill-rectangle
    \M     rect/copy-rectangle
    \y     rect/yank-rectangle
@@ -2001,68 +1021,33 @@
    \t     (prompt "String rectangle: " rect/string-rectangle)})
 
 (def bindings
-  {[:ctrl \f] forward-char     [:ctrl \b] backward-char
-   [:ctrl \n] next-line        [:ctrl \p] previous-line
-   [:ctrl \a] beginning-of-line [:ctrl \e] end-of-line
-   [:meta \f] forward-word     [:meta \b] backward-word
-   [:meta \<] beginning-of-buffer [:meta \>] end-of-buffer
-   :up previous-line :down next-line :right forward-char :left backward-char
-   :home beginning-of-line :end end-of-line
-   :page-down scroll-down :page-up scroll-up
-   [:ctrl \v] scroll-down [:meta \v] scroll-up
-   [:meta \g] (prompt "Goto line: " goto-line)
-   [:meta \i] imenu
-   [:meta \s] {\o occur-cmd}
-   [:meta \:] (prompt "Eval: " eval-expression)
-   [:meta \x] (prompt "M-x " execute-extended-command command-completer)
-   [:meta \.] lsp-definition
-   [:meta \%] (prompt "Query replace: " query-replace)
-   [:meta \!] (prompt "Shell command: " async-shell-command)
-   [:meta \|] (prompt "Shell command on region: " shell-command-on-region)
-   :return insert-newline
-   [:ctrl \d] delete-char :backspace delete-backward-char
-   [:ctrl \k] kill-line [:ctrl \w] kill-region
-   [:ctrl \y] yank [:ctrl \space] set-mark [:ctrl \@] set-mark
-   [:ctrl \s] #(isearch-start % :forward)
-   [:ctrl \r] #(isearch-start % :backward)
-   [:ctrl \/] undo [:meta \/] redo [:ctrl \g] keyboard-quit
-   [:ctrl \u] universal-argument
-   [:ctrl \t] transpose-chars
-   [:ctrl \l] recenter
-   [:ctrl \z] suspend
-   [:meta \;] comment-region
-   [:ctrl \h] {\k describe-key
-               \f (prompt "Describe function: " describe-function command-completer)
-               \v (prompt "Describe variable: " describe-variable)}
-      [:ctrl \c] cx-c-map
-[:ctrl \x] {[:ctrl \s] save-buffer
-               [:ctrl \f] (prompt "Find file: " find-file mini/file-completer)
-               [:ctrl \b] buflist/open
-               [:ctrl \c] confirm-quit
-               [:ctrl \x] exchange-point-and-mark
-               [:ctrl \u] upcase-region
-               [:ctrl \l] downcase-region
-               [:ctrl \t] transpose-lines
-               \b         (prompt "Buffer: " switch-buffer)
-               \d         (prompt "Dired: " dired/open mini/file-completer)
-               \h         mark-whole-buffer
-               \k         (prompt "Kill buffer: " kill-buffer)
-               \r         cx-r-map
-                \p         {\f project-find-file
-                            \g project-search}
-               \g         git-status
-               \v         cx-v-map
-               \0         delete-window
-               \1         delete-other-windows
-               \2         split-window-below
-               \3         split-window-right
-               \o         other-window
-               \{         shrink-window-horizontally
-               \}         enlarge-window-horizontally
-               \^         enlarge-window
-               \(         start-kbd-macro
-               \)         end-kbd-macro
-               \e         call-last-kbd-macro}})
+  (reduce (fn [keymap [_ f _ & paths]]
+            (reduce (fn [m path] (keymap/bind m [] (keymap/parse-key-string path) f))
+                    keymap paths))
+          {[:meta \g] (prompt "Goto line: " goto-line)
+           [:meta \:] (prompt "Eval: " eval-expression)
+           [:meta \x] (prompt "M-x " execute-extended-command command-completer)
+           [:meta \!] (prompt "Shell command: " async-shell-command)
+           [:meta \|] (prompt "Shell command on region: " shell-command-on-region)
+           [:ctrl \s] #(isearch-start % :forward)
+           [:ctrl \r] #(isearch-start % :backward)
+           [:ctrl \u] universal-argument
+           [:ctrl \l] recenter
+           [:ctrl \z] suspend
+           [:ctrl \h] {\k describe-key
+                       \f (prompt "Describe function: " describe-function command-completer)
+                       \v (prompt "Describe variable: " describe-variable)}
+           [:ctrl \x] {[:ctrl \f] (prompt "Find file: " find-file mini/file-completer)
+                       [:ctrl \b] buflist/open
+                       [:ctrl \c] confirm-quit
+                       \b (prompt "Buffer: " switch-buffer)
+                       \d (prompt "Dired: " dired/open mini/file-completer)
+                       \k (prompt "Kill buffer: " kill-buffer)
+                       \r cx-r-map
+                       \( start-kbd-macro
+                       \) end-kbd-macro
+                       \e call-last-kbd-macro}}
+          (builtin-command-specs)))
 
 (def ^:private terminal-prefix
   "C-c is the only key the editor keeps inside a terminal. C-c C-c interrupts
@@ -2103,7 +1088,7 @@
              ;; terminal it belongs to the process, not to the read-only buffer.
              (and (vector? key) (= :paste (first key)))
              (cond
-               (:isearch s) (isearch-append s (buf/normalize-eol (second key)))
+               (:isearch s) (search/isearch-append s (buf/normalize-eol (second key)))
                (= :terminal-mode (:mode (cur s))) (terminal/input s key)
                :else (cmd/insert-at-point s (buf/normalize-eol (second key)) true))
 
@@ -2118,9 +1103,9 @@
              (dispatch-binding (dissoc s :pending) key (get (:pending s) key) true)
 
              (:query-replace s)
-             (let [h (get qr-keys key)] ((or h qr-exit) s))
+             (search/handle-replace s key)
 
-             (:isearch s) (handle-isearch s key)
+             (:isearch s) (search/handle-isearch s key handle-key)
 
              ;; minibuffer-scoped keys
              (and (:mini s) (mini/keymap key)) ((mini/keymap key) s)
@@ -2182,24 +1167,27 @@
     (compare-and-set! editor snapshot updated)
     viewports))
 
+(defn- commit-key! [key size clipboard!]
+  (let [[before after] (swap-vals! editor
+                         (fn [s]
+                           (if size
+                             (merge (run-key (merge s size) key) (select-keys s [:rows :cols]))
+                             (run-key s key))))]
+    (when-let [clip (cmd/new-clipboard-text before after)]
+      (clipboard! clip))
+    (session/journal-tick! editor)))
+
 (defn command-loop [{:keys [active? input! render!]}]
   (loop [last-viewports nil]
     (when-let [[rows cols] (t/apply-pending-resize!)]
       (swap! editor assoc :rows rows :cols cols))
     (let [viewports (or (render-terminal!) last-viewports)
           key (t/read-key-timeout (if (and active? (active?)) 16 100))]
-      (when key
-        (let [event (if (and (map? key) (= :mouse (:type key)))
-                      (assoc key :viewports viewports)
-                      key)
-              [before after] (swap-vals! editor run-key event)]
-          (when-let [clip (cmd/new-clipboard-text before after)]
-            (t/set-clipboard! clip))))
-      ;; Persist text edits since the last command, not just on the 5s
-      ;; snapshot: this is what makes kill -9 lose at most the command in
-      ;; flight. Runs outside swap! because it does IO.
-      (session/journal-tick! editor)
-      (when input! (input! #(session/journal-tick! editor)))
+      (if key
+        (commit-key! (if (= :mouse (:type key)) (assoc key :viewports viewports) key)
+                     nil t/set-clipboard!)
+        (session/journal-tick! editor))
+      (when input! (input!))
       (api/run-effects! editor)
       ;; Suspend runs here, outside swap!, so no state lock is held while
       ;; stopped. The flag is cleared first so resume doesn't stop again.
@@ -2213,13 +1201,11 @@
         (when (seq drained) (swap! editor job/apply-drain drained)))
       (terminal/tick! editor tmux/backend)
       (complete/tick! editor)
-      (auto-save-tick! editor)
+      (files/auto-save-tick! editor)
       (session/save-tick! editor)
       (lsp/tick! editor)
-      (testres/tick! editor)
-      (gitcommit/tick! editor)
+      (job/consume-results! editor)
       (dap/tick! editor)
-      (deferred/tick! editor)
       (packagehub/tick! editor)
       (view/use-theme! (:theme @editor))
       (when (and render! (not (:exit @editor))) (render!))
@@ -2291,7 +1277,7 @@
 
 (defn- sanitize-persisted [bookmarks recentf history]
   {:bookmarks (session/sanitize-bookmarks bookmarks)
-   :recentf (vec (take recentf-limit (session/sanitize-strings recentf)))
+   :recentf (vec (take files/recentf-limit (session/sanitize-strings recentf)))
    :mini-history (session/sanitize-strings history)})
 
 (defn- load-persisted-state!
@@ -2323,7 +1309,7 @@
   "Start the local web client. A taken port or load failure disables the client."
   []
   (try (let [port (Integer/parseInt (or (System/getenv "NESMACS_WEB_PORT") "1234"))]
-         ((requiring-resolve 'nesmacs.web/start!) editor port run-key))
+         ((requiring-resolve 'nesmacs.web/start!) editor port commit-key!))
        (catch Exception e
          (log/log "web: disabled:" (.getMessage e))
          nil)))
@@ -2387,7 +1373,7 @@
       (reset! editor (-> @editor packages/initialize! packagehub/restore))
       (load-init-files!)
       (when (seq paths) (swap! editor open-launch-paths paths))
-      (swap! editor recover-ask (pending-recoveries))
+      (swap! editor files/recover-ask (files/pending-recoveries))
       ;; Baseline snapshot: the journal needs a version to replay from even if
       ;; the editor dies before the first periodic save.
       (session/save-session! @editor)

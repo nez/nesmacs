@@ -1,5 +1,6 @@
 (ns nesmacs.git-test
   (:require [clojure.test :refer [deftest is]]
+            [nesmacs.api :as api]
             [nesmacs.buf :as buf]
             [nesmacs.cmd :as cmd]
             [nesmacs.ed :as ed]
@@ -49,10 +50,11 @@
                                      "")]
       (let [s (githunk/refresh s)
             s (cmd/update-cur s #(assoc % :point (gap/nth-line-start (:text %) 1)))
-            result (githunk/unstage s)]
-        (is (= "Unstaged hunk 0" (:msg result)))
+            result (atom (githunk/unstage s))]
+        (api/run-effects! result)
+        (is (= "Unstaged hunk 0" (:msg @result)))
         (is (= [(assoc hunk :path path :staged true)]
-               (:listbuf-entries (cmd/cur result))))))))
+               (:listbuf-entries (cmd/cur @result))))))))
 
 (deftest blame-parses-line-porcelain
   (let [dir (tu/temp-dir "nesmacs-blame")

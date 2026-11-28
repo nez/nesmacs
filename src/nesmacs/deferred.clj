@@ -9,29 +9,18 @@
             [nesmacs.job :as job]
             [nesmacs.listbuf :as listbuf]))
 
+(defn- finish [build return-to b]
+  (let [result (try (build (str (:text b)))
+                    (catch Exception e (str "Error: " (.getMessage e))))]
+    (fn [s name]
+      (let [s (cmd/remove-buffer s name return-to)]
+        (cond
+          (string? result) (cmd/msg s result)
+          (vector? result) (let [[buf-name spec] result] (listbuf/open s buf-name spec))
+          :else s)))))
+
 (defn start
-  "Start `argv` in `dir` as a job named `job-name`. `build` runs once the job
-   exits, on the editor loop."
+  "Start a job whose finished output is turned into a list buffer or message."
   [s {:keys [argv dir job-name build]}]
   (job/start s {:argv argv :dir dir :buf-name job-name
-                :buffer-fields {:deferred build :deferred-return (:buf s)}}))
-
-(defn- pending? [b]
-  (and (:deferred b)
-       (#{:done :failed} (:job-status b))))
-
-(defn- build-result [b]
-  (try ((:deferred b) (str (:text b)))
-       (catch Exception e (str "Error: " (.getMessage e)))))
-
-(defn- publish-result [s name b result]
-  (let [s (cmd/remove-buffer s name (:deferred-return b))]
-    (cond
-      (string? result) (cmd/msg s result)
-      (vector? result) (let [[buf-name spec] result] (listbuf/open s buf-name spec))
-      :else s)))
-
-(defn tick!
-  "Editor-loop step: finish deferred jobs once."
-  [editor]
-  (job/consume-results! editor pending? build-result publish-result))
+                :on-finish (partial finish build (:buf s))}))

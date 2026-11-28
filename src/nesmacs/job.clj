@@ -57,7 +57,7 @@
   "Set up a job buffer and launch its command after commit. The launch spec
    includes :buffer-fields recreated on each rerun, in addition to :mode and
    :follow-output? (defaults to true)."
-  [s {:keys [argv dir buf-name mode follow-output? buffer-fields]
+  [s {:keys [argv dir buf-name mode follow-output? buffer-fields on-finish]
       :or {follow-output? true}
       :as spec}]
   (let [spec (assoc spec :argv (vec argv))
@@ -66,7 +66,8 @@
               (merge buffer-fields)
               (assoc :mode (or mode :job-mode) :read-only true :journal? false
                      :job-spec spec :job-dir dir :job-status :running
-                     :job-token token :job-follow-output? follow-output?))]
+                     :job-token token :job-follow-output? follow-output?
+                     :job-finish on-finish))]
     (-> s
         (kill-after-command (:job-proc (cmd/buf s buf-name)))
         (assoc-in [:bufs buf-name] b)
@@ -120,19 +121,22 @@
   (apply-drain s (drain! (:bufs s))))
 
 (defn consume-results!
-  "Prepare results for matching job buffers outside the editor swap. Publish
-   only while the same output is still pending. Each run owns a fresh Text,
-   and changes to focus or fontification leave that Text in place."
-  [editor pending? prepare publish]
+  "Prepare the result outside swap! and apply it only to the run that produced it."
+  [editor]
   (doseq [[name b] (:bufs @editor)
-          :when (pending? b)]
-    (let [result (prepare b)]
+          :let [prepare (:job-finish b)]
+          :when (and prepare (#{:done :failed} (:job-status b)))]
+    (let [publish (try (prepare b)
+                       (catch Exception e
+                         (fn [s _] (cmd/msg-error s "Job result failed" e))))]
       (swap! editor
              (fn [s]
                (let [current (cmd/buf s name)]
-                 (if (and (pending? current)
+                 (if (and (identical? prepare (:job-finish current))
+                          (identical? (:job-token b) (:job-token current))
                           (identical? (:text b) (:text current)))
-                   (publish s name current result)
+                   (cond-> (update-in s [:bufs name] dissoc :job-finish)
+                     publish (publish name))
                    s)))))))
 
 (defn kill
@@ -156,7 +160,6 @@
                       (when-let [argv (:job-command b)]
                         {:argv argv :dir (:job-dir b) :buf-name (:name b)
                          :mode (:mode b) :follow-output? (:job-follow-output? b)
-                         :buffer-fields (select-keys b [:test-root :test-report?
-                                                       :deferred :deferred-return])}))]
+                         :on-finish (:job-finish b)}))]
       (start s spec)
       (cmd/msg s "Not a job buffer"))))

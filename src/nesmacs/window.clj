@@ -100,6 +100,9 @@
   [tree path]
   [(get-in tree path) []])
 
+(defn set-buffer [window name]
+  (-> window (assoc :buffer name :scroll 0 :hscroll 0) (dissoc :point :mark)))
+
 (defn replace-buffer
   "Rewrite every leaf whose :buffer is `old` to show `new` instead, dropping
    any saved point/mark so stale coords from the old buffer can't leak in."
@@ -107,7 +110,7 @@
   (cond
     (leaf? tree)
     (if (= (:buffer tree) old)
-      (-> tree (assoc :buffer new :scroll 0 :hscroll 0) (dissoc :point :mark))
+      (set-buffer tree new)
       tree)
     (= :split (:type tree))
     (-> tree

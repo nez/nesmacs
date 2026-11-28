@@ -4,8 +4,9 @@
 
    The tokenizer has no parser behind it, so imenu only sees definitions whose
    keyword and name sit on one line — good enough for Clojure and Lisp."
-  (:require [clojure.string :as str]
+  (:require [nesmacs.cmd :as cmd]
             [nesmacs.face :as face]
+            [nesmacs.files :as files]
             [nesmacs.gap :as gap]
             [nesmacs.listbuf :as listbuf]))
 
@@ -44,45 +45,7 @@
 
 ;; --- Imenu ---
 
-(def ^:private def-keywords
-  #{"defn" "defn-" "def" "defmacro" "defmulti" "defmethod" "defprotocol"
-    "defrecord" "deftype" "defonce" "deftest" "defspec"
-    "defun" "defvar" "defconst" "defcustom" "defgroup" "defsubst"
-    "define-derived-mode" "define-minor-mode"})
-
-(defn- symbol-after
-  "First symbol on `line` at or after `from`, skipping whitespace, opening
-   parens and quote characters."
-  [^String line ^long from]
-  (let [n (.length line)
-        i (loop [i from]
-            (if (and (< i n)
-                     (let [c (.charAt line i)]
-                       (or (Character/isWhitespace c) (= c \() (= c \'))))
-              (recur (inc i)) i))]
-    (when (< i n)
-      (let [end (loop [j i]
-                  (if (and (< j n)
-                           (not (Character/isWhitespace (.charAt line j)))
-                           (not (contains? #{\( \) \[ \] \{ \} \, \" \;}
-                                           (.charAt line j))))
-                    (recur (inc j)) j))]
-        (subs line i end)))))
-
-(defn imenu-symbols
-  [{:keys [mode]} ^String text]
-  (->> (str/split-lines text)
-       (keep-indexed
-         (fn [i line]
-           (let [[toks _] (face/tokenize mode line :normal)]
-             (when-let [name (some (fn [[from to f]]
-                                     (when (and (= :builtin f)
-                                                (contains? def-keywords
-                                                           (subs line from to)))
-                                       (symbol-after line to)))
-                                   toks)]
-               {:line (inc i) :name name}))))
-       vec))
+(def imenu-symbols face/definition-lines)
 
 (defn imenu-buffer [name source symbols]
   (nav-buffer name source (str (count symbols) " symbols") symbols
@@ -95,3 +58,35 @@
   [^String line]
   (when-let [[_ file ln] (re-find #"^([^:]+):(\d+):" line)]
     {:file file :line (Long/parseLong ln)}))
+
+(defn jump
+  "Visit a location from a listing, language server, or debugger."
+  [s root {:keys [file buf line character location-error]}]
+  (let [position #(if line (cmd/goto-line % line (or character 0)) %)]
+    (cond
+      location-error (cmd/msg s location-error)
+      file (let [f (java.io.File. ^String file)
+                 f (if (or (nil? root) (.isAbsolute f)) f (java.io.File. ^String root file))
+                 {:keys [path exists dir?] :as info} (files/file-info (.getPath f))]
+             (if (or (files/file-buffer-key s path) (and exists (not dir?)))
+               (let [visited (files/visit s info)]
+                 (if (= path (:file (cmd/cur visited))) (position visited) visited))
+               (cmd/msg s (str "Source file not found: " file))))
+      buf (if (cmd/buf s buf)
+            (position (cmd/set-cur-buffer s buf))
+            (cmd/msg s "Source buffer is gone"))
+      :else (cmd/msg s "This entry has no source location"))))
+
+(defn jump-at-point [s]
+  (let [{:keys [text mode nav-root job-dir]} (cmd/cur s)]
+    (if-let [entry (listbuf/entry-at-point s)]
+      (jump s nav-root entry)
+      (if (= mode :rg-mode)
+        (let [line (cmd/line-idx s)
+              location (rg-line (gap/substr text (gap/nth-line-start text line)
+                                               (gap/nth-line-end text line)))]
+          (cond
+            (nil? location) (cmd/msg s "No search result on this line")
+            (or job-dir nav-root) (jump s (or job-dir nav-root) location)
+            :else (cmd/msg s "Run project search again to open these results")))
+        s))))

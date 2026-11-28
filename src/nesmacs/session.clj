@@ -88,9 +88,8 @@
       ;; derived: it is reused only when the text came from the session, and
       ;; starts empty when the text is reloaded from disk. Props ride along
       ;; only with session text, since their offsets would otherwise be stale.
-      (let [b (-> (buf/make (:name d) (or text "") file)
-                  (assoc :line-ending (or (:line-ending disk) (:line-ending d))
-                         :modified (:modified d)
+      (let [b (-> (buf/make (:name d) (or text "") file (or (:line-ending disk) (:line-ending d)))
+                  (assoc :modified (:modified d)
                          :mode (:mode d)
                          :version (safe-int (:version d))
                          :edit-count (safe-int (:edit-count d))
@@ -454,11 +453,9 @@
                                                             (max 0 (long (if (integer? (:hscroll node))
                                                                            (:hscroll node)
                                                                            0))))]
-                                            (cond-> w
-                                              (integer? (:point node))
-                                              (assoc :point (buf/clamp-pos b (:point node)))
-                                              (integer? (:mark node))
-                                              (assoc :mark (buf/clamp-pos b (:mark node)))))
+                                            (merge w (buf/clamp-window-points
+                                                       b (select-keys node (filter #(integer? (get node %))
+                                                                                   [:point :mark])))))
                                           (win/leaf fallback-buf)))
                                       (assoc (win/split-node (:dir node)
                                                              (walk (:a node))

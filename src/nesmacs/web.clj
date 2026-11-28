@@ -2,7 +2,6 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [org.httpkit.server :as http]
-            [nesmacs.cmd :as cmd]
             [nesmacs.log :as log]
             [nesmacs.term :as t]
             [nesmacs.view :as view])
@@ -109,7 +108,7 @@
                       {:status 403 :body "Open the editor page to connect"})
       :else (serve-asset uri))))
 
-(defn- apply-input! [editor run-key! ch client event]
+(defn- apply-input! [commit-key! ch client event]
   (if (= :resize (:type event))
     (let [size (select-keys event [:rows :cols])]
       (when (not= size (:size @client))
@@ -117,14 +116,9 @@
     (when-let [size (:size @client)]
       (let [mouse? (= :mouse (:type event))]
         (when (or (not mouse?) (:viewports @client))
-          (let [key (if mouse? (assoc event :viewports (:viewports @client)) event)
-                [old new] (swap-vals! editor
-                            (fn [s]
-                              (merge (run-key! (merge s size) key)
-                                     (select-keys s [:rows :cols]))))
-                clip (cmd/new-clipboard-text old new)]
-            (when (and clip (<= (count clip) 100000))
-              (send! ch ["clipboard" clip]))))))))
+          (commit-key! (if mouse? (assoc event :viewports (:viewports @client)) event)
+                       size
+                       #(when (<= (count %) 100000) (send! ch ["clipboard" %]))))))))
 
 (defn- render-clients! [clients state]
   (doseq [[ch client] @clients]
@@ -142,7 +136,7 @@
             (swap! clients dissoc ch)
             (http/close ch)))))))
 
-(defn start! [editor port run-key!]
+(defn start! [editor port commit-key!]
   (let [clients (atom {})
         input (ArrayBlockingQueue. 256)
         srv (http/run-server (partial handler clients input)
@@ -154,12 +148,11 @@
      :active? #(boolean (seq @clients))
      ;; HTTP workers only enqueue. The editor loop owns command execution and
      ;; renders after persisting edits and applying jobs, LSP results and themes.
-     :input! (fn [journal!]
+     :input! (fn []
                (loop [remaining 64]
                  (when (and (pos? remaining) (not (:exit @editor)))
                    (when-let [[ch client event] (.poll input)]
-                     (apply-input! editor run-key! ch client event)
-                     (when-not (= :resize (:type event)) (journal!))
+                     (apply-input! commit-key! ch client event)
                      (recur (dec remaining))))))
      :render! #(render-clients! clients @editor)
      :stop! srv}))

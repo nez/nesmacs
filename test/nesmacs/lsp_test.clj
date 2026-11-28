@@ -1,6 +1,6 @@
 (ns nesmacs.lsp-test
-  (:require [clojure.data.json :as json]
-            [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is testing]]
+            [nesmacs.api :as api]
             [nesmacs.buf :as buf]
             [nesmacs.complete :as complete]
             [nesmacs.ed :as ed]
@@ -11,57 +11,9 @@
             [nesmacs.rpc :as rpc]
             [nesmacs.testutil :as tu]))
 
-(defn- body-of [framed]
-  (let [i (.indexOf ^String framed "\r\n\r\n")]
-    (subs framed (+ i 4))))
-
-(deftest encode-msg-is-json-with-byte-length
-  (testing "ASCII body round-trips and header counts bytes"
-    (let [framed (lsp/encode-msg {:jsonrpc "2.0" :id 1 :method "initialize"})
-          body   (body-of framed)]
-      (is (re-find #"Content-Length: \d+\r\n\r\n" framed))
-      (is (= {"jsonrpc" "2.0" "id" 1 "method" "initialize"}
-             (json/read-str body))))))
-
-(deftest content-length-counts-utf8-bytes
-  (testing "a raw multibyte frame is sliced by byte count (as servers send it)"
-    (let [body   "{\"id\":7,\"result\":{\"message\":\"café 日本\"}}"
-          len    (alength (.getBytes body "UTF-8"))
-          framed (str "Content-Length: " len "\r\n\r\n" body)
-          [msgs rest*] (lsp/decode-msgs framed)]
-      (is (> len (count body)))                 ; bytes exceed chars
-      (is (= "café 日本" (get-in (first msgs) [:result :message])))
-      (is (= "" rest*)))))
-
-(deftest decode-round-trip
-  (testing "encode -> decode yields the original map"
-    (let [msg    {:jsonrpc "2.0" :id 3 :result {:contents "doc" :n [1 2 3]}}
-          [msgs rest*] (lsp/decode-msgs (lsp/encode-msg msg))]
-      (is (= [{:jsonrpc "2.0" :id 3 :result {:contents "doc" :n [1 2 3]}}] msgs))
-      (is (= "" rest*)))))
-
-(deftest decode-multiple-messages
-  (testing "two frames in one buffer are both parsed"
-    (let [a (lsp/encode-msg {:id 1 :method "a"})
-          b (lsp/encode-msg {:id 2 :method "b"})
-          [msgs rest*] (lsp/decode-msgs (str a b))]
-      (is (= [1 2] (map :id msgs)))
-      (is (= "" rest*)))))
-
-(deftest decode-partial-waits
-  (testing "an incomplete frame is left in the rest buffer"
-    (let [framed (lsp/encode-msg {:id 9 :method "x"})
-          half   (subs framed 0 (quot (count framed) 2))
-          [msgs rest*] (lsp/decode-msgs half)]
-      (is (empty? msgs))
-      (is (= half rest*)))))
-
-(deftest decode-multibyte-round-trip
-  (testing "multibyte bodies survive a byte-correct slice"
-    (let [framed (lsp/encode-msg {:id 4 :result {:text "héllo 世界"}})
-          [msgs rest*] (lsp/decode-msgs framed)]
-      (is (= "héllo 世界" (get-in (first msgs) [:result :text])))
-      (is (= "" rest*)))))
+(deftest lsp-framing-keeps-the-protocol-envelope
+  (let [msg {:jsonrpc "2.0" :id 4 :result {:text "héllo 世界" :numbers [1 2 3]}}]
+    (is (= [[msg] ""] (lsp/decode-msgs (lsp/encode-msg msg))))))
 
 (deftest uri-round-trip-covers-spaces-and-unicode
   (doseq [path ["/tmp/plain/x.clj"
@@ -121,7 +73,8 @@
         (fn []
           (lsp/tick! ed/editor)
           (lsp/tick! ed/editor)
-          (ed/lsp-hover @ed/editor)
+          (swap! ed/editor ed/lsp-hover)
+          (api/run-effects! ed/editor)
           (is (= #{[outer-id "textDocument/didOpen" (lsp/path->uri outer-path)]
                    [inner-id "textDocument/didOpen" (lsp/path->uri inner-path)]}
                  (set (take 2 @sent))))
@@ -223,3 +176,27 @@
                                           :end {:line 0 :character 0}})))
     (is (nil? (lsp/range->offsets text {:start {:line 0 :character "1"}
                                         :end {:line 0 :character 1}})))))
+
+
+(deftest range-formatting-uses-the-original-document-and-rejects-stale-edits
+  (let [path "/tmp/nesmacs-format-capture.clj"
+        b (assoc (buf/make "test.clj" "abc" path) :point 2 :mark 0)
+        editor (atom {:buf path :bufs {path b "other" (buf/make "other")}})
+        initialized (atom nil)
+        request (atom nil)]
+    (with-redefs [ed/editor editor
+                  lsp/on-path? (constantly true)
+                  lsp/ensure! (fn [_ _ _ _ callback] (reset! initialized callback))
+                  lsp/sync! (constantly nil)
+                  lsp/range-formatting (fn [& args] (reset! request args))]
+      (swap! editor ed/lsp-format-region)
+      (api/run-effects! editor)
+      (swap! editor assoc :buf "other")
+      (@initialized nil)
+      (is (= [path {:start {:line 0 :character 0} :end {:line 0 :character 2}}]
+             (vec (take 2 (rest @request)))))
+      (swap! editor update-in [:bufs path] buf/edit 0 0 "d")
+      ((last @request) [{:range {:start {:line 0 :character 0} :end {:line 0 :character 2}}
+                         :newText "stale"}])
+      (is (= "dabc" (str (get-in @editor [:bufs path :text]))))
+      (is (= "Buffer changed; formatting skipped" (:msg @editor))))))

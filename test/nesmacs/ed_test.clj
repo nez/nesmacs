@@ -7,12 +7,14 @@
             [nesmacs.buf :as buf]
             [nesmacs.complete :as complete]
             [nesmacs.ed :as ed]
+            [nesmacs.files :as files]
             [nesmacs.mini :as mini]
             [nesmacs.job :as job]
             [nesmacs.lsp :as lsp]
             [nesmacs.nav :as nav]
             [nesmacs.persist :as persist]
             [nesmacs.rect :as rect]
+            [nesmacs.search :as search]
             [nesmacs.session :as session]
             [nesmacs.term :as term]
             [nesmacs.dap :as dap]
@@ -570,56 +572,56 @@
 ;; --- Query replace ---
 
 (deftest query-replace-begin-positions-at-first-match
-  (let [s (#'nesmacs.ed/query-replace-begin (make-state "hello world hello" 0) "hello" "HI" false)]
+  (let [s (#'search/query-replace-begin (make-state "hello world hello" 0) "hello" "HI" false)]
     (is (= "hello" (get-in s [:query-replace :from])))
     (is (= "HI" (get-in s [:query-replace :to])))
     (is (= 0 (:count (:query-replace s))))
     (is (= 0 (:point (ed/cur s))))))
 
 (deftest query-replace-begin-no-match
-  (let [s (#'nesmacs.ed/query-replace-begin (make-state "hello" 0) "zzz" "!" false)]
+  (let [s (#'search/query-replace-begin (make-state "hello" 0) "zzz" "!" false)]
     (is (nil? (:query-replace s)))
     (is (= "No match" (:msg s)))))
 
 (deftest qr-advance-skips-the-current-match
   ;; Regression: `n` searched from point, which is the *start* of the match
   ;; already displayed, so it kept re-finding the same occurrence forever.
-  (let [s0 (#'nesmacs.ed/query-replace-begin (make-state "foo foo foo" 0) "foo" "XY" false)
-        s1 (#'nesmacs.ed/qr-advance s0)
-        s2 (#'nesmacs.ed/qr-advance s1)]
+  (let [s0 (#'search/query-replace-begin (make-state "foo foo foo" 0) "foo" "XY" false)
+        s1 (#'search/qr-advance s0)
+        s2 (#'search/qr-advance s1)]
     (is (= 0 (point s0)))
     (is (= 4 (point s1)))
     (is (= 8 (point s2)))
     (is (= "foo foo foo" (text s2)))))
 
 (deftest qr-replace-here-replaces-and-advances
-  (let [s0 (#'nesmacs.ed/query-replace-begin (make-state "foo foo foo" 0) "foo" "XY" false)
-        s1 (#'nesmacs.ed/qr-replace-here s0)]
+  (let [s0 (#'search/query-replace-begin (make-state "foo foo foo" 0) "foo" "XY" false)
+        s1 (#'search/qr-replace-here s0)]
     (is (= "XY foo foo" (text s1)))
     (is (= 3 (:point (ed/cur s1))))
     (is (= 1 (get-in s1 [:query-replace :count])))))
 
 (deftest qr-replace-all
-  (let [s0 (#'nesmacs.ed/query-replace-begin (make-state "a.a.a" 0) "a" "B" false)
-        s1 (#'nesmacs.ed/qr-replace-all s0)]
+  (let [s0 (#'search/query-replace-begin (make-state "a.a.a" 0) "a" "B" false)
+        s1 (#'search/qr-replace-all s0)]
     (is (= "B.B.B" (text s1)))
     (is (nil? (:query-replace s1)))
     (is (.contains ^String (:msg s1) "3"))))
 
 (deftest qr-exit-clears-state
-  (let [s0 (#'nesmacs.ed/query-replace-begin (make-state "abc abc" 0) "abc" "!" false)
-        s1 (#'nesmacs.ed/qr-exit s0)]
+  (let [s0 (#'search/query-replace-begin (make-state "abc abc" 0) "abc" "!" false)
+        s1 (#'search/qr-exit s0)]
     (is (nil? (:query-replace s1)))))
 
 (deftest qr-regexp-uses-groups
-  (let [s0 (#'nesmacs.ed/query-replace-begin (make-state "a1 b2 c3" 0) "([a-z])(\\d)" "\\2\\1" true)
-        s1 (#'nesmacs.ed/qr-replace-all s0)]
+  (let [s0 (#'search/query-replace-begin (make-state "a1 b2 c3" 0) "([a-z])(\\d)" "\\2\\1" true)
+        s1 (#'search/qr-replace-all s0)]
     (is (= "1a 2b 3c" (text s1)))
     (is (.contains ^String (:msg s1) "3"))))
 
 (deftest qr-regexp-end-state-match-count
-  (let [s0 (#'nesmacs.ed/query-replace-begin (make-state "aaa" 0) "a" "b" true)
-        s1 (#'nesmacs.ed/qr-replace-all s0)]
+  (let [s0 (#'search/query-replace-begin (make-state "aaa" 0) "a" "b" true)
+        s1 (#'search/qr-replace-all s0)]
     (is (= "bbb" (text s1)))
     (is (.contains ^String (:msg s1) "3"))))
 
@@ -627,13 +629,13 @@
   ;; Regression: a zero-width match (e.g. $) paired with an empty
   ;; replacement left point un-advanced and the replacer refound the same
   ;; match forever. qr-replace-here now nudges point past the zero match.
-  (let [s0 (#'nesmacs.ed/query-replace-begin (make-state "abc\ndef" 0) "$" "" true)
-        s1 (#'nesmacs.ed/qr-replace-all s0)]
+  (let [s0 (#'search/query-replace-begin (make-state "abc\ndef" 0) "$" "" true)
+        s1 (#'search/qr-replace-all s0)]
     (is (= "abc\ndef" (text s1)))
     (is (nil? (:query-replace s1)))))
 
 (deftest query-replace-reports-invalid-regexp
-  (let [s (#'nesmacs.ed/query-replace-begin (make-state "abc") "[" "x" true)]
+  (let [s (#'search/query-replace-begin (make-state "abc") "[" "x" true)]
     (is (.startsWith ^String (:msg s) "Invalid regexp:"))
     (is (nil? (:query-replace s)))))
 
@@ -703,7 +705,7 @@
                    (assoc-in [:bufs "*test*" :file] path)
                    (assoc-in [:bufs "*test*" :edit-count] 500))
             s1 (ed/auto-save! s0)]
-        (let [bak (java.io.File. (#'nesmacs.ed/auto-save-path path))]
+        (let [bak (java.io.File. (#'files/auto-save-path path))]
           (is (.exists bak))
           (is (= "modified content" (slurp bak)))
           (is (= 0 (get-in s1 [:bufs "*test*" :edit-count])))
@@ -729,7 +731,7 @@
   (let [f (java.io.File/createTempFile "nesmacs-sas-" ".txt")]
     (try
       (let [path (.getAbsolutePath f)
-            bak (java.io.File. (#'nesmacs.ed/auto-save-path path))
+            bak (java.io.File. (#'files/auto-save-path path))
             _   (spit bak "stale")
             s   (-> (make-state "hello" 0)
                     (assoc-in [:bufs "*test*" :file] path))
@@ -1077,7 +1079,7 @@
     (is (empty? (:props b2)))))
 
 (deftest query-replace-highlights-current-match-and-clears-on-exit
-  (let [s  (#'nesmacs.ed/query-replace-begin (make-state "a b a" 0) "a" "X" false)
+  (let [s  (#'search/query-replace-begin (make-state "a b a" 0) "a" "X" false)
         b  (ed/cur s)]
     (is (= [0 1] [(-> b :props first :from) (-> b :props first :to)]))
     (is (empty? (:props (ed/cur (ed/handle-key s \q)))))))
@@ -1100,9 +1102,9 @@
     (try
       (spit f "saved")
       (let [path (.getCanonicalPath f)
-            bak  (java.io.File. (#'nesmacs.ed/auto-save-path path))]
+            bak  (java.io.File. (#'files/auto-save-path path))]
         (spit bak "unsaved")
-        (let [s (#'nesmacs.ed/recover-file (make-state "" 0) path)]
+        (let [s (#'files/recover-file (make-state "" 0) path)]
           (is (= "unsaved" (str (:text (ed/cur s)))))
           (is (:modified (ed/cur s)))
           (is (clojure.string/includes? (:msg s) "Recovered"))))
@@ -1116,7 +1118,7 @@
     (try
       (spit f "saved")
       (let [path (.getCanonicalPath f)
-            bak  (java.io.File. (#'nesmacs.ed/auto-save-path path))]
+            bak  (java.io.File. (#'files/auto-save-path path))]
         (spit bak "unsaved")
         (let [s  (-> (ed/find-file (make-state "" 0) path)
                      (update-in [:bufs path]
@@ -1125,7 +1127,7 @@
                                           :props [{:from 0 :to 5 :face :match}]
                                           :undo [{:from 0 :old "" :new "x"}])))
               v  (get-in s [:bufs path :version])
-              b  (get-in (#'nesmacs.ed/recover-file s path) [:bufs path])]
+              b  (get-in (#'files/recover-file s path) [:bufs path])]
           (is (= "unsaved" (str (:text b))))
           (is (< (long v) (long (:version b))) "version bumps so render caches invalidate")
           (is (= [] (:font-lock b) (:props b) (:undo b)))
@@ -1793,7 +1795,7 @@
   (with-no-disk
     #(let [s  (-> (make-state "" 0)
                   (assoc :recentf (vec (map (fn [n] (str "/f" n)) (range 60)))))
-           s' (#'ed/bump-recentf s "/new")]
+           s' (#'files/bump-recentf s "/new")]
        (is (= 50 (count (:recentf s'))))
        (is (= "/new" (first (:recentf s')))))))
 
@@ -1981,10 +1983,10 @@
     (let [f (str (System/getProperty "java.io.tmpdir") "/nesmacs-ed-bp-"
                  (System/nanoTime) ".py")
           s (assoc-in (make-state "a\nb\nc" 0) [:bufs "*test*" :file] f)
-          s1 (ed/debug-breakpoint s)]
+          s1 (with-effects (ed/debug-breakpoint s))]
       (is (= 1 (count (dap/breakpoints-for f))))
       (is (re-find #"1 breakpoint" (:msg s1)))
-      (let [s2 (ed/debug-breakpoint s1)]
+      (let [s2 (with-effects (ed/debug-breakpoint s1))]
         (is (= 0 (count (dap/breakpoints-for f))))
         (is (re-find #"0 breakpoint" (:msg s2)))))
     (finally (dap/restore-breakpoints! {}))))
@@ -1995,11 +1997,24 @@
     (is (re-find #"Save the buffer first" (:msg s)))
     (is (re-find #"No debug adapter for clojure" (:msg (ed/debug-start s1))))))
 
+(deftest retrying-a-breakpoint-command-queues-one-toggle
+  (let [editor (atom (assoc-in (make-state "x") [:bufs "*test*" :file] "/tmp/test.py"))
+        attempts (atom 0)
+        toggles (atom 0)]
+    (with-redefs [dap/toggle-breakpoint! (fn [_ _] (swap! toggles inc) [])]
+      (swap! editor (fn [s]
+                      (when (= 1 (swap! attempts inc))
+                        (swap! editor assoc :concurrent true))
+                      (ed/debug-breakpoint s)))
+      (api/run-effects! editor)
+      (is (= 2 @attempts))
+      (is (= 1 @toggles)))))
+
 (deftest debug-commands-without-a-session-report-it
   (let [s (make-state "x" 0)]
-    (is (= "No debug session" (:msg (ed/debug-continue s))))
+    (is (= "No debug session" (:msg (with-effects (ed/debug-continue s)))))
     (is (= "No stack yet" (:msg (ed/debug-stack s))))
-    (is (= "No debug session" (:msg (ed/debug-variables s)))))
+    (is (= "No debug session" (:msg (with-effects (ed/debug-variables s))))))
   (is (re-find #"debug: off" (dap/status-line))))
 
 (deftest workspace-edit-writes-only-unopened-files
@@ -2101,7 +2116,7 @@
         calls (atom 0)
         editor (atom (-> (make-state "") (ed/find-file path)
                          (assoc :format-on-save true)))]
-    (with-redefs-fn {#'ed/cli-formatted-text (fn [_] (swap! calls inc) "formatted\n")}
+    (with-redefs-fn {#'files/cli-formatted-text (fn [_] (swap! calls inc) "formatted\n")}
       (fn []
         (swap! editor ed/save-buffer)
         (is (zero? @calls))

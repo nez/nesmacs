@@ -13,7 +13,7 @@
             [nesmacs.buf :as buf]
             [nesmacs.cmd :as cmd]
             [nesmacs.gap :as gap]
-            [nesmacs.nav :as nav]
+            [nesmacs.face :as face]
             [nesmacs.project :as project]))
 
 ;; --- Sources ---
@@ -126,7 +126,7 @@
            (mapcat (fn [rel]
                      (let [f (java.io.File. ^String root ^String rel)]
                        (when (and (.isFile f) (< (.length f) 200000))
-                         (map :name (nav/imenu-symbols {:mode (file-mode rel)}
+                         (map :name (face/definition-lines {:mode (file-mode rel)}
                                                        (slurp f)))))))
            (remove nil?)
            (distinct)

@@ -199,26 +199,18 @@
                       :extras {:nav-root root}})
        (cmd/msg (str (:failed parsed) " failed / " (:total parsed) " tests")))))
 
-(defn- pending? [b]
-  (and (:test-report? b) (= :done (:job-status b)) (not (:test-parsed? b))))
-
-(defn- parse-report [b]
-  (when-let [parsed (try (parse (str (:text b))) (catch Exception _ nil))]
-    (when (pos? (:total parsed))
-      [parsed (resolve-locations (:test-root b) (failure-entries parsed))])))
-
-(defn- publish-report [s name b report]
-  (let [s (assoc-in s [:bufs name :test-parsed?] true)]
-    (if-let [[parsed entries] report]
-      (show-results s parsed (:test-root b) entries)
-      (cmd/msg s (if (zero? (long (or (:job-exit b) -1)))
-                   "Tests passed (exit 0); the output format had no failure lines"
-                   "Test output not recognized (looked for TAP, JUnit, clojure.test, pytest, or file:line failures)")))))
-
-(defn tick!
-  "Editor-loop step: parse finished test jobs once."
-  [editor]
-  (job/consume-results! editor pending? parse-report publish-report))
+(defn- finish-report [root b]
+  (if (= :failed (:job-status b))
+    (fn [s _] (cmd/msg s (first (str/split-lines (str (:text b))))))
+    (let [parsed (parse (str (:text b)))
+          entries (when (some-> parsed :total pos?)
+                    (resolve-locations root (failure-entries parsed)))]
+      (fn [s _]
+        (if entries
+          (show-results s parsed root entries)
+          (cmd/msg s (if (= 0 (:job-exit b))
+                       "Tests passed (exit 0); the output format had no failure lines"
+                       "Test output not recognized (looked for TAP, JUnit, clojure.test, pytest, or file:line failures)")))))))
 
 ;; --- Command ---
 
@@ -239,4 +231,4 @@
                    (System/getProperty "user.dir"))
           name "*Tests*"]
       (job/start s {:argv ["sh" "-c" cmd] :dir root :buf-name name
-                    :buffer-fields {:test-root root :test-report? true}}))))
+                    :on-finish (partial finish-report root)}))))

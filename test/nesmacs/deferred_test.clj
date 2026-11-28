@@ -8,8 +8,12 @@
             [nesmacs.proc :as proc]
             [nesmacs.window :as win]))
 
+(defn- with-finish [b]
+  (when b
+    (assoc b :job-finish (partial @#'deferred/finish (:deferred b) (:deferred-return b)))))
+
 (defn- state [job-buf]
-  {:bufs {"*job*" job-buf "*prev*" {:name "*prev*" :text "" :point 0}}
+  {:bufs {"*job*" (with-finish job-buf) "*prev*" {:name "*prev*" :text "" :point 0}}
    :buf "*job*"
    :windows (win/leaf "*job*")
    :cur-window []})
@@ -23,7 +27,7 @@
                                     :entries [] :format-entry str}])
              :deferred-return "*prev*"}
         editor (atom (state job))]
-    (deferred/tick! editor)
+    (job/consume-results! editor)
     (let [s @editor]
       (is (contains? (:bufs s) "*list*") "listing built")
       (is (= "*list*" (:buf s)) "listing shown")
@@ -34,7 +38,7 @@
              :deferred (fn [_] "nothing to show")
              :deferred-return "*prev*"}
         editor (atom (state job))]
-    (deferred/tick! editor)
+    (job/consume-results! editor)
     (let [s @editor]
       (is (= "nothing to show" (:msg s)))
       (is (= "*prev*" (:buf s)))
@@ -49,7 +53,7 @@
              :deferred-return "*prev*"}
         s (assoc (state job) :buf " *mini*" :mini {:prompt "M-x: " :prev-buf "*job*"})
         editor (atom s)]
-    (deferred/tick! editor)
+    (job/consume-results! editor)
     (let [s @editor]
       (is (contains? (:bufs s) "*list*") "listing exists")
       (is (= " *mini*" (:buf s)) "focus stays in the prompt")
@@ -58,17 +62,17 @@
 
 (deftest a-finished-job-cannot-publish-over-a-rerun
   (let [editor (atom nil)
-        replacement {:text (gap/of "same output") :job-status :done
-                     :deferred (constantly "new result") :deferred-return "*prev*"}
+        replacement (with-finish {:text (gap/of "same output") :job-status :done
+                     :deferred (constantly "new result") :deferred-return "*prev*"})
         original (assoc replacement :text (gap/of "same output")
                         :deferred (fn [_]
                                     (swap! editor assoc-in [:bufs "*job*"] replacement)
                                     "old result"))]
     (reset! editor (state original))
-    (deferred/tick! editor)
+    (job/consume-results! editor)
     (is (identical? replacement (get-in @editor [:bufs "*job*"])))
     (is (nil? (:msg @editor)))
-    (deferred/tick! editor)
+    (job/consume-results! editor)
     (is (= "new result" (:msg @editor)))
     (is (not (contains? (:bufs @editor) "*job*")))))
 
@@ -77,7 +81,7 @@
              :deferred (fn [_] ["*list*" {:name "*list*" :header "" :entries []
                                           :format-entry str}])}
         editor (atom (state job))]
-    (deferred/tick! editor)
+    (job/consume-results! editor)
     (is (contains? (:bufs @editor) "*job*"))))
 
 (deftest rerunning-a-deferred-job-keeps-its-builder-and-return-buffer
@@ -87,7 +91,7 @@
     (with-redefs [proc/start (constantly {:id 1})]
       (api/run-effects! editor))
     (swap! editor job/apply-drain {"*job*" {:text "result" :exit 0 :proc-id 1}})
-    (deferred/tick! editor)
+    (job/consume-results! editor)
     (is (= "result" (:msg @editor)))
     (is (= "*prev*" (:buf @editor)))
     (is (nil? (cmd/buf @editor "*job*")))))

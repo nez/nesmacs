@@ -24,12 +24,7 @@
   "Point the current window at `name` and cache it as (:buf s). Clears any
    saved point/mark so stale coords from the previous buffer can't leak in."
   [s name]
-  (let [wp (cur-window-path s)]
-    (-> s (assoc :buf name)
-          (update-in wp dissoc :point :mark)
-          (assoc-in (conj wp :buffer) name)
-          (assoc-in (conj wp :scroll) 0)
-          (assoc-in (conj wp :hscroll) 0))))
+  (-> s (assoc :buf name) (update-in (cur-window-path s) win/set-buffer name)))
 
 (defn ensure-buffer
   "Return [state name] for a requested buffer, a visible fallback, or a new scratch buffer."
@@ -71,13 +66,9 @@
    Clamp: two windows can share a buffer, and an edit in the other one may have
    shrunk the text since this window saved its point."
   [s]
-  (let [w (get-in s (cur-window-path s))
-        b (cur s)]
-    (cond-> s
-      (and b (contains? w :point)) (assoc-in [:bufs (:buf s) :point]
-                                             (buf/clamp-pos b (:point w)))
-      (and b (contains? w :mark))  (assoc-in [:bufs (:buf s) :mark]
-                                             (buf/clamp-pos b (:mark w))))))
+  (if-let [b (cur s)]
+    (update-cur s #(merge % (buf/clamp-window-points b (get-in s (cur-window-path s)))))
+    s))
 
 (defn switch-window
   "Save current point, swap `:cur-window` to `path`, load that window's point,
@@ -115,6 +106,15 @@
   ([s n] (forward-char s (- (long n)))))
 
 (defn goto-char [s n] (set-point s (fn [_ _] (long n))))
+
+(defn goto-line
+  "Move to a one-based line and optional zero-based UTF-16 column."
+  ([s line] (goto-line s line 0))
+  ([s line column]
+   (set-point s (fn [text _]
+                  (let [line (-> (long line) dec (max 0) (min (dec (gap/line-count text))))]
+                    (min (gap/nth-line-end text line)
+                         (+ (gap/nth-line-start text line) (max 0 (long column)))))))))
 
 (defn beginning-of-line   [s] (set-point s gap/line-start))
 (defn end-of-line         [s] (set-point s gap/line-end))

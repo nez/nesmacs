@@ -1,6 +1,7 @@
 (ns nesmacs.gitcommit
   "Git commit buffer: edit a message, C-c C-c to commit, C-c C-k to abort."
   (:require [clojure.string :as str]
+            [nesmacs.api :as api]
             [nesmacs.buf :as buf]
             [nesmacs.cmd :as cmd]
             [nesmacs.git :as git]))
@@ -24,29 +25,27 @@
     (cmd/remove-buffer s commit-name (:gitcommit-return b))
     s))
 
+(defn- commit! [publish! dir message on-success]
+  (try
+    (let [out (git/commit dir message)
+          summary (first (str/split-lines out))]
+      (if (str/starts-with? out "Error:")
+        (publish! cmd/msg summary)
+        (do
+          (publish! #(cmd/msg (close %) (or summary "Commit created")))
+          (when on-success (publish! on-success)))))
+    (finally (publish! dissoc :git-commit-request))))
+
 (defn commit-at-point [s]
-  (let [b (cmd/cur s)
-        dir (:gitcommit-dir b)
-        message (str/trim (str (:text b)))]
+  (let [{:keys [gitcommit-dir gitcommit-on-success text]} (cmd/cur s)
+        message (str/trim (str text))]
     (cond
       (:git-commit-request s) (cmd/msg s "Commit in progress")
-      (nil? dir) (cmd/msg s "Open a commit buffer from Git status first")
+      (nil? gitcommit-dir) (cmd/msg s "Open a commit buffer from Git status first")
       (str/blank? message) (cmd/msg s "Empty commit message")
-      :else (assoc s :git-commit-request {:dir dir :message message
-                                         :on-success (:gitcommit-on-success b)}))))
-
-(defn tick!
-  "Run a requested commit once on the editor loop, outside retriable swaps."
-  [editor]
-  (when-let [{:keys [dir message on-success]} (:git-commit-request @editor)]
-    (let [out (git/commit dir message)]
-      (swap! editor
-             (fn [s]
-               (let [s (dissoc s :git-commit-request)]
-                 (if (str/starts-with? out "Error:")
-                   (cmd/msg s (first (str/split-lines out)))
-                   (-> (cond-> (close s) on-success on-success)
-                       (cmd/msg (or (first (str/split-lines out)) "Commit created"))))))))))
+      :else (-> s
+                (assoc :git-commit-request true)
+                (api/after-command #(commit! % gitcommit-dir message gitcommit-on-success))))))
 
 (defn abort [s]
   (if (:git-commit-request s)

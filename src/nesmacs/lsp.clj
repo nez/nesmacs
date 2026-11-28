@@ -208,6 +208,10 @@
         (did-change-range! root-id path (str (:text b)) version)
         (did-change! root-id path (str (:text b)) version)))))
 
+(defn sync! [root-id buffer]
+  (when-let [server (srv root-id)]
+    (sync-document! root-id server buffer)))
+
 (defn close-doc!
   "Notify every server that has `path` open that the document closed."
   [path]

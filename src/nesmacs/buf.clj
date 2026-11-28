@@ -34,18 +34,27 @@
 
 (defn make
   ([name] (make name "" nil))
-  ([name text file]
+  ([name text file] (make name text file nil))
+  ([name text file line-ending]
    (let [b {:name name :text (gap/of text) :point 0 :mark nil :file file
             :modified false :mode :fundamental :undo [] :redo []
             :version 0 :journal? true :props [] :font-lock []
             :font-lock-window nil}]
-     (assoc b :large-file (large-file? b)))))
+     (cond-> (assoc b :large-file (large-file? b))
+       line-ending (assoc :line-ending line-ending)))))
 
 (defn clamp-pos
   "Clamp a text offset into the buffer [0, len]. Session restore uses it, since
    the file may have shrunk while the editor was closed."
   [b p]
   (-> (long (or p 0)) (max 0) (min (count (:text b)))))
+
+(defn clamp-window-points [b window]
+  (into {}
+        (keep (fn [key]
+                (when (contains? window key)
+                  [key (when-let [p (get window key)] (clamp-pos b p))])))
+        [:point :mark]))
 
 (defn clamp-range
   "Clamp both endpoints to the buffer, keeping the end at or after the start."

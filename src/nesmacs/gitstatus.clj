@@ -3,6 +3,7 @@
    with single-key staging (s), unstaging (u), diff (d), commit (c), log (l).
    Refresh with g."
   (:require [clojure.string :as str]
+            [nesmacs.api :as api]
             [nesmacs.cmd :as cmd]
             [nesmacs.git :as git]
             [nesmacs.gitdiff :as gitdiff]
@@ -48,10 +49,17 @@
   [s git-fn label]
   (if-let [e (listbuf/entry-at-point s)]
     (if-let [dir (cur-repo-root s)]
-      (let [out (git-fn dir (:path e))]
-        (if (str/starts-with? out "Error:")
-          (cmd/msg s (first (str/split-lines out)))
-          (-> s refresh (cmd/msg (str label " " (:path e))))))
+      (api/after-command s
+        (fn [publish!]
+          (let [out (git-fn dir (:path e))]
+            (if (str/starts-with? out "Error:")
+              (publish! cmd/msg (first (str/split-lines out)))
+              (let [listing (spec dir)]
+                (publish! (fn [s]
+                            (-> s
+                                (cond-> (= dir (:git-dir (cmd/buf s gitstatus-name)))
+                                  (listbuf/refresh gitstatus-name listing))
+                                (cmd/msg (str label " " (:path e)))))))))))
       (cmd/msg s "Not a git repository"))
     s))
 

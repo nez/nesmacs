@@ -6,6 +6,7 @@
    Opening the listing is a job; staging/unstaging and the refresh afterward
    are short `git apply`/`git diff` calls."
   (:require [clojure.string :as str]
+            [nesmacs.api :as api]
             [nesmacs.cmd :as cmd]
             [nesmacs.deferred :as deferred]
             [nesmacs.git :as git]
@@ -44,21 +45,29 @@
          (cmd/msg s "Not a git repository"))
        (cmd/msg s "Buffer has no file")))))
 
-(defn refresh [s]
-  (let [{dir :git-dir path :hunk-path staged? :hunk-staged?} (cmd/cur s)
-        entries ((if staged? git/staged-hunks git/diff-hunks) dir path)]
-    (listbuf/refresh s hunks-buf (spec dir path staged? entries))))
+(def ^:private context-keys [:git-dir :hunk-path :hunk-staged?])
 
-(defn- alter-hunk
-  [s reverse? label]
-  (if-let [e (listbuf/entry-at-point s)]
-    (let [out (git/apply-cached (:git-dir (cmd/cur s)) (:patch e) reverse?)]
-      (if (or (str/blank? out) (not (re-find #"(?i)error|fatal|patch failed" out)))
-        (-> s refresh (cmd/msg (str label " hunk " (:index e))))
-        (cmd/msg s (str "git apply: " (first (str/split-lines out))))))
+(defn- listing [{dir :git-dir path :hunk-path staged? :hunk-staged?}]
+  (spec dir path staged? ((if staged? git/staged-hunks git/diff-hunks) dir path)))
+
+(defn refresh [s]
+  (listbuf/refresh s hunks-buf (listing (cmd/cur s))))
+
+(defn- alter-hunk [s reverse? label]
+  (if-let [entry (listbuf/entry-at-point s)]
+    (let [context (select-keys (cmd/cur s) context-keys)]
+      (api/after-command s
+        (fn [publish!]
+          (let [out (git/apply-cached (:git-dir context) (:patch entry) reverse?)]
+            (if (re-find #"(?i)error|fatal|patch failed" out)
+              (publish! cmd/msg (str "git apply: " (first (str/split-lines out))))
+              (let [fresh (listing context)]
+                (publish! (fn [s]
+                            (-> s
+                                (cond-> (= context (select-keys (cmd/buf s hunks-buf) context-keys))
+                                  (listbuf/refresh hunks-buf fresh))
+                                (cmd/msg (str label " hunk " (:index entry))))))))))))
     s))
-  ; shortcut: `git apply --cached` runs synchronously on the editor loop.
-  ; A huge patch (many MB) would stall the UI; acceptable for typical hunk sizes.
 
 (defn stage   [s] (alter-hunk s false "Staged"))
 (defn unstage [s] (alter-hunk s true "Unstaged"))
