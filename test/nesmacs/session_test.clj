@@ -177,7 +177,8 @@
           (is (nil? (persist/read-lines "journal")))
           (swap! a update-in [:bufs "*test*"] #(buf/edit % 0 0 "x"))
           (session/journal-tick! a)
-          (is (= [{:v 3 :from 0 :to 0 :repl "x" :buf "*test*"}]
+          (is (= [{:v 3 :from 0 :to 0 :repl "x" :buf "*test*"
+                   :journal-id (get-in @a [:bufs "*test*" :journal-id])}]
                  (persist/read-lines "journal")))))
       (finally (delete-tree dir)))))
 
@@ -195,7 +196,7 @@
           (session/save-session! base)
           (session/journal-tick! (atom s1))
           (spit f "hello!")
-          (session/note-saved! "*test*" 1)
+          (session/note-saved! "*test*" (get-in s1 [:bufs "*test*"]))
           (let [[restored ok] (session/restore-session base (session/load-session!))
                 recovered (session/recover-journal! restored)]
             (is ok)
@@ -207,7 +208,7 @@
   (let [dir (temp-dir)]
     (try
       (binding [persist/*dir* dir]
-        (let [base (make-state)]
+        (let [base (update-in (make-state) [:bufs "*test*"] dissoc :journal-id)]
           (session/save-session! base)
           (spit (java.io.File. dir "journal.edn")
                 (str "{:broken\n42\n"
@@ -306,9 +307,50 @@
   ;; from/to are fed to buf/edit; a string there used to abort restore.
   (let [s (make-state)
         b (get-in s [:bufs "*test*"])
-        s' (#'session/apply-record s {:buf "*test*" :v 1 :from "x" :to 2 :repl "z"})]
+        s' (#'session/apply-record s {:buf "*test*" :journal-id (:journal-id b)
+                                     :v 1 :from "x" :to 2 :repl "z"})]
     (is (= (str (:text b)) (str (get-in s' [:bufs "*test*" :text]))))
     (is (= (:version b) (get-in s' [:bufs "*test*" :version])))))
+
+(deftest reopening-a-buffer-does-not-recover-edits-from-its-old-instance
+  (let [file (java.io.File. persist/*dir* "reopened.txt")
+        path (.getPath file)]
+    (spit file "original")
+    (let [first-open (ed/find-file (make-state) path)
+          reopened (ed/find-file (make-state) path)]
+      (session/journal-tick! (atom (ed/edit first-open 0 0 "discarded ")))
+      (session/save-session! reopened)
+      (session/journal-tick! (atom (ed/edit reopened 0 0 "kept ")))
+      (let [[restored] (session/restore-session (make-state) (session/load-session!))]
+        (is (= "kept original" (str (:text (cmd/cur (session/recover-journal! restored))))))))))
+
+(deftest restored-directory-has-live-entries-and-protection
+  (let [dir (.getPath persist/*dir*)
+        s (ed/find-file (make-state) dir)]
+    (session/save-session! s)
+    (spit (java.io.File. dir "added.txt") "added")
+    (let [[restored] (session/restore-session (make-state) (session/load-session!))
+          b (cmd/cur restored)]
+      (is (:read-only b))
+      (is (false? (:journal? b)))
+      (is (some #(= "added.txt" (.getName ^java.io.File %)) (:listbuf-entries b))))))
+
+(deftest a-session-keeps-cached-files-and-their-editing-flags
+  (let [file (java.io.File. persist/*dir* "removed.txt")
+        path (.getPath file)]
+    (spit file "cached")
+    (let [s (-> (ed/find-file (make-state) path)
+                (assoc-in [:bufs path :read-only] true)
+                (ed/mini-start "Command: " (fn [s _] s))
+                (ed/handle-key \x))]
+      (is (.delete file))
+      (session/save-session! s)
+      (let [snapshot (session/load-session!)
+            [restored] (session/restore-session (make-state) snapshot)]
+        (is (not (contains? (:bufs snapshot) " *mini*")))
+        (is (= path (:buf restored)))
+        (is (= "cached" (str (:text (cmd/cur restored)))))
+        (is (:read-only (cmd/cur restored)))))))
 
 (deftest a-vanished-buffer-does-not-fall-back-to-a-missing-scratch
   ;; *scratch* may have been killed, so the fallback must be a buffer that

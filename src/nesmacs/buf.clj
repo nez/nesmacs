@@ -38,7 +38,8 @@
   ([name text file line-ending]
    (let [b {:name name :text (gap/of text) :point 0 :mark nil :file file
             :modified false :mode :fundamental :undo [] :redo []
-            :version 0 :saved-revision 0 :journal? true :props [] :font-lock []
+            :version 0 :saved-revision 0 :journal? true :journal-id (random-uuid)
+            :props [] :font-lock []
             :font-lock-window nil}]
      (cond-> (assoc b :large-file (large-file? b))
        line-ending (assoc :line-ending line-ending)))))

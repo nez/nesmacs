@@ -102,7 +102,7 @@
 
 (defn write-buffer! [publish! name b expected]
   (let [revision (persist/write-file! (:file b) (str (:text b)) (:line-ending b) expected)
-        _ (session/note-saved! name (:version b))
+        _ (session/note-saved! name b)
         state (publish! (fn [s]
                          (let [current (cmd/buf s name)]
                            (if (or (same-buffer-version? current b)

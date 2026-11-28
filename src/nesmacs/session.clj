@@ -3,6 +3,7 @@
    Undo history is explicitly NOT persisted (per roadmap)."
   (:require [nesmacs.buf :as buf]
             [nesmacs.dap :as dap]
+            [nesmacs.dired :as dired]
             [nesmacs.gap :as gap]
             [nesmacs.lang :as lang]
             [nesmacs.log :as log]
@@ -35,6 +36,10 @@
        :point (:point b)
        :mark (:mark b)
        :file file
+       :dired-dir (:dired-dir b)
+       :read-only (:read-only b)
+       :journal? (:journal? b)
+       :journal-id (:journal-id b)
        :line-ending (:line-ending b)
        :modified (:modified b)
        :disk-revision (:disk-revision b)
@@ -43,7 +48,7 @@
        :edit-count (:edit-count b 0)
        :font-lock (when-not on-disk?
                     (mapv (fn [entry] [nil (second entry)]) (:font-lock b)))
-       :props (:props b [])
+       :props (into [] (remove #(#{:isearch :qr :query-replace} (:owner %))) (:props b))
        :collapsed (:collapsed b)
        :large-file (:large-file b)}
       ;; The screen is a cache: reattaching captures it again. Persist only the
@@ -69,7 +74,7 @@
      :cols (max 1 (long (if (int? (:cols t)) (:cols t) 80)))
      :rows (max 1 (long (if (int? (:rows t)) (:rows t) 24)))}))
 
-(defn- safe-int [x] (if (integer? x) x 0))
+(defn- safe-int [x] (if (int? x) x 0))
 
 (defn- data->buffer
   "Deserialize a buffer from session data. Returns nil if its file-backed text
@@ -93,6 +98,9 @@
       ;; only with session text, since their offsets would otherwise be stale.
       (let [b (-> (buf/make (:name d) (or text "") file (or (:line-ending disk) (:line-ending d)))
                   (assoc :modified (:modified d)
+                         :read-only (true? (:read-only d))
+                         :journal? (not (false? (:journal? d)))
+                         :journal-id (when (uuid? (:journal-id d)) (:journal-id d))
                          :disk-revision (if (nil? saved) (:revision disk) (or stored-revision (:revision disk)))
                          :saved-revision (when-not (:modified d) (safe-int (:version d)))
                          :mode (:mode d)
@@ -121,12 +129,23 @@
           (cond-> (-> b
                       (assoc :point (buf/clamp-pos b (safe-int (:point d))))
                       lang/with-file-language)
-            (integer? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d)))
+            (int? (:mark d)) (assoc :mark (buf/clamp-pos b (:mark d)))
             (coll? (:collapsed d))
             (assoc :collapsed
-                   (into #{} (filter #(and (integer? %)
+                   (into #{} (filter #(and (int? %)
                                            (< -1 (long %) (gap/line-count (:text b)))))
                          (:collapsed d)))))))))
+
+(defn- restore-buffer [data]
+  (if-let [dir (when (= :dired-mode (:mode data))
+                 (or (when (string? (:dired-dir data)) (:dired-dir data))
+                     (second (re-matches #"(?s)\*dired (.+)\*" (:name data)))))]
+    (try (let [b (dired/directory-buffer dir)]
+           (assoc b :point (buf/clamp-pos b (safe-int (:point data)))))
+         (catch Exception e
+           (log/log "directory restore failed:" (.getMessage e))
+           (data->buffer (assoc data :read-only true :journal? false))))
+    (data->buffer data)))
 
 (defn- window-tree->data
   "Serialize window tree, replacing buffer refs with names."
@@ -163,13 +182,16 @@
 (def ^:private written-seq (atom 0))
 (def ^:private save-pending? (atom false))
 
+(defn- session-buffers [s]
+  (remove (fn [[name _]] (buf/internal-name? name)) (:bufs s)))
+
 (defn signature
   "Cheap change signature: buffer versions/points and layout, not buffer text.
    Lets the periodic save skip idle ticks without re-serializing 10 MB buffers."
   [s]
   (hash [(mapv (fn [[name b]]
-                 [name (:version b) (:point b) (:modified b)])
-               (:bufs s))
+                 [name (:journal-id b) (:version b) (:point b) (:modified b)])
+               (session-buffers s))
          (:windows s) (:cur-window s)
          (:recentf s) (:bookmarks s) (:mini-history s) (:theme s :default)
          (dap/snapshot-breakpoints)]))
@@ -179,35 +201,38 @@
    how the windows show them. An edit can be rebuilt from the journal, but a
    buffer opened after the last snapshot would otherwise vanish."
   [s]
-  (hash [(mapv (fn [[name b]] [name (:file b)]) (:bufs s))
+  (hash [(mapv (fn [[name b]] [name (when (:journal? b) (:journal-id b)) (:file b)]) (session-buffers s))
          (:windows s) (:cur-window s)]))
 
 (defn- snapshot-signatures [state]
   {:signature (signature state) :structure (structure-signature state)})
 
 (defn- session-data [state]
-  (let [bufs (:bufs state)]
-    {:version session-version
+  {:version session-version
      :timestamp (System/currentTimeMillis)
-     :bufs (update-vals bufs buffer->data)
+     :bufs (into {} (map (fn [[name b]] [name (buffer->data b)])) (session-buffers state))
      :windows (window-tree->data (:windows state))
      :cur-window (:cur-window state)
      :recentf (:recentf state [])
      :bookmarks (:bookmarks state {})
      :mini-history (:mini-history state [])
      :theme (:theme state :default)
-     :breakpoints (dap/snapshot-breakpoints)}))
+     :breakpoints (dap/snapshot-breakpoints)})
+
+(defn- journal-key [name b] [name (:journal-id b)])
 
 (defn- trim-journal!
   "Drop journal records already covered by the snapshot just written, so the
    file stays bounded by the edits since the last save. Caller holds
    journal-lock."
-  [versions]
+  [bufs]
   (when-let [recs (seq (persist/read-lines journal-file))]
-    (let [kept (into [] (filter (fn [r]
-                                  (and (map? r) (integer? (:v r))
-                                       (> (:v r) (get versions (:buf r) 0)))))
-                     recs)]
+    (let [kept (filterv (fn [r]
+                          (let [b (get bufs (:buf r))]
+                            (and (map? r) (int? (:v r))
+                                 (or (nil? b) (not= (:journal-id r) (:journal-id b))
+                                     (> (:v r) (:version b 0))))))
+                        recs)]
       (if (seq kept)
         (persist/write-lines! journal-file kept)
         (persist/delete! journal-file)))))
@@ -220,7 +245,7 @@
           (reset! written-seq n)
           (reset! last-snapshot signatures)
           (locking journal-lock
-            (trim-journal! (update-vals (:bufs session) #(or (:version %) 0)))))
+            (trim-journal! (:bufs session))))
         ok?))))
 
 (defn save-session!
@@ -256,7 +281,7 @@
 ;;
 ;; The snapshot above is periodic. Between snapshots every text edit appends a
 ;; small record here, so `kill -9` loses at most the command in flight instead
-;; of the whole interval. A record is `{:buf name :v version :from :to :repl}`.
+;; of the whole interval. Records identify both a buffer name and its instance.
 
 (defn journal-tick!
   "Write buffered edit records to ~/.nesmacs/journal.edn and clear the ones
@@ -264,19 +289,19 @@
    concurrently by nREPL keep a higher version and survive the clear."
   [editor-atom]
   (let [s    @editor-atom
-        recs (vec (for [[name b] (:bufs s), r (:journal b)]
-                    (assoc r :buf name)))]
+        recs (vec (for [[name b] (session-buffers s), r (:journal b)]
+                    (assoc r :buf name :journal-id (:journal-id b))))]
     (when (and (seq recs)
                ;; Serialized with snapshot writes so a trim can't race an append.
                (locking journal-lock (persist/append-lines! journal-file recs)))
-      (let [up-to (reduce (fn [m r] (assoc m (:buf r) (:v r))) {} recs)]
+      (let [up-to (into {} (map (fn [r] [(journal-key (:buf r) r) (:v r)])) recs)]
         (swap! editor-atom
                (fn [state]
                  (update state :bufs
                          (fn [bufs]
                            (reduce-kv
                              (fn [acc name b]
-                               (if-let [v (get up-to name)]
+                               (if-let [v (get up-to (journal-key name b))]
                                  (assoc acc name
                                         (update b :journal
                                                 (fn [js]
@@ -288,26 +313,26 @@
   "Record that `name`'s current text is now on disk. A later restore can load
    the file and skip journal records up to this version instead of replaying
    edits the file already contains."
-  [name version]
+  [name {:keys [version journal-id]}]
   (when (and name version)
     (locking journal-lock
-      (persist/append-lines! journal-file [{:buf name :v version :save true}]))))
+      (persist/append-lines! journal-file [{:buf name :journal-id journal-id :v version :save true}]))))
 
-(defn- save-version
-  "Highest save marker for `name` in `records` (0 when none)."
-  [records name]
-  (reduce (fn [v r]
-            (if (and (:save r) (= name (:buf r))) (max (long v) (long (:v r))) v))
-          0 records))
+(defn- save-versions [records]
+  (reduce (fn [saved r]
+            (if (:save r)
+              (update saved (journal-key (:buf r) r) (fnil max 0) (:v r))
+              saved))
+          {} records))
 
 (defn- apply-record
-  [state {:keys [buf v from to repl save]}]
+  [state {:keys [buf v from to repl save journal-id]}]
   (let [b (get-in state [:bufs buf])
         current (or (:version b) 0)]
     (cond
-      (or (nil? b) save) state
+      (or (nil? b) save (not= journal-id (:journal-id b))) state
       ;; A torn or hand-edited record must not throw inside buf/edit.
-      (not (and (string? repl) (integer? from) (integer? to)
+      (not (and (string? repl) (int? from) (int? to)
                 (<= 0 (long from) (long to))))
       (do (log/log "journal record ignored for" buf) state)
       ;; Already part of the snapshot: the edit happened before it was written.
@@ -322,25 +347,20 @@
   "Replay the journal over a restored session and persist the result as the new
    base before deleting the journal. Returns the updated state."
   [state]
-  (if-let [records (seq (filter #(and (map? %) (integer? (:v %)))
+  (if-let [records (seq (filter #(and (map? %) (int? (:v %)))
                                 (persist/read-lines journal-file)))]
     (let [;; A buffer restored from disk holds text as of its last save, which may
           ;; be newer than the snapshot. Start replay from that save, or the
           ;; edits already in the file would be applied a second time.
-          from-disk (filter (fn [[_ b]] (:journal-from-disk? b)) (:bufs state))
-          bases (into {} (map (fn [[name b]]
-                                [name (max (long (or (:version b) 0))
-                                           (save-version records name))])
-                              from-disk))
+          saved (save-versions records)
           state (update state :bufs
                         (fn [bufs]
-                          (reduce-kv (fn [acc name b]
-                                       (if (contains? bases name)
-                                         (assoc acc name
-                                                (-> b (assoc :version (bases name))
-                                                    (dissoc :journal-from-disk?)))
-                                         acc))
-                                     bufs bufs)))
+                          (into {} (for [[name b] bufs]
+                                     [name (if (:journal-from-disk? b)
+                                             (let [version (max (:version b 0) (get saved (journal-key name b) 0))]
+                                               (-> b (assoc :version version :saved-revision version)
+                                                   (dissoc :journal-from-disk?)))
+                                             b)]))))
           s'    (reduce apply-record state records)]
       (if (save-session! s')
         (persist/delete! journal-file)
@@ -407,85 +427,38 @@
   (when-let [data (persist/load! session-file)]
     (sanitize-session data)))
 
+(defn- restore-window [node bufs fallback]
+  (if (win/leaf? node)
+    (let [name (:buffer node)]
+      (if-let [b (get bufs name)]
+        (merge (win/leaf name (buf/clamp-pos b (safe-int (:scroll node)))
+                         (max 0 (safe-int (:hscroll node))))
+               (buf/clamp-window-points b (into {} (filter (comp int? val))
+                                               (select-keys node [:point :mark]))))
+        (win/leaf fallback)))
+    (let [ratio (:ratio node)]
+      (assoc (win/split-node (:dir node)
+                             (restore-window (:a node) bufs fallback)
+                             (restore-window (:b node) bufs fallback))
+             :ratio (if (and (number? ratio) (Double/isFinite (double ratio)))
+                      (-> (double ratio) (max 0.1) (min 0.9)) 0.5)))))
+
 (defn restore-session
-  "Apply loaded session data to a fresh editor state.
-   Returns [state restored?] where restored? is true if session was applied."
-  [state session-data]
+  "Apply loaded session data to a fresh editor state."
+  [state {:keys [windows cur-window theme] :as session-data}]
   (when session-data
-    (let [bufs (:bufs session-data)
-          windows (:windows session-data)
-          cur-window (:cur-window session-data)
-          recentf (:recentf session-data)
-          bookmarks (:bookmarks session-data)
-          mini-history (:mini-history session-data)
-          theme (:theme session-data)
-
-          ;; Rebuild buffers from saved data
-          rebuilt-bufs (update-vals bufs data->buffer)
-
-          ;; Filter out buffers that no longer exist on disk (optional)
-          existing-bufs (into {}
-                          (filter (fn [[_ b]]
-                                    (and b
-                                         (or (:modified b)
-                                             (nil? (:file b))
-                                             (.exists (java.io.File. ^String (:file b))))))
-                                rebuilt-bufs))
-          ;; Every restored window leaf needs a buffer that exists. If all
-          ;; files vanished (and *scratch* was killed), the renderer would
-          ;; dereference nil before the first frame.
-          valid-bufs (if (seq existing-bufs)
-                       existing-bufs
-                       {"*scratch*" (buf/make "*scratch*" "" nil)})
-          ;; A leaf whose buffer vanished is rebuilt on some buffer that exists.
-          fallback-buf (first (keys valid-bufs))
-
-          ;; Ensure cur-window names a leaf that still exists.
-          leaf-paths (win/leaves windows)
-          valid-cur-window (if (some #(= cur-window %) leaf-paths)
-                             cur-window
-                             (first leaf-paths))
-
-          ;; Rebuild window tree with actual buffer objects
-          rebuilt-windows (letfn [(walk [node]
-                                    (if (win/leaf? node)
-                                      (let [buf-name (:buffer node)]
-                                        (if (contains? valid-bufs buf-name)
-                                          (let [b (get valid-bufs buf-name)
-                                                w (win/leaf buf-name
-                                                            (buf/clamp-pos b (when (integer? (:scroll node))
-                                                                               (:scroll node)))
-                                                            (max 0 (long (if (integer? (:hscroll node))
-                                                                           (:hscroll node)
-                                                                           0))))]
-                                            (merge w (buf/clamp-window-points
-                                                       b (select-keys node (filter #(integer? (get node %))
-                                                                                   [:point :mark])))))
-                                          (win/leaf fallback-buf)))
-                                      (assoc (win/split-node (:dir node)
-                                                             (walk (:a node))
-                                                             (walk (:b node)))
-                                             :ratio (if (number? (:ratio node))
-                                                      (-> (double (:ratio node))
-                                                          (max 0.1) (min 0.9))
-                                                      0.5))))]
-                            (walk windows))
-
-          new-state (-> state
-                        (assoc :bufs valid-bufs)
-                        (assoc :windows rebuilt-windows)
-                        (assoc :cur-window valid-cur-window)
-                        (assoc :recentf recentf)
-                        (assoc :bookmarks bookmarks)
-                        (assoc :mini-history mini-history)
-                        (assoc :theme (or theme (:theme state :default)))
-                        ;; The window tree decides what is on screen, but keys and
-                        ;; `cmd/cur` follow `:buf`. Leaving it at the initial
-                        ;; `*scratch*` made a restored terminal look focused while
-                        ;; keystrokes went to another buffer.
-                        (assoc :buf (let [b (get-in rebuilt-windows
-                                                    (conj valid-cur-window :buffer))]
-                                      (if (contains? valid-bufs b)
-                                        b
-                                        fallback-buf))))]
-      [new-state true])))
+    (let [restored (into {}
+                         (keep (fn [[name data]]
+                                 (when-let [b (restore-buffer (update data :name #(if (string? %) % name)))]
+                                   [name b])))
+                         (session-buffers session-data))
+          bufs (if (seq restored) restored {"*scratch*" (buf/make "*scratch*")})
+          windows (restore-window windows bufs (first (keys bufs)))
+          paths (win/leaves windows)
+          path (or (some #{cur-window} paths) (first paths))]
+      [(-> state
+           (merge (select-keys session-data [:recentf :bookmarks :mini-history]))
+           (assoc :bufs bufs :windows windows :cur-window path
+                  :theme (or theme (:theme state :default))
+                  :buf (get-in windows (conj path :buffer))))
+       true])))
