@@ -1,9 +1,13 @@
 (ns nesmacs.testres-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [nesmacs.api :as api]
             [nesmacs.buf :as buf]
+            [nesmacs.cmd :as cmd]
+            [nesmacs.job :as job]
             [nesmacs.testres :as testres]
-            [nesmacs.testutil :as tu]))
+            [nesmacs.testutil :as tu]
+            [nesmacs.window :as win]))
 
 (deftest plain-output-is-not-a-test-report
   (is (nil? (testres/parse "hello\nworld\n"))))
@@ -140,3 +144,28 @@
                                  (parse output))]
       (testres/tick! editor))
     (is (= {:bufs {}} @editor))))
+
+(deftest rerunning-the-test-job-builds-a-fresh-report
+  (let [name "*Tests*"
+        editor (atom (testres/run {:buf "*scratch*"
+                                   :bufs {"*scratch*" (buf/make "*scratch*" "" nil)}
+                                   :windows (win/leaf "*scratch*") :cur-window []}
+                                  "printf 'not ok 1 - failing test\\n'"))
+        finish! (fn []
+                  (api/run-effects! editor)
+                  (loop [remaining 500]
+                    (when (and (pos? remaining)
+                               (= :running (get-in @editor [:bufs name :job-status])))
+                      (Thread/sleep 10)
+                      (swap! editor job/apply-drain (job/drain! (:bufs @editor)))
+                      (recur (dec remaining))))
+                  (testres/tick! editor))]
+    (finish!)
+    (let [first-report (cmd/buf @editor "*Test Results*")]
+      (is (some? first-report))
+      (swap! editor #(-> % (cmd/set-cur-buffer name) job/rerun))
+      (is (nil? (get-in @editor [:bufs name :test-parsed?])))
+      (finish!)
+      (is (= "1 failed / 1 tests" (:msg @editor)))
+      (is (= "*Test Results*" (:buf @editor)))
+      (is (not (identical? first-report (cmd/buf @editor "*Test Results*")))))))

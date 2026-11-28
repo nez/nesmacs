@@ -195,7 +195,7 @@
                                    (when (seq entries) "   C-n select  RET jump"))
                       :entries entries
                       :format-entry (fn [{:keys [name message]}]
-                                      (format "%s  %s" name (str/replace message #"\s+" " ")))
+                                      (format "%s  %s" name (str/replace (or message "") #"\s+" " ")))
                       :extras {:nav-root root}})
        (cmd/msg (str (:failed parsed) " failed / " (:total parsed) " tests")))))
 
@@ -238,7 +238,5 @@
           root (or (project/root-for (:file b))
                    (System/getProperty "user.dir"))
           name "*Tests*"]
-      (-> (job/start s {:argv ["sh" "-c" cmd] :dir root :buf-name name})
-          (assoc-in [:bufs name :test-root] root)
-          (assoc-in [:bufs name :test-report?] true)
-          (assoc-in [:bufs name :test-parsed?] false)))))
+      (job/start s {:argv ["sh" "-c" cmd] :dir root :buf-name name
+                    :buffer-fields {:test-root root :test-report? true}}))))

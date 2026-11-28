@@ -13,14 +13,12 @@
   "Start `argv` in `dir` as a job named `job-name`. `build` runs once the job
    exits, on the editor loop."
   [s {:keys [argv dir job-name build]}]
-  (-> (job/start s {:argv argv :dir dir :buf-name job-name})
-      (update-in [:bufs job-name]
-                 assoc :deferred build :deferred-return (:buf s))))
+  (job/start s {:argv argv :dir dir :buf-name job-name
+                :buffer-fields {:deferred build :deferred-return (:buf s)}}))
 
 (defn- pending? [b]
   (and (:deferred b)
-       (#{:done :failed} (:job-status b))
-       (not (:deferred-done? b))))
+       (#{:done :failed} (:job-status b))))
 
 (defn- build-result [b]
   (try ((:deferred b) (str (:text b)))

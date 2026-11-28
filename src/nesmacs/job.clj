@@ -2,7 +2,8 @@
   "Process-backed buffers. Output streams in through `pump!`, which the editor
    loop calls between keystrokes, so the process never touches editor state on
    its own thread and the UI stays responsive."
-  (:require [nesmacs.buf :as buf]
+  (:require [nesmacs.api :as api]
+            [nesmacs.buf :as buf]
             [nesmacs.cmd :as cmd]
             [nesmacs.proc :as proc]))
 
@@ -29,30 +30,48 @@
       ;; Appending normally moves a point at EOF. Search starts at the first hit.
       (= false (:job-follow-output? b)) (assoc :point (:point b)))))
 
+(defn- kill-after-command [s id]
+  (cond-> s
+    id (api/after-command (fn [_] (proc/kill! (proc/by-id id))))))
+
+(defn- launch! [publish! {:keys [argv dir buf-name]} token]
+  (let [path [:bufs buf-name]
+        current? #(identical? token (get-in % (conj path :job-token)))]
+    (when (current? (publish! identity))
+      (let [{:keys [handle error]}
+            (try {:handle (proc/start {:argv argv :dir dir :kind :job})}
+                 (catch Exception e {:error (str "Error: " (.getMessage e) "\n")}))
+            state (publish! (fn [s]
+                              (if (current? s)
+                                (update-in s path
+                                           (fn [b]
+                                             (if handle
+                                               (assoc b :job-proc (:id handle))
+                                               (-> b (append-text error)
+                                                   (assoc :job-status :failed)))))
+                                s)))]
+        (when (and handle (not (current? state)))
+          (proc/kill! handle))))))
+
 (defn start
-  "Start `argv` with its output going to buffer `buf-name`, creating the buffer
-   (and showing it) if needed. `:mode` defaults to :job-mode. `argv` is the
-   exact argument vector. Set :follow-output? false to keep point on the results."
-  [s {:keys [argv dir buf-name mode follow-output?]
-      :or {follow-output? true}}]
-  (let [b (-> (buf/make buf-name "" nil)
+  "Set up a job buffer and launch its command after commit. The launch spec
+   includes :buffer-fields recreated on each rerun, in addition to :mode and
+   :follow-output? (defaults to true)."
+  [s {:keys [argv dir buf-name mode follow-output? buffer-fields]
+      :or {follow-output? true}
+      :as spec}]
+  (let [spec (assoc spec :argv (vec argv))
+        token (Object.)
+        b (-> (buf/make buf-name "" nil)
+              (merge buffer-fields)
               (assoc :mode (or mode :job-mode) :read-only true :journal? false
-                     :job-command (vec argv) :job-dir dir :job-status :running
-                     :job-follow-output? follow-output?))]
-    (try
-      (let [h (proc/start {:argv argv :dir dir :kind :job})]
-        (-> s
-            (update :bufs assoc buf-name (assoc b :job-proc (:id h)))
-            (cmd/set-cur-buffer buf-name)))
-      (catch Exception e
-        ;; e.g. rg not installed, or a vanished cwd: show it in the buffer
-        ;; instead of letting the exception escape the command loop.
-        (-> s
-            (update :bufs assoc buf-name
-                    (-> b (assoc :job-status :failed)
-                          (buf/edit 0 0 (str "Error: " (.getMessage e) "\n"))
-                          (assoc :modified false)))
-            (cmd/set-cur-buffer buf-name))))))
+                     :job-spec spec :job-dir dir :job-status :running
+                     :job-token token :job-follow-output? follow-output?))]
+    (-> s
+        (kill-after-command (:job-proc (cmd/buf s buf-name)))
+        (assoc-in [:bufs buf-name] b)
+        (cmd/set-cur-buffer buf-name)
+        (api/after-command (fn [publish!] (launch! publish! spec token))))))
 
 (defn drain!
   "Take every available chunk and the finished state out of the processes,
@@ -120,18 +139,24 @@
   "C-c C-k: kill the process behind the current job buffer."
   [s]
   (let [b (cmd/cur s)]
-    (if-let [h (some-> (:job-proc b) proc/by-id)]
-      (do (proc/kill! h)
-          (-> s (update-in [:bufs (:name b)] assoc :job-status :killed :job-proc nil)
-                (cmd/msg "Killed process")))
+    (if (= :running (:job-status b))
+      (-> s
+          (kill-after-command (:job-proc b))
+          (cmd/update-cur #(-> % (assoc :job-status :killed)
+                                 (dissoc :job-proc :job-token)))
+          (cmd/msg "Killed process"))
       (cmd/msg s "No running process"))))
 
 (defn rerun
   "`g`: run the buffer's command again into the same buffer."
   [s]
   (let [b (cmd/cur s)]
-    (if-let [argv (:job-command b)]
-      (do (when-let [h (some-> (:job-proc b) proc/by-id)] (proc/kill! h))
-          (start s {:argv argv :dir (:job-dir b) :buf-name (:name b)
-                    :mode (:mode b) :follow-output? (:job-follow-output? b)}))
+    (if-let [spec (or (:job-spec b)
+                      ;; The dev watcher can reload code with old buffers still open.
+                      (when-let [argv (:job-command b)]
+                        {:argv argv :dir (:job-dir b) :buf-name (:name b)
+                         :mode (:mode b) :follow-output? (:job-follow-output? b)
+                         :buffer-fields (select-keys b [:test-root :test-report?
+                                                       :deferred :deferred-return])}))]
+      (start s spec)
       (cmd/msg s "Not a job buffer"))))

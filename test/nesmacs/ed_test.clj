@@ -674,7 +674,7 @@
 ;; --- Async jobs (M-!) ---
 
 (defn- pump-until-done [s name]
-  (loop [s s i 0]
+  (loop [s (with-effects s) i 0]
     (if (or (= :done (get-in s [:bufs name :job-status])) (> i 500))
       s
       (do (Thread/sleep 10) (recur (job/pump! s) (inc i))))))
@@ -688,7 +688,7 @@
 
 (deftest job-buffer-keys-kill-the-process
   (let [s (ed/async-shell-command (#'nesmacs.ed/initial-state 24 80) "sleep 30")
-        s (-> s (ed/handle-key [:ctrl \c]) (ed/handle-key [:ctrl \k]))]
+        s (-> s with-effects (ed/handle-key [:ctrl \c]) (ed/handle-key [:ctrl \k]) with-effects)]
     (is (= :killed (get-in s [:bufs "*Shell Command*" :job-status])))
     (is (= "Killed process" (:msg s)))))
 
@@ -1911,9 +1911,7 @@
                   (answer-mini "needle"))
             name "*rg needle*"]
         (is (= name (:buf s)))
-        (let [s (loop [s s i 0]
-                  (if (or (= :done (get-in s [:bufs name :job-status])) (> i 500))
-                    s (do (Thread/sleep 10) (recur (job/pump! s) (inc i)))))
+        (let [s (pump-until-done s name)
               txt (str (get-in s [:bufs name :text]))]
           (is (clojure.string/includes? txt "src/a.clj:2:"))
           (is (clojure.string/includes? txt "src/b.clj:1:needle"))

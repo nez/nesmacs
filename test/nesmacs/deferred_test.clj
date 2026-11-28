@@ -1,7 +1,11 @@
 (ns nesmacs.deferred-test
   (:require [clojure.test :refer [deftest is]]
+            [nesmacs.api :as api]
+            [nesmacs.cmd :as cmd]
             [nesmacs.deferred :as deferred]
             [nesmacs.gap :as gap]
+            [nesmacs.job :as job]
+            [nesmacs.proc :as proc]
             [nesmacs.window :as win]))
 
 (defn- state [job-buf]
@@ -75,3 +79,15 @@
         editor (atom (state job))]
     (deferred/tick! editor)
     (is (contains? (:bufs @editor) "*job*"))))
+
+(deftest rerunning-a-deferred-job-keeps-its-builder-and-return-buffer
+  (let [editor (atom (deferred/start (cmd/set-cur-buffer (state nil) "*prev*")
+                                     {:argv ["job"] :job-name "*job*" :build str}))]
+    (swap! editor job/rerun)
+    (with-redefs [proc/start (constantly {:id 1})]
+      (api/run-effects! editor))
+    (swap! editor job/apply-drain {"*job*" {:text "result" :exit 0 :proc-id 1}})
+    (deferred/tick! editor)
+    (is (= "result" (:msg @editor)))
+    (is (= "*prev*" (:buf @editor)))
+    (is (nil? (cmd/buf @editor "*job*")))))
