@@ -17,18 +17,14 @@
   200000)
 
 (defn- append-text [b ^String text]
-  (let [n (count (:text b))]
-    (cond->
-      (cond
-        (:job-truncated b) b
-        (>= n max-output) (assoc b :job-truncated true :modified false)
-        (> (+ n (count text)) max-output)
-        (-> (buf/edit b n n (subs text 0 (- max-output n)))
-            (buf/edit max-output max-output "\n[output truncated]\n")
-            (assoc :job-truncated true :modified false))
-        :else (assoc (buf/edit b n n text) :modified false))
-      ;; Appending normally moves a point at EOF. Search starts at the first hit.
-      (= false (:job-follow-output? b)) (assoc :point (:point b)))))
+  (if (or (:job-truncated b) (empty? text))
+    b
+    (let [space (max 0 (- max-output (count (:text b))))
+          truncated? (> (count text) space)
+          chunk (if truncated? (str (subs text 0 space) "\n[output truncated]\n") text)]
+      (cond-> (buf/append-output b chunk)
+        truncated? (assoc :job-truncated true)
+        (= false (:job-follow-output? b)) (assoc :point (:point b))))))
 
 (defn- kill-after-command [s id]
   (cond-> s

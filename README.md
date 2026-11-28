@@ -51,6 +51,8 @@ Drag a split divider with the left mouse button in the terminal or browser.
 `C-x o` (`M-x other-window`) focuses the next pane. `C-x b`
 (`M-x switch-to-buffer`) chooses the buffer shown in that pane.
 `C-x 0` (`M-x delete-window`) closes the pane and keeps its buffer open.
+`C-x k` closes a buffer and asks what to do with unsaved edits. `C-x C-s`
+reports a conflict if the file has changed on disk since it was opened or saved.
 
 Real terminals are core: `C-c t` runs `$SHELL` in a tmux session, so the shell
 (outside the editor) survives an editor exit or crash and reattaches next start.

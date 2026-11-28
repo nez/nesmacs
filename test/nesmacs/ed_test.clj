@@ -2141,7 +2141,7 @@
           (let [{:keys [file]} (nav/rg-line (first (clojure.string/split-lines txt)))
                 s2 (ed/handle-key s :return)]
             (is (= (.getCanonicalPath (java.io.File. (str root "/" file)))
-                   (:buf s2))))))
+                   (:file (ed/cur s2)))))))
       (finally (rm-rf root)))))
 
 (deftest reload-config-runs-init-clj

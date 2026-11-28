@@ -151,6 +151,10 @@
   [b text]
   (edit b 0 (count (:text b)) text))
 
+(defn append-output [b text]
+  (let [end (count (:text b))]
+    (-> (apply-change b end end text) (assoc :modified false))))
+
 (defn- replay
   "Pop the latest entry from src-key, swap its `gone` text for its `kept` text,
    move point to the tail of the kept text, and push the entry onto dst-key."

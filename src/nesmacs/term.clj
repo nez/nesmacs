@@ -58,7 +58,7 @@
   (let [deadline (+ (System/currentTimeMillis) ms)]
     (loop []
       (cond
-        (byte-available?) (let [b (.read stdin)] (log/log "byte-t:" b) b)
+        (byte-available?) (.read stdin)
         (>= (System/currentTimeMillis) deadline) -1
         :else (let [remaining (- deadline (System/currentTimeMillis))]
                 (Thread/sleep (min 10 (max 1 remaining)))
@@ -186,10 +186,7 @@
   "Like read-key but returns nil after ms instead of blocking forever."
   [ms]
   (let [b (read-byte-timeout ms)]
-    (when (>= b 0)
-      (let [key (byte->key b)]
-        (log/log "key-t:" (pr-str key))
-        key))))
+    (when (>= b 0) (byte->key b))))
 
 ;; --- Output to System.out ---
 

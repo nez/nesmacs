@@ -11,6 +11,7 @@
             [clojure.string :as str]
             [nesmacs.log :as log])
   (:import [java.io ByteArrayOutputStream InputStream InputStreamReader]
+           [java.lang ProcessBuilder$Redirect]
            [java.util Arrays]
            [java.util.concurrent CountDownLatch LinkedBlockingQueue]))
 
@@ -18,25 +19,31 @@
 (defonce ^:private next-id (atom 0))
 (def ^:private queue-depth 256)
 
+(defn- process-builder [argv dir]
+  (cond-> (ProcessBuilder. (into-array String argv))
+    dir (.directory (java.io.File. (str dir)))))
+
 (defn run
   "Run `argv` synchronously and return its output. `opts` may set `:stdin`
    (text written to the child) and `:merge-stderr?`. With `:check-exit?`,
    a nonzero exit is reported as \"Error: ...\" followed by the command output."
   [argv dir {:keys [stdin merge-stderr? check-exit?]}]
   (try
-    (let [pb (doto (ProcessBuilder. (into-array String argv))
-               (.redirectErrorStream (boolean merge-stderr?)))
-          _  (when dir (.directory pb (java.io.File. (str dir))))
-          p  (.start pb)]
-      (if stdin
-        (with-open [w (io/writer (.getOutputStream p) :encoding "UTF-8")]
-          (.write w ^String stdin))
-        (.close (.getOutputStream p)))
-      (let [out (slurp (.getInputStream p) :encoding "UTF-8")
-            exit (.waitFor p)]
-        (if (and check-exit? (not (zero? exit)))
-          (str "Error: " (if (str/blank? out) (str "exit " exit) (str/trim out)))
-          out)))
+    (let [p (.start (cond-> (process-builder argv dir)
+                     merge-stderr? (.redirectErrorStream true)
+                     (not merge-stderr?) (.redirectError ProcessBuilder$Redirect/DISCARD)))]
+      (try
+        (let [writer (when stdin
+                       (future (with-open [w (io/writer (.getOutputStream p) :encoding "UTF-8")]
+                                 (.write w ^String stdin))))]
+          (when-not writer (.close (.getOutputStream p)))
+          (let [out (slurp (.getInputStream p) :encoding "UTF-8")
+                exit (.waitFor p)]
+            (when writer @writer)
+            (if (and check-exit? (not (zero? exit)))
+              (str "Error: " (if (str/blank? out) (str "exit " exit) (str/trim out)))
+              out)))
+        (finally (when (.isAlive p) (.destroyForcibly p)))))
     (catch Exception e (str "Error: " (.getMessage e)))))
 
 (defn- pump
@@ -73,14 +80,10 @@
     (finally (.countDown done))))
 
 (defn- stderr-loop
-  "Drain stderr so a chatty process can't fill the pipe and deadlock.
-   :merge appends it to the job queue; :log keeps protocol pipes clean (LSP)."
-  [^InputStreamReader r ^LinkedBlockingQueue q mode ^CountDownLatch done]
+  "Drain diagnostics separately from a protocol stream."
+  [^InputStreamReader r ^CountDownLatch done]
   (try
-    (pump r (fn [s]
-              (if (= mode :merge)
-                (.put q s)
-                (log/log "proc stderr:" (str/trim-newline s)))))
+    (pump r #(log/log "proc stderr:" (str/trim-newline %)))
     (catch InterruptedException _)
     (catch Exception e
       (log/log "proc stderr reader:" (.getMessage e)))
@@ -104,8 +107,8 @@
     :or {stderr :merge}}]
   (when (and binary? (not= stderr :log))
     (throw (IllegalArgumentException. "Binary stdout requires :stderr :log")))
-  (let [pb (ProcessBuilder. (into-array String argv))
-        _  (when dir (.directory pb (java.io.File. dir)))
+  (let [merged? (= stderr :merge)
+        pb (doto (process-builder argv dir) (.redirectErrorStream merged?))
         _  (when env (.putAll (.environment pb)
                               (into {} (map (fn [[k v]] [(name k) (str v)])) env)))
         p  (.start pb)
@@ -113,17 +116,17 @@
         id (swap! next-id inc)
         q  (LinkedBlockingQueue. queue-depth)
         exit (atom nil)
-        done (CountDownLatch. 2)
+        done (CountDownLatch. (if merged? 1 2))
         on-exit (fn [code] (reset! exit code))
         t (doto (Thread. #(reader-loop q p on-exit done binary?))
             (.setDaemon true)
             (.setName (str "nesmacs-proc-" id))
             (.start))
-        et (doto (Thread. #(stderr-loop (InputStreamReader. (.getErrorStream p) "UTF-8")
-                                        q stderr done))
-             (.setDaemon true)
-             (.setName (str "nesmacs-proc-" id "-err"))
-             (.start))
+        et (when-not merged?
+             (doto (Thread. #(stderr-loop (InputStreamReader. (.getErrorStream p) "UTF-8") done))
+               (.setDaemon true)
+               (.setName (str "nesmacs-proc-" id "-err"))
+               (.start)))
         h {:id id :process p :queue q :exit exit :done done :kind kind
            :thread t :err-thread et}]
     (swap! procs assoc id h)

@@ -28,6 +28,7 @@
     (is (= :done (get-in s [:bufs name :job-status])))
     (is (nil? (get-in s [:bufs name :job-proc])))
     (is (:read-only (get-in s [:bufs name])))
+    (is (empty? (get-in s [:bufs name :undo])))
     (is (= name (:buf s)))))
 
 (deftest nonzero-exit-is-visible
@@ -114,3 +115,10 @@
     (is (:job-truncated b))
     (is (clojure.string/includes? (str (:text b)) "[output truncated]"))
     (is (< (count (:text b)) 2000100))))
+
+(deftest output-reports-truncation-after-a-chunk-exactly-fills-the-cap
+  (with-redefs-fn {#'job/max-output 3}
+    (fn []
+      (let [b (-> (buf/make "job") (#'job/append-text "abc") (#'job/append-text "d"))]
+        (is (= "abc\n[output truncated]\n" (str (:text b))))
+        (is (:job-truncated b))))))

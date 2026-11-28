@@ -31,8 +31,17 @@
   (let [h (proc/start {:argv ["sh" "-c" "printf 'out\\n'; printf 'err\\n' >&2"]})
         [_ text code] (collect-until-finished h)]
     (is (= 0 code))
-    (is (.contains ^String text "out"))
-    (is (.contains ^String text "err"))))
+    (is (= "out\nerr\n" text))))
+
+(deftest synchronous-processes-drain-output-while-sending-input
+  (when (proc/executable? ["timeout"])
+    (is (= "done"
+           (proc/run ["timeout" "4" "sh" "-c" "head -c 1048576 /dev/zero >&2; printf done"]
+                     nil {:check-exit? true})))
+    (let [input (apply str (repeat 1048576 "x"))
+          out (proc/run ["timeout" "4" "sh" "-c" "head -c 1048576 /dev/zero; cat >/dev/null"]
+                        nil {:stdin input :check-exit? true})]
+      (is (= (count input) (count out))))))
 
 (deftest drain-yields-output-in-chunks
   ;; The limit is a soft per-tick cap: a chunk is never split, so one drain can

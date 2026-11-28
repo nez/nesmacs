@@ -180,9 +180,10 @@
 
 (defn- replay-cmd [src-key buf-fn label]
   (fn [s]
-    (if (seq (src-key (cur s)))
-      (update-cur s buf-fn)
-      (msg s (str "No " label)))))
+    (cond
+      (:read-only (cur s)) (msg s "Buffer is read-only")
+      (seq (src-key (cur s))) (update-cur s buf-fn)
+      :else (msg s (str "No " label)))))
 
 (def undo (replay-cmd :undo buf/undo "undo"))
 (def redo (replay-cmd :redo buf/redo "redo"))
