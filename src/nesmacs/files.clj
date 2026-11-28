@@ -239,26 +239,18 @@
               (recover-ask more)))))
     s))
 
-;; --- Quit: offer to save each modified buffer ---
+;; Scratch and other non-file buffers are kept in the session.
 
-(defn- modified-bufs [s]
-  (->> (:bufs s)
-       (keep (fn [[name b]]
-               ;; Hidden buffers (leading space) are editor-owned — the
-               ;; minibuffer in particular is always "modified" while you type
-               ;; in it, and quitting must not ask to save it.
-               (when (and (:modified b)
-                          (not (buf/internal-name? name)))
-                 name)))
-       sort))
+(defn- modified-file [s name]
+  (let [{:keys [file modified]} (cmd/buf s name)]
+    (when modified file)))
 
 (defn- quit-finish [s] (assoc s :exit true))
 
 (defn- quit-save-all
-  "`!` answer: save every modified file buffer, discard the rest, then quit.
-   A failed save cancels the quit rather than losing the buffer."
+  "Save the remaining modified files, then quit if every save succeeded."
   [s names]
-  (let [files (filter #(:file (cmd/buf s %)) names)]
+  (let [files (filter #(modified-file s %) names)]
     (-> (reduce save-buffer-named s files)
         (api/after-command
           (fn [publish!]
@@ -268,31 +260,23 @@
                           (quit-finish s)))))))))
 
 
-(defn- quit-ask
-  "Ask about one modified buffer at a time."
-  [s names]
-  (if-let [[name & more] (seq names)]
-    (let [{:keys [file] :as b} (cmd/buf s name)
-          prompt (if file (str "Save " file "? (y/n/!) ")
-                          (str "Discard changes to " (:name b) "? (y/n/!) "))]
-      (mini/start s prompt
+(defn- quit-ask [s names]
+  (if-let [[name & more] (seq (filter #(modified-file s %) names))]
+    (let [file (modified-file s name)]
+      (mini/start s (str "Save " file "? (y/n/!) ")
         (fn [s ans]
           (case (str/lower-case (str/trim ans))
-            "y" (if file
-                  (-> (save-buffer-named s name)
-                      (api/after-command
-                        (fn [publish!]
-                          (publish! (fn [s]
-                                      (if (:modified (cmd/buf s name))
-                                        (cmd/msg s (str "Quit canceled: " file " was not saved"))
-                                        (quit-ask s more)))))))
-                  (quit-ask s more))
+            "y" (-> (save-buffer-named s name)
+                    (api/after-command
+                      (fn [publish!]
+                        (publish! (fn [s]
+                                    (if (modified-file s name)
+                                      (cmd/msg s (str "Quit canceled: " file " was not saved"))
+                                      (quit-ask s more)))))))
             "n" (quit-ask s more)
-            "!" (quit-save-all s names)
+            "!" (quit-save-all s (cons name more))
             (cmd/msg s "Quit canceled")))))
     (quit-finish s)))
 
 (defn confirm-quit [s]
-  (if-let [names (seq (modified-bufs s))]
-    (quit-ask (dissoc s :exit-pending :exit) names)
-    (quit-finish s)))
+  (quit-ask (dissoc s :exit-pending :exit) (sort (keys (:bufs s)))))

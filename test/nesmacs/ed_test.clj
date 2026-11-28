@@ -1028,12 +1028,34 @@
                (ed/handle-key [:ctrl \c]))]
     (is (:exit s'))))
 
-(deftest exit-modified-scratch-prompts-to-discard
-  (let [s (-> (make-state "abc" 0) (ed/edit 0 0 "x"))
-        s1 (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))]
-    (is (not (:exit s1)))
-    (is (clojure.string/includes? (:prompt (:mini s1)) "Discard"))
-    (is (:exit (answer-mini s1 "y")))))
+(deftest exit-with-untouched-file-keeps-scratch-in-the-session
+  (let [file (java.io.File. persist/*dir* "untouched.txt")]
+    (spit file "unchanged")
+    (let [s (-> (make-state "")
+                (ed/switch-buffer "*scratch*")
+                (ed/edit 0 0 "scratch note")
+                (ed/find-file (.getPath file))
+                (ed/handle-key [:ctrl \x])
+                (ed/handle-key [:ctrl \c]))
+          editor (atom s)]
+      (is (:exit s))
+      (is (nil? (:mini s)))
+      (#'ed/persist-quit! editor)
+      (let [[restored ok?] (session/restore-session (make-state "") (session/load-session!))]
+        (is ok?)
+        (is (= "scratch note" (str (get-in restored [:bufs "*scratch*" :text])))))
+      (is (= "unchanged" (slurp file))))))
+
+(deftest failed-session-save-cancels-quit
+  (let [editor (atom (-> (make-state "scratch note") ed/confirm-quit))
+        discarded? (atom false)]
+    (with-redefs [session/save-session! (constantly false)
+                  session/discard-journal! #(reset! discarded? true)]
+      (#'ed/persist-quit! editor))
+    (is (nil? (:exit @editor)))
+    (is (= "Quit canceled: could not save session" (:msg @editor)))
+    (is (= "scratch note" (text @editor)))
+    (is (false? @discarded?))))
 
 (deftest exit-save-file-answer-y
   (let [f (java.io.File/createTempFile "nesmacs-quit" ".txt")
@@ -1081,11 +1103,15 @@
       (finally (.delete f1) (.delete f2)))))
 
 (deftest exit-unknown-answer-cancels
-  (let [s (-> (make-state "abc" 0) (ed/edit 0 0 "x"))
-        s1 (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))
-        s2 (answer-mini s1 "x")]
-    (is (not (:exit s2)))
-    (is (= "Quit canceled" (:msg s2)))))
+  (let [file (java.io.File. persist/*dir* "unsaved.txt")]
+    (spit file "abc")
+    (let [s (-> (make-state "")
+                (ed/find-file (.getPath file))
+                (ed/edit 0 0 "x")
+                ed/confirm-quit
+                (answer-mini "x"))]
+      (is (not (:exit s)))
+      (is (= "Quit canceled" (:msg s))))))
 
 (deftest quit-ignores-the-minibuffer
   ;; Regression: typing in the minibuffer marks its hidden buffer modified, so
@@ -2087,9 +2113,7 @@
         (reset! ed/editor nil)
         (tu/delete-tree dir)))))
 
-(deftest exit-bang-discards-a-modified-scratch-buffer
-  ;; `!` saves every file buffer and discards the rest. The old check looked at
-  ;; all modified buffers, so a dirty *scratch* cancelled the quit.
+(deftest exit-bang-saves-files-and-keeps-a-modified-scratch-buffer
   (let [f (java.io.File/createTempFile "nesmacs-quit-dirty" ".txt")
         path (.getCanonicalPath f)]
     (try
@@ -2099,6 +2123,7 @@
             s1 (-> s (ed/handle-key [:ctrl \x]) (ed/handle-key [:ctrl \c]))
             s2 (answer-mini s1 "!")]
         (is (:exit s2))
+        (is (= "xscratch!" (str (get-in s2 [:bufs "*test*" :text]))))
         (is (= "yabc" (slurp path))))
       (finally (.delete f)))))
 

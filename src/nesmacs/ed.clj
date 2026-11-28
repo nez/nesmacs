@@ -1195,6 +1195,11 @@
       (clipboard! clip))
     (session/journal-tick! editor)))
 
+(defn- persist-quit! [editor]
+  (if (session/save-session! @editor)
+    (session/discard-journal!)
+    (swap! editor #(-> (dissoc % :exit) (msg "Quit canceled: could not save session")))))
+
 (defn command-loop [{:keys [active? input! render!]}]
   (loop [last-viewports nil]
     (when-let [[rows cols] (t/apply-pending-resize!)]
@@ -1226,12 +1231,8 @@
       (dap/tick! editor)
       (packagehub/tick! editor)
       (view/use-theme! (:theme @editor))
+      (when (:exit @editor) (persist-quit! editor))
       (when (and render! (not (:exit @editor))) (render!))
-      (when (:exit @editor)
-        ;; Clean exit: the final snapshot includes every edit, so the journal
-        ;; is only deleted after that write succeeds.
-        (when (session/save-session! @editor)
-          (session/discard-journal!)))
       (when-not (:exit @editor) (recur viewports)))))
 
 (defn- run-all

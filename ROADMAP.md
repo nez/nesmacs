@@ -68,8 +68,8 @@ tmux without touching the editor side.
   paste stays the terminal's job.
 - Undo grouping: one undo boundary per command; adjacent inserts coalesce.
   Redo unchanged.
-- Safe quit: `C-x C-c` with modified buffers asks to save each (`y/n/!`),
-  not just warn.
+- Safe quit: `C-x C-c` asks to save modified files (`y/n/!`) and keeps
+  scratch buffers in the session.
 - Crash recovery: on startup, find `#file#` auto-saves and offer to restore.
 - Scripted pty test for start → key → exit and for config-load errors.
 

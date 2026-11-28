@@ -430,10 +430,10 @@ def run(directory, editor):
 
         browser.ctrl("x")
         browser.ctrl("c")
-        browser.see("Discard changes to *scratch*?")
-        browser.key("y")
-        browser.key("Enter")
         editor.wait_for_exit()
+        assert r"web-browser-symbol\nweb-browser-symbol" in (
+            editor.config / "session.edn"
+        ).read_text(), "scratch text was not saved in the session"
 
 
 if __name__ == "__main__":
