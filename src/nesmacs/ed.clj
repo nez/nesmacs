@@ -380,6 +380,12 @@
         (assoc :windows tree :cur-window path :buf (get-in tree (conj path :buffer)))
         cmd/load-window-point)))
 
+(defn- close-window-or-quit [s]
+  (let [s (cond-> s (:mini s) mini/close)]
+    (if (seq (:cur-window s))
+      (delete-window s)
+      (confirm-quit s))))
+
 (defn delete-other-windows [s]
   (let [s (cmd/save-cur-point s)
         [tree path] (win/only (:windows s) (:cur-window s))]
@@ -919,6 +925,8 @@
    ["other-window" other-window "Switch to the next window." "C-x o"]
    ["switch-to-buffer" switch-to-buffer "Show another buffer in the current window." "C-x b"]
    ["delete-window" delete-window "Delete the current window." "C-x 0"]
+   ["close-window-or-quit" close-window-or-quit "Close the current window, or quit if it is the only one." "C-x C-c"]
+   ["quit-editor" confirm-quit "Ask to save modified files and quit the editor."]
    ["delete-other-windows" delete-other-windows "Delete all windows except the current one." "C-x 1"]
    ["enlarge-window" enlarge-window "Make the current window one row taller." "C-x ^"]
    ["shrink-window" shrink-window "Make the current window one row shorter."]
@@ -1079,7 +1087,6 @@
                        \v (prompt "Describe variable: " describe-variable)}
            [:ctrl \x] {[:ctrl \f] (prompt "Find file: " find-file mini/file-completer)
                        [:ctrl \b] buflist/open
-                       [:ctrl \c] confirm-quit
                        \d (prompt "Dired: " dired/open mini/file-completer)
                        \k (prompt "Kill buffer: " kill-buffer)
                        \r cx-r-map
@@ -1097,7 +1104,7 @@
     {[:ctrl \c] #(terminal/input % [:ctrl \c])
      key (if (= binding (get bindings key))
            #(-> % (assoc :pending binding)
-                  (msg "0 close pane   o next pane   b switch buffer   C-c quit editor"))
+                  (msg "0 close pane   o next pane   b switch buffer   C-c close or quit"))
            binding)
      [:meta \x] (resolve-binding s [:meta \x])
      [:ctrl \b] buflist/open
@@ -1286,7 +1293,7 @@
 
 (def ^:private scratch-text
   (str ";; nesmacs\n"
-       ";; C-x C-f open  |  C-x C-s save  |  C-x C-c quit\n"
+       ";; C-x C-f open  |  C-x C-s save  |  C-x C-c close pane or quit\n"
        ";; M-x commands  |  M-: evaluate Clojure  |  C-g cancel\n\n"))
 
 (defn- register-builtin-modes [s]

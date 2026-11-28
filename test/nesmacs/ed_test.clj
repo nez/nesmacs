@@ -1066,6 +1066,19 @@
                (ed/handle-key [:ctrl \c]))]
     (is (:exit s'))))
 
+(deftest ctrl-x-ctrl-c-closes-the-focused-pane-before-quitting
+  (let [s (-> (make-state "abc")
+              ed/split-window-right
+              (ed/switch-buffer "other")
+              (ed/edit 0 0 "unsaved")
+              (ed/mini-start "Test prompt: " (fn [s _] s)))
+        closed (reduce ed/handle-key s [[:ctrl \x] [:ctrl \c]])]
+    (is (= :leaf (get-in closed [:windows :type])))
+    (is (= "*test*" (:buf closed)))
+    (is (= "unsaved" (str (get-in closed [:bufs "other" :text]))))
+    (is (nil? (:mini closed)))
+    (is (nil? (:exit closed)))))
+
 (deftest exit-with-untouched-file-keeps-scratch-in-the-session
   (let [file (java.io.File. persist/*dir* "untouched.txt")]
     (spit file "unchanged")

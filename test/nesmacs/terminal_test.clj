@@ -143,14 +143,15 @@
   (let [s (ed/split-window-right (make-state ""))
         prefix #(-> % (ed/handle-key [:ctrl \c]) (ed/handle-key [:ctrl \x]))
         pending (prefix s)
-        other (ed/handle-key pending \o)
-        closed (ed/handle-key (prefix other) \0)]
+        other (ed/handle-key pending \o)]
     (is (:pending pending))
     (is (nil? (:exit pending)))
     (is (= [:b] (:cur-window other)))
-    (is (= :leaf (get-in closed [:windows :type])))
-    (is (:terminal (ed/cur closed)))
-    (is (nil? (:exit closed)))))
+    (doseq [key [\0 [:ctrl \c]]]
+      (let [closed (ed/handle-key (prefix other) key)]
+        (is (= :leaf (get-in closed [:windows :type])))
+        (is (:terminal (ed/cur closed)))
+        (is (nil? (:exit closed)))))))
 
 (deftest terminal-editor-prefix-inherits-configured-bindings
   (let [editor (atom (ed/split-window-right (make-state "")))

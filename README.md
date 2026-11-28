@@ -30,9 +30,10 @@ removes the jar and launcher.
 Run `nesmacs path/to/file.clj` to open a file directly. Pass several paths to
 open them in separate buffers with the first file visible.
 
-`C-x C-c` asks to save modified files before exiting. Scratch buffers stay in
-the session. First launch creates `~/.nesmacs/` for config, session and the
-crash journal.
+`C-x C-c` closes the focused pane when there is a split. With one pane it asks
+to save modified files before exiting. `M-x quit-editor` exits with any layout.
+Scratch buffers stay in the session. First launch creates `~/.nesmacs/` for
+config, session and the crash journal.
 
 From a checkout, `./install.sh` uses `target/nesmacs.jar` or builds it with the
 Clojure CLI. `make setup` is the contributor bootstrap (Clojure CLI, linter,
@@ -56,7 +57,8 @@ Real terminals are core: `C-c t` runs `$SHELL` in a tmux session, so the shell
 `C-c C-c` interrupts, `C-c C-k` kills the buffer and session, `C-c C-r`
 restarts and `C-c M-x` reaches `M-x`. While the terminal has focus, use
 `C-c C-x o` for the next pane, `C-c C-x b` to choose a buffer, or
-`C-c C-x 0` to close the pane. `C-c C-x C-c` exits the editor.
+`C-c C-x 0` to close the pane. `C-c C-x C-c` closes the focused pane in a
+split or exits with one pane. `C-c C-q` exits with any layout.
 Clicking a terminal pane focuses it. The shell receives keyboard input.
 
 ## The part that is different

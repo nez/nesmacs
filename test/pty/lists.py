@@ -127,7 +127,7 @@ try:
     ok &= see_divider(51)
     keys(b"\x1b[<0;51;1M\x1b[<32;65;1M\x1b[<0;65;1m")
     ok &= see_divider(65)
-    keys(b"\x180")
+    keys(b"\x18\x03")                                      # C-x C-c closes the pane
 
     keys(b"\x1bxgit-blame\r")                              # M-x git-blame
     ok &= read_until("Blame ", label="blame list opened")
@@ -168,7 +168,7 @@ try:
     ok &= read_until("#7", label="forge list opened")
     ok &= read_until("Fix the thing", label="forge entry parsed")
 
-    keys(b"\x18\x03")                                      # C-x C-c
+    keys(b"\x183\x1bxquit-editor\r")                       # Quit explicitly with a split
     exited = wait_exit()
     checks.append(("clean exit", exited))
     ok &= exited
