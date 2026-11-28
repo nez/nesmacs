@@ -1,6 +1,7 @@
 (ns nesmacs.terminal-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
+            [nesmacs.api :as api]
             [nesmacs.buf :as buf]
             [nesmacs.ed :as ed]
             [nesmacs.persist :as persist]
@@ -150,6 +151,27 @@
     (is (= :leaf (get-in closed [:windows :type])))
     (is (:terminal (ed/cur closed)))
     (is (nil? (:exit closed)))))
+
+(deftest terminal-editor-prefix-inherits-configured-bindings
+  (let [editor (atom (ed/split-window-right (make-state "")))
+        prefix [[:ctrl \c] [:ctrl \x]]
+        editor-key #(reduce ed/handle-key @editor (conj prefix %))]
+    (binding [api/*state* editor]
+      (api/bind! "C-x b" #(assoc % :msg "User binding"))
+      (is (= "User binding" (:msg (editor-key \b))))
+      (api/register-mode! :terminal-mode :major
+                          {"C-x b" #(assoc % :msg "Mode binding")})
+      (is (= "Mode binding" (:msg (editor-key \b))))
+      (is (= [:b] (:cur-window (editor-key \o)))))))
+
+(deftest terminal-editor-prefix-runs-rebound-editor-keys
+  (let [editor (atom (make-state ""))
+        editor-key #(reduce ed/handle-key @editor [[:ctrl \c] %])]
+    (binding [api/*state* editor]
+      (api/bind! "C-x" #(assoc % :msg "Rebound C-x"))
+      (api/bind! "M-x" #(assoc % :msg "Rebound M-x")))
+    (is (= "Rebound C-x" (:msg (editor-key [:ctrl \x]))))
+    (is (= "Rebound M-x" (:msg (editor-key [:meta \x]))))))
 
 (deftest restart-resets-a-dead-terminal
   (let [s (assoc-in (make-state "") [:bufs "*term*" :terminal :status] :dead)

@@ -1088,18 +1088,22 @@
                        \e call-last-kbd-macro}}
           (builtin-command-specs)))
 
-(def ^:private terminal-prefix
+(defn- terminal-prefix
   "C-c is the only key the editor keeps inside a terminal. C-c C-c interrupts
-   the process; C-c C-x opens the normal C-x map so the editor stays reachable."
-  {[:ctrl \c] #(terminal/input % [:ctrl \c])
-   [:ctrl \x] #(-> %
-                    (assoc :pending (get bindings [:ctrl \x]))
-                    (msg "0 close pane   o next pane   b switch buffer   C-c quit editor"))
-   [:meta \x] (prompt "M-x " execute-extended-command command-completer)
-   [:ctrl \b] buflist/open
-   [:ctrl \k] #(kill-buffer % nil)
-   [:ctrl \q] confirm-quit
-   [:ctrl \r] terminal/restart})
+   the process; C-c C-x and C-c M-x use the configured editor bindings."
+  [s]
+  (let [key [:ctrl \x]
+        binding (resolve-binding s key)]
+    {[:ctrl \c] #(terminal/input % [:ctrl \c])
+     key (if (= binding (get bindings key))
+           #(-> % (assoc :pending binding)
+                  (msg "0 close pane   o next pane   b switch buffer   C-c quit editor"))
+           binding)
+     [:meta \x] (resolve-binding s [:meta \x])
+     [:ctrl \b] buflist/open
+     [:ctrl \k] #(kill-buffer % nil)
+     [:ctrl \q] confirm-quit
+     [:ctrl \r] terminal/restart}))
 
 (defn- dispatch-binding [s key binding prefixed?]
   (cond
@@ -1169,12 +1173,10 @@
              ;; minibuffer-scoped keys
              (and (:mini s) (mini/keymap key)) ((mini/keymap key) s)
 
-             ;; Terminal char mode: every key goes to the process except C-c,
-             ;; the editor prefix. C-c C-x opens the normal C-x map so quitting,
-             ;; visiting files and the buffer list stay reachable.
+             ;; C-c opens the editor prefix in terminal char mode.
              (and (= :terminal-mode (:mode (cur s))) (not (:mini s)))
              (if (= [:ctrl \c] key)
-               (assoc s :pending terminal-prefix)
+               (assoc s :pending (terminal-prefix s))
                (terminal/input s key))
 
              :else
