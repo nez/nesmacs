@@ -185,10 +185,12 @@
 (def redo (replay-cmd :redo buf/redo "redo"))
 
 (defn keyboard-quit [s]
-  (msg (if (:mini s)
-         (mini/close s)
-         (update-cur s #(assoc % :mark nil)))
-       "Quit"))
+  (let [s (dissoc s :pending :prefix-arg :capture-next :escape-count)]
+    (cond
+      (:isearch s) (search/isearch-cancel s)
+      (:query-replace s) (search/handle-replace s :escape)
+      (:mini s) (msg (mini/close s) "Quit")
+      :else (msg (update-cur s #(assoc % :mark nil)) "Quit"))))
 
 (defn goto-line [s input]
   (if-let [n (try (Integer/parseInt (str/trim input)) (catch Exception _ nil))]
@@ -1074,13 +1076,29 @@
                     :else (msg s (str key " undefined")))
                   :prefix-arg)))
 
+(defn- cancel-escape? [s key]
+  (and (= key :escape)
+       (not (:query-replace s))
+       (if-let [pending (:pending s)]
+         (nil? (:escape pending))
+         (or (:capture-next s)
+             (:isearch s)
+             (and (or (:mini s) (not= :terminal-mode (:mode (cur s))))
+                  (nil? (resolve-binding s key)))))))
+
 (defn handle-key
   "Pure state transition. Handles prefix keys via :pending state.
    Works identically for terminal and web — one key at a time."
   [s key]
-  (let [s (assoc s :msg nil)
+  (let [cancel-escape (cancel-escape? s key)
+        s (if cancel-escape s (-> s (dissoc :escape-count) (assoc :msg nil)))
         s (cond-> s (:macro-recording s) (update :macro-recording conj key))
         s' (cond
+             cancel-escape
+             (if (= 2 (:escape-count s))
+               (keyboard-quit s)
+               (update s :escape-count (fnil inc 0)))
+
              (and (map? key) (= :mouse (:type key)))
              (if (= :scroll (:action key)) (mouse-scroll s key) (mouse-click s key))
 

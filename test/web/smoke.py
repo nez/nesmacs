@@ -185,7 +185,7 @@ class Browser:
             raise AssertionError(f"{error}\n{self.screen()}") from error
 
     def key(self, key, modifier=0):
-        special = {"Enter": 13, "Backspace": 8, "Tab": 9, "ArrowDown": 40, "ArrowRight": 39,
+        special = {"Enter": 13, "Backspace": 8, "Tab": 9, "Escape": 27, "ArrowDown": 40, "ArrowRight": 39,
                    "Home": 36, "End": 35, "PageDown": 34, "-": 189, ".": 190, "/": 191,
                    ">": 190, ":": 186}
         number = special.get(key, ord(key.upper()) if len(key) == 1 else 0)
@@ -288,6 +288,12 @@ def run(directory, editor):
     with Browser(directory, editor) as browser:
         assert not any(url.startswith(("http:", "https:")) and not url.startswith(editor.url + "/")
                        for url in browser.network_urls), browser.network_urls
+        browser.meta("x")
+        browser.type("save")
+        browser.see("M-x save")
+        for _ in range(3):
+            browser.key("Escape")
+        browser.see("Quit")
         browser.open_file(sample)
         browser.see("beta needle")
         browser.type("A")

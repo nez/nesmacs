@@ -253,6 +253,35 @@
     (is (nil? (:mini s')))
     (is (= "Quit" (:msg s')))))
 
+(deftest three-escapes-cancel-editor-input
+  (let [s (make-state "abc abc" 1)
+        mini (-> s (ed/mini-start "Test: " (fn [_ _] (throw (IllegalStateException.))))
+                 (ed/handle-key \x))
+        search (-> s (ed/isearch-start :forward) (ed/handle-key \a))
+        cancel #(reduce ed/handle-key % [:escape :escape :escape])]
+    (is (some? (:mini (reduce ed/handle-key mini [:escape :escape]))))
+    (is (nil? (:mini (cancel mini))))
+    (is (= (:buf s) (:buf (cancel mini))))
+    (is (nil? (:pending (cancel (ed/handle-key s [:ctrl \x])))))
+    (is (nil? (:capture-next (cancel (ed/point-to-register s)))))
+    (is (nil? (:isearch (cancel search))))
+    (is (= 1 (:point (ed/cur (cancel search)))))
+    (is (empty? (:props (ed/cur (cancel search)))))
+    (let [marked (ed/set-mark s)
+          interrupted (reduce ed/handle-key marked [:escape :escape :right :escape])]
+      (is (some? (:mark (ed/cur interrupted))))
+      (is (nil? (:mark (ed/cur (cancel marked))))))))
+
+(deftest escape-preserves-explicit-bindings-and-terminal-input
+  (let [s (make-state "abc")
+        bound (assoc-in s [:bindings :escape] #(assoc % :explicit-escape true))
+        terminal (update-in s [:bufs "*test*"] assoc :mode :terminal-mode :terminal {:in []})]
+    (is (:explicit-escape (ed/handle-key bound :escape)))
+    (is (= [:escape] (get-in (ed/handle-key terminal :escape)
+                             [:bufs "*test*" :terminal :in])))
+    (is (nil? (:pending (reduce ed/handle-key terminal
+                                 [[:ctrl \c] :escape :escape :escape]))))))
+
 ;; --- Buffer management ---
 
 (deftest switch-buffer-existing

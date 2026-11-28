@@ -1,6 +1,7 @@
 (ns nesmacs.term-test
   (:require [clojure.test :refer [deftest is]]
-            [nesmacs.term :as term]))
+            [nesmacs.term :as term])
+  (:import [java.io ByteArrayInputStream PushbackInputStream]))
 
 (defn- byte-source
   "next-byte function over a seq of byte values, -1 when exhausted."
@@ -13,6 +14,12 @@
         (if (< n (count bs)) (bs n) -1)))))
 
 (defn- utf8 [^String s] (mapv int (.getBytes s "UTF-8")))
+
+(deftest consecutive-escapes-keep-following-key-sequences-intact
+  (let [bytes (.getBytes "\u001b\u001b\u001b\u001b[A\u001bx" "UTF-8")]
+    (with-redefs [term/stdin (PushbackInputStream. (ByteArrayInputStream. bytes))]
+      (is (= [:escape :escape :escape :up [:meta \x]]
+             (vec (repeatedly 5 #(term/read-key-timeout 0))))))))
 
 (deftest paste-reader-strips-markers
   (is (= "abc"

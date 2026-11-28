@@ -110,6 +110,11 @@ ok = True
 try:
     ok &= read_until("alpha line", label="source opened from the launch argument")
 
+    keys(b"\x1bxsave")
+    ok &= read_until("M-x save", label="command prompt accepts input")
+    keys(b"\x1b\x1b\x1b")
+    ok &= read_until("Quit", label="three consecutive Escape bytes cancel the prompt")
+
     keys(b"\x1bxgit-blame\r")                              # M-x git-blame
     ok &= read_until("Blame ", label="blame list opened")
     ok &= read_until("Test User", label="blame shows the author")

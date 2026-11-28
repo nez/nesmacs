@@ -1,7 +1,7 @@
 (ns nesmacs.term
   (:require [clojure.string :as str]
             [nesmacs.log :as log])
-  (:import [java.io InputStream]
+  (:import [java.io PushbackInputStream]
            [sun.misc Signal SignalHandler]))
 
 ;; Raw terminal via stty + System.in/out. No JLine.
@@ -50,7 +50,7 @@
 
 ;; --- Input from System.in ---
 
-(def ^InputStream stdin System/in)
+(def ^PushbackInputStream stdin (PushbackInputStream. System/in))
 
 (defn byte-available? [] (> (.available stdin) 0))
 
@@ -153,6 +153,7 @@
   (let [b (read-byte-timeout 50)]
     (cond
       (< b 0)   :escape
+      (= b 27)  (do (.unread stdin (int b)) :escape)
       (= b 91)  (parse-csi)
       (= b 79)  (let [b2 (read-byte-timeout 50)]
                   (if (< b2 0) nil

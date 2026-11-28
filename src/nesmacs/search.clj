@@ -54,7 +54,7 @@
   ;; keystroke survives into the normal echo area after RET.
   (-> s (clear-prop :isearch) (dissoc :isearch) (assoc :msg nil)))
 
-(defn- isearch-cancel [s]
+(defn isearch-cancel [s]
   (let [origin (get-in s [:isearch :origin])]
     (-> s (clear-prop :isearch)
           (dissoc :isearch)

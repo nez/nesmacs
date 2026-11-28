@@ -44,7 +44,7 @@ Your fingers already work: `C-f C-b C-n C-p C-a C-e`, `C-s`, `M-%`, `C-x C-f`,
 `C-x C-s`, `C-x 2`, `C-x o`, `M-x`, `M-:`. Beyond those: `C-x g` git status,
 `C-x p g` ripgrep the project, `M-.` definition, `C-c h` hover, `C-c i`
 complete symbol, `C-x r` registers and rectangles, and `C-c t` opens a
-terminal.
+terminal. `Esc Esc Esc` cancels the current editor prompt, key prefix, or search.
 
 Real terminals are core: `C-c t` runs `$SHELL` in a tmux session, so the shell
 (outside the editor) survives an editor exit or crash and reattaches next start.
