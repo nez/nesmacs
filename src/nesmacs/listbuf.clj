@@ -49,8 +49,7 @@
    An open minibuffer keeps focus: a job that finishes mid-prompt must not
    replace its input."
   [s name b]
-  (let [s (install s name b)]
-    (if (:mini s) s (cmd/set-cur-buffer s name))))
+  (-> s (install name b) (cmd/set-cur-buffer name)))
 
 (defn open
   "Build `spec` and show it (see `show`)."

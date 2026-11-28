@@ -1,5 +1,6 @@
 (ns nesmacs.view
   (:require [clojure.string :as str]
+            [nesmacs.buf :as buf]
             [nesmacs.face :as face]
             [nesmacs.fold :as fold]
             [nesmacs.gap :as gap]
@@ -401,7 +402,7 @@
         buf-name (:buffer window)
         buf (get (:bufs state) buf-name)
         content (:text buf)
-        point (:point buf)
+        point (if current? (:point buf) (buf/clamp-pos buf (or (:point window) (:point buf))))
         mark (:mark buf)
         mode (:mode buf)
         version (:version buf)
@@ -493,8 +494,11 @@
           (pad-to-cols! (text/display-width c) cols))))))
 
 (defn- echo-message [state]
-  (let [mode (get-in state [:bufs (:buf state) :mode])]
-    (or (:msg state) (get-in state [:modes mode :hint]) "")))
+  (or (:msg state)
+      (when-let [{:keys [direction pattern]} (:isearch state)]
+        (str (if (= direction :forward) "I-search: " "I-search backward: ") pattern))
+      (get-in state [:modes (get-in state [:bufs (:buf state) :mode]) :hint])
+      ""))
 
 (defn- render-echo-area
   [{:keys [rows cols] :as state}]
@@ -521,16 +525,10 @@
         (pad-to-cols! (+ pw input-w (if hint (text/display-width hint) 0)) cols)
         (t/move mini-row (+ pw (min avail (text/display-width input 0 cursor)))))
 
-      isearch
-      (let [p (str (if (= (:direction isearch) :forward) "I-search: " "I-search backward: ")
-                   (:pattern isearch))
-            p' (clip-to-cols p cols)]
-        (t/sg (:prompt faces)) (t/tw p') (t/reset-sg)
-        (pad-to-cols! (text/display-width p') cols))
-
       :else
       (let [m (clip-to-cols (echo-message state) cols)]
-        (t/reset-sg) (t/tw m)
+        (if isearch (t/sg (:prompt faces)) (t/reset-sg))
+        (t/tw m) (t/reset-sg)
         (pad-to-cols! (text/display-width m) cols)))))
 
 ;; --- Frame signature (dirty-flag input) ---
@@ -539,7 +537,7 @@
   (let [buf (get (:bufs state) (:buffer window))]
     [(:buffer window) (:version buf) (:point buf) (:mark buf)
      (:mode buf) (:minor-modes buf) (:modified buf) (:name buf) (:title buf)
-     (:props buf) (:scroll window) (:hscroll window) (:collapsed buf)
+     (:props buf) (:scroll window) (:hscroll window) (:point window) (:collapsed buf)
      (:gutter buf) (:highlight-line? buf) current?]))
 
 (defn- echo-sig [state]
@@ -548,9 +546,7 @@
     (let [mb (get (:bufs state) (:buf state))]
       [:mini (get-in state [:mini :prompt]) (str (:text mb)) (:point mb)
        (get-in state [:mini :candidates]) (get-in state [:mini :sel])])
-    (:isearch state)
-    [:isearch (:direction (:isearch state)) (:pattern (:isearch state))]
-    :else [:msg (echo-message state)]))
+    :else [:msg (echo-message state) (boolean (:isearch state))]))
 
 (defn- frame-sig [state layouts cur-path]
   [(:rows state) (:cols state) layouts cur-path @theme-version

@@ -21,10 +21,11 @@
   [s] (into [:windows] (:cur-window s)))
 
 (defn set-cur-buffer
-  "Point the current window at `name` and cache it as (:buf s). Clears any
-   saved point/mark so stale coords from the previous buffer can't leak in."
+  "Show `name` in the current window. An active minibuffer keeps focus."
   [s name]
-  (-> s (assoc :buf name) (update-in (cur-window-path s) win/set-buffer name)))
+  (if (:mini s)
+    s
+    (-> s (assoc :buf name) (update-in (cur-window-path s) win/set-buffer name))))
 
 (defn ensure-buffer
   "Return [state name] for a requested buffer, a visible fallback, or a new scratch buffer."
@@ -70,13 +71,19 @@
     (update-cur s #(merge % (buf/clamp-window-points b (get-in s (cur-window-path s)))))
     s))
 
-(defn switch-window
-  "Save current point, swap `:cur-window` to `path`, load that window's point,
-   and update `:buf` to match its buffer."
-  [s path]
-  (let [s (-> s save-cur-point (assoc :cur-window path))
-        target-buf (get-in s (conj (cur-window-path s) :buffer))]
-    (-> s (assoc :buf target-buf) load-window-point)))
+(defn change-windows
+  "Apply a window operation returning [tree focused-path], retaining each pane's point."
+  [s operation]
+  (if (:mini s)
+    s
+    (let [s (save-cur-point s)
+          [tree path] (operation (:windows s) (:cur-window s))]
+      (-> s
+          (assoc :windows tree :cur-window path :buf (get-in tree (conj path :buffer)))
+          load-window-point))))
+
+(defn switch-window [s path]
+  (change-windows s (fn [tree _] [tree path])))
 (defn set-point [s f] (update-cur s #(buf/set-point % f)))
 (defn edit
   ([s from to repl] (edit s from to repl false))

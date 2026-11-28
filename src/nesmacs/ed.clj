@@ -89,8 +89,11 @@
 (def ^:private next-line-raw     (line-move 1))
 (def ^:private previous-line-raw (line-move -1))
 
+(defn- pane-body-rows [s]
+  (max 1 (dec (get-in (win/frame-geometry s) [:layout (:cur-window s) :rows] 1))))
+
 (defn- scroll-by [line-cmd]
-  (fn [s] (nth (iterate line-cmd s) (max 1 (- (:rows s 24) 2)))))
+  (fn [s] (nth (iterate line-cmd s) (pane-body-rows s))))
 
 (def scroll-down (scroll-by next-line-raw))
 (def scroll-up   (scroll-by previous-line-raw))
@@ -306,7 +309,7 @@
   "Move the current window's scroll so point lands on the middle row."
   [s]
   (let [b (cur s) t (:text b) p (:point b)
-        rows (max 1 (- (:rows s 24) 2))
+        rows (pane-body-rows s)
         point-line  (gap/line-of t p)
         target-line (max 0 (- point-line (quot rows 2)))
         new-scroll  (gap/nth-line-start t target-line)]
@@ -371,25 +374,16 @@
 ;; --- Window commands ---
 
 (defn- do-split [s dir]
-  (let [[tree path] (win/split (:windows s) (:cur-window s) dir)]
-    (-> s (assoc :windows tree :cur-window path))))
+  (cmd/change-windows s #(win/split %1 %2 dir)))
 
 (defn split-window-below [s] (do-split s :stacked))
 (defn split-window-right [s] (do-split s :side-by-side))
 
 (defn other-window [s]
-  (if (:mini s)
-    s
-    (cmd/switch-window s (win/next-leaf (:windows s) (:cur-window s)))))
+  (cmd/change-windows s (fn [tree path] [tree (win/next-leaf tree path)])))
 
 (defn delete-window [s]
-  (if (:mini s)
-    s
-    (let [s (cmd/save-cur-point s)
-          [tree path] (win/delete-window (:windows s) (:cur-window s))]
-      (-> s
-          (assoc :windows tree :cur-window path :buf (get-in tree (conj path :buffer)))
-          cmd/load-window-point))))
+  (cmd/change-windows s win/delete-window))
 
 (defn- close-window-or-quit [s]
   (let [s (cond-> s (:mini s) mini/close)]
@@ -398,9 +392,7 @@
       (confirm-quit s))))
 
 (defn delete-other-windows [s]
-  (let [s (cmd/save-cur-point s)
-        [tree path] (win/only (:windows s) (:cur-window s))]
-    (-> s (assoc :windows tree :cur-window path))))
+  (cmd/change-windows s win/only))
 
 (defn- resize [s dir delta]
   (let [total (case dir :stacked (:rows s) :side-by-side (:cols s))
@@ -1166,13 +1158,14 @@
                (keyboard-quit s)
                (update s :escape-count (fnil inc 0)))
 
-             mouse? (mouse-event s key)
+             mouse? (search/finish-displaced (mouse-event s key))
 
              ;; Bracketed paste is one insert, hence one undo entry. In a
              ;; terminal it belongs to the process, not to the read-only buffer.
              (and (vector? key) (= :paste (first key)))
              (cond
                (:isearch s) (search/isearch-append s (buf/normalize-eol (second key)))
+               (:query-replace s) (search/handle-replace s key)
                (= :terminal-mode (:mode (cur s))) (terminal/input s key)
                :else (cmd/insert-at-point s (buf/normalize-eol (second key)) true))
 

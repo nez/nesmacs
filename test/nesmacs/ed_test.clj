@@ -8,6 +8,7 @@
             [nesmacs.complete :as complete]
             [nesmacs.ed :as ed]
             [nesmacs.files :as files]
+            [nesmacs.gap :as gap]
             [nesmacs.mini :as mini]
             [nesmacs.job :as job]
             [nesmacs.lsp :as lsp]
@@ -628,6 +629,23 @@
     (is (= "Buffer is read-only" (:msg (ed/handle-key s [:meta \%]))))
     (is (= "Buffer is read-only" (:msg (ed/query-replace-regexp-cmd s))))))
 
+(deftest zero-width-replacement-includes-the-next-eof-match
+  (let [s (#'search/query-replace-begin (make-state "ab") "(?=b)|$" "X" true)
+        result (ed/handle-key s \!)]
+    (is (= "aXbX" (text result)))
+    (is (= "Replaced 2 occurrence(s)" (:msg result)))))
+
+(deftest clicking-another-pane-finishes-incremental-search
+  (let [s (-> (make-state "abc") ed/split-window-right ed/other-window
+              (ed/switch-buffer "right") ed/other-window)
+        searching (reduce ed/handle-key s [[:ctrl \s] \b])
+        col (get-in (win/frame-geometry searching) [:layout [:b] :col])
+        clicked (ed/handle-key searching {:type :mouse :action :press :button 0 :row 0 :col col})]
+    (is (seq (get-in searching [:bufs "*test*" :props])))
+    (is (= "right" (:buf clicked)))
+    (is (nil? (:isearch clicked)))
+    (is (empty? (get-in clicked [:bufs "*test*" :props])))))
+
 (deftest query-replace-begin-no-match
   (let [s (#'search/query-replace-begin (make-state "hello" 0) "zzz" "!" false)]
     (is (nil? (:query-replace s)))
@@ -1106,6 +1124,18 @@
     (is (= "Z" (text result)))
     (is (= "right" (str (get-in result [:bufs "right" :text]))))
     (is (= [:a] (:cur-window result)))))
+
+(deftest listing-buffers-keeps-the-active-prompt
+  (let [s (reduce ed/handle-key (make-state "document") [[:meta \x] [:ctrl \x] [:ctrl \b] \Z])]
+    (is (= "Z" (text s)))
+    (is (= "document" (str (get-in s [:bufs "*test*" :text]))))
+    (is (= "*test*" (get-in s [:windows :buffer])))))
+
+(deftest paging-uses-the-height-of-the-focused-pane
+  (let [s (ed/split-window-below (make-state (apply str (repeat 50 "line\n"))))
+        rows (get-in (win/frame-geometry s) [:layout [:a] :rows])
+        moved (ed/scroll-down s)]
+    (is (= (dec rows) (gap/line-of (:text (ed/cur moved)) (point moved))))))
 
 (deftest buffer-picker-requires-a-path-for-duplicate-names
   (let [file (fn [dir] (java.io.File. persist/*dir* (str dir "/index.js")))

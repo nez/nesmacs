@@ -14,7 +14,8 @@
   (cmd/update-cur s #(assoc % :props (props/set-owner (:props %) owner from to face {}))))
 
 (defn- clear-prop [s owner]
-  (cmd/update-cur s #(assoc % :props (props/remove-owner (:props %) owner))))
+  (let [buffer (or (get-in s [owner :buffer]) (:buf s))]
+    (cond-> s (cmd/buf s buffer) (update-in [:bufs buffer :props] props/remove-owner owner))))
 
 ;; --- Incremental search ---
 
@@ -37,6 +38,7 @@
                     (text/search-backward t pattern (if extend? (+ p pn) p)))]
         (if found
           (-> (cmd/set-point s (fn [_ _] found))
+              (assoc-in [:isearch :point] found)
               (set-prop :isearch :match found (+ found pn)))
           (cmd/msg s (str "Failing I-search: " pattern)))))))
 
@@ -46,8 +48,9 @@
     ;; isearch would operate on the minibuffer text, and the minibuffer's
     ;; prompt would remain live underneath. Refuse.
     (cmd/msg s "Command attempted to use disabled command in minibuffer")
-    (-> s (assoc :isearch {:pattern "" :direction direction
-                           :origin (:point (cmd/cur s))}))))
+    (let [point (:point (cmd/cur s))]
+      (assoc s :isearch {:pattern "" :direction direction :origin point :point point
+                         :buffer (:buf s) :window (:cur-window s)}))))
 
 (defn- isearch-accept [s]
   ;; Clear :msg too — otherwise a "Failing I-search: foo" from the final
@@ -55,10 +58,10 @@
   (-> s (clear-prop :isearch) (dissoc :isearch) (assoc :msg nil)))
 
 (defn isearch-cancel [s]
-  (let [origin (get-in s [:isearch :origin])]
-    (-> s (clear-prop :isearch)
-          (dissoc :isearch)
-          (cmd/set-point (fn [_ _] origin))
+  (let [{:keys [origin buffer window]} (:isearch s)]
+    (-> (cond-> (isearch-accept s)
+          (and (= buffer (:buf s)) (= window (:cur-window s)))
+          (cmd/set-point (fn [_ _] origin)))
           (cmd/msg "Quit"))))
 
 (defn- isearch-edit
@@ -119,10 +122,8 @@
                 from " with " to ": (y/n/!/q)"))))
 
 (defn- qr-exit [s]
-  (let [{:keys [buffer] n :count :or {n 0}} (:query-replace s)
-        buffer (or buffer (:buf s))]
-    (-> (cond-> s (cmd/buf s buffer)
-          (update-in [:bufs buffer :props] props/remove-owner :qr))
+  (let [n (get-in s [:query-replace :count] 0)]
+    (-> (clear-prop s :query-replace)
           (dissoc :query-replace)
           (cmd/msg (str "Replaced " n " occurrence(s)")))))
 
@@ -142,7 +143,7 @@
   [s found]
   (if-let [[start end groups] found]
     (-> s (cmd/goto-char start)
-          (set-prop :qr :match start end)
+          (set-prop :query-replace :match start end)
           (update :query-replace assoc :match-start start :match-end end :groups groups
                   :version (:version (cmd/cur s)))
           qr-msg)
@@ -160,19 +161,12 @@
   (let [{:keys [to regex? match-end groups]} (:query-replace s)
         p (long (:point (cmd/cur s)))
         replacement (if regex? (expand-replacement to groups) to)
-        zero-width? (= p (long match-end))
         s2 (-> s (cmd/edit p match-end replacement)
-                 (update-in [:query-replace :count] (fnil inc 0)))]
-    (if zero-width?
-      ;; A zero-width match (e.g. regex `$` or `a*`) would be refound at the
-      ;; same spot. Step past it — and exit at EOF — so neither the search
-      ;; nor replace-all can loop forever.
-      (let [s3 (cmd/update-cur s2 #(update % :point inc))
-            b  (cmd/cur s3)]
-        (if (>= (long (:point b)) (count (:text b)))
-          (qr-exit s2)
-          (qr-show s3 (qr-find-from s3 (:point b)))))
-      (qr-show s2 (qr-find-from s2 (:point (cmd/cur s2)))))))
+                 (update-in [:query-replace :count] inc))
+        point (:point (cmd/cur s2))
+        ;; Step past a zero-width match, including one at EOF.
+        next-point (if (= p match-end) (inc point) point)]
+    (qr-show s2 (qr-find-from s2 next-point))))
 
 (defn- qr-replace-all [s]
   (loop [s (qr-replace-here s)]
@@ -184,7 +178,7 @@
   (try
     (let [pattern (when regex? (re-pattern from))
           s (assoc s :query-replace {:from from :to to :count 0 :regex? regex? :pattern pattern
-                                    :buffer (:buf s)})]
+                                    :buffer (:buf s) :window (:cur-window s)})]
       (if-let [found (qr-find-from s (:point (cmd/cur s)))]
         (qr-show s found)
         (cmd/msg (dissoc s :query-replace) "No match")))
@@ -202,15 +196,16 @@
 (defn query-replace        [s input] (qr-prompt-to s input false))
 (defn query-replace-regexp [s input] (qr-prompt-to s input true))
 
-(defn query-replace-cmd [s]
+(defn- replace-prompt [s prompt submit]
   (if (:read-only (cmd/cur s))
     (cmd/msg s "Buffer is read-only")
-    (mini/start s "Query replace: " query-replace)))
+    (mini/start s prompt submit)))
+
+(defn query-replace-cmd [s]
+  (replace-prompt s "Query replace: " query-replace))
 
 (defn query-replace-regexp-cmd [s]
-  (if (:read-only (cmd/cur s))
-    (cmd/msg s "Buffer is read-only")
-    (mini/start s "Query replace regexp: " query-replace-regexp)))
+  (replace-prompt s "Query replace regexp: " query-replace-regexp))
 
 (def ^:private qr-keys
   {\y qr-replace-here
@@ -220,10 +215,22 @@
    :return qr-exit
    :escape qr-exit})
 
-(defn handle-replace [s key]
-  (let [{:keys [buffer version match-start]} (:query-replace s)
+(defn- replace-current? [s]
+  (let [{:keys [buffer window version match-start]} (:query-replace s)
         b (cmd/cur s)]
-    (if (and (= buffer (:buf s)) (= version (:version b)) (= match-start (:point b))
-             (not (:read-only b)))
-      ((get qr-keys key qr-exit) s)
-      (cmd/msg (qr-exit s) "Replace canceled: buffer or match changed"))))
+    (and (= buffer (:buf s)) (= window (:cur-window s)) (= version (:version b))
+         (= match-start (:point b)) (not (:read-only b)))))
+
+(defn- cancel-replace [s]
+  (cmd/msg (qr-exit s) "Replace canceled: buffer or match changed"))
+
+(defn handle-replace [s key]
+  (if (replace-current? s)
+    ((get qr-keys key qr-exit) s)
+    (cancel-replace s)))
+
+(defn finish-displaced [s]
+  (let [{:keys [buffer window point] :as search} (:isearch s)]
+    (if (and search (not= [buffer window point] [(:buf s) (:cur-window s) (:point (cmd/cur s))]))
+      (isearch-accept s)
+      s)))
