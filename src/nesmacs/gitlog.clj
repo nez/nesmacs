@@ -25,12 +25,12 @@
 
 (defn show-commit [s]
   (if-let [e (listbuf/entry-at-point s)]
-    (let [dir (git/repo-root (git/current-dir (cmd/cur s)))]
-      (when dir
-        (job/start s {:argv ["git" "show" (:hash e)]
-                      :dir dir
-                      :buf-name (str "*Git Show " (:abbrev e) "*")
-                      :mode :gitdiff-mode})))
+    (if-let [dir (git/repo-root (git/current-dir (cmd/cur s)))]
+      (job/start s {:argv ["git" "show" (:hash e)]
+                    :dir dir
+                    :buf-name (str "*Git Show " (:abbrev e) "*")
+                    :mode :gitdiff-mode})
+      (cmd/msg s "Not a git repository"))
     s))
 
 (defn refresh [s]

@@ -34,7 +34,7 @@
      (if path
        (if-let [root (git/repo-root dir)]
          (deferred/start s
-                         {:argv (git/hunk-diff-argv (git/path-arg root path) staged?)
+                         {:argv (git/diff-argv (git/path-arg root path) staged?)
                           :dir root
                           :job-name "*git-diff*"
                           :build (fn [out]

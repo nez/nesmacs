@@ -20,25 +20,27 @@
         path (:path e)]
     (format " %s %s" mark path)))
 
-(defn- spec [dir]
-  (let [entries (git/status dir)]
+(defn- spec [root]
+  (let [entries (git/status-at-root root)]
     {:name         gitstatus-name
      :mode         :gitstatus-mode
-     :header       (str "Git: " (or (git/branch-name dir) "no repo")
+     :header       (str "Git: " (or (git/branch-name-at-root root) "no repo")
                         "   RET diff  s stage  u unstage  c commit  g refresh")
      :entries      entries
      :format-entry fmt
-     :extras       {:git-dir dir}}))
+     :extras       {:git-dir root}}))
 
-(defn open [s dir]
-  (listbuf/open s gitstatus-name (spec dir)))
+(defn open [s root]
+  (listbuf/open s gitstatus-name (spec root)))
 
 (defn- cur-repo-root [s]
   (git/repo-root (git/current-dir (cmd/cur s))))
 
 (defn refresh [s]
-  (let [dir (git/current-dir (cmd/cur s))]
-    (listbuf/reload s gitstatus-name (spec dir) (git/is-repo? dir)
+  (let [dir (git/current-dir (cmd/cur s))
+        root (git/repo-root dir)
+        listing (assoc-in (spec root) [:extras :git-dir] (or root dir))]
+    (listbuf/reload s gitstatus-name listing (some? root)
                     "Not a git repository")))
 
 (defn- alter-index
@@ -58,9 +60,9 @@
 
 (defn diff-at-point [s]
   (if-let [e (listbuf/entry-at-point s)]
-    (let [dir (cur-repo-root s)
-          staged? (= :staged (:status e))]
-      (gitdiff/open s dir (:path e) staged?))
+    (if-let [dir (cur-repo-root s)]
+      (gitdiff/open s dir (:path e) (= :staged (:status e)))
+      (cmd/msg s "Not a git repository"))
     s))
 
 (defn commit-cmd [s]
@@ -73,5 +75,6 @@
     (cmd/msg s "Not a git repository")))
 
 (defn log-cmd [s]
-  (let [dir (cur-repo-root s)]
-    (when dir (gitlog/open s dir))))
+  (if-let [dir (cur-repo-root s)]
+    (gitlog/open s dir)
+    (cmd/msg s "Not a git repository")))

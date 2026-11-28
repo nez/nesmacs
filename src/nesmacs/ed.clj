@@ -1801,10 +1801,12 @@
         line-start (gap/nth-line-start t (gap/line-of t p))
         line-end (gap/nth-line-end t (gap/line-of t p))
         line (gap/substr t line-start line-end)]
-    (when-let [[_ path] (re-find #"diff --git a/(.+) b/" line)]
-      (let [dir (git/repo-root (git/current-dir (cmd/cur s)))]
+    (if-let [[_ path] (re-find #"diff --git a/(.+) b/" line)]
+      (if-let [dir (git/repo-root (git/current-dir b))]
         (-> s (find-file (str dir "/" path))
-              (cmd/msg (str "Opened " path)))))))
+              (cmd/msg (str "Opened " path)))
+        (cmd/msg s "Not a git repository"))
+      s)))
 
 (def gitdiff-keymap
   {[:ctrl \c] {[:ctrl \c] confirm-quit}

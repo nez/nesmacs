@@ -26,34 +26,40 @@
       (some-> (:file b) java.io.File. .getParent)
       (System/getProperty "user.dir")))
 
-(defn- status-entry
-  "One porcelain v2 -z record. The leading fields are fixed-width, so a split
-   limit keeps spaces in the path; the XY pair says which side changed. In -z
-   mode a rename's original path arrives as its own NUL chunk and is ignored."
+(defn- status-entries
+  "The rows for one porcelain v2 -z record. A split limit keeps spaces
+   in the path."
   [line]
-  (let [xy-staged? (fn [xy] (not= \. (first xy)))
-        entry (fn [xy path]
-                (let [staged? (xy-staged? xy)]
-                  {:path path :status (if staged? :staged :unstaged)
-                   :staged staged?}))]
+  (let [entries (fn [[x y] path]
+                  (cond-> []
+                    (not= x \.) (conj {:path path :status :staged :staged true})
+                    (not= y \.) (conj {:path path :status :unstaged :staged false})))]
     (case (first line)
-      \1 (let [[_ xy _ _ _ _ _ _ path] (str/split line #" " 9)] (entry xy path))
-      \2 (let [[_ xy _ _ _ _ _ _ _ path] (str/split line #" " 10)] (entry xy path))
-      \u (let [[_ xy _ _ _ _ _ _ _ _ path] (str/split line #" " 11)] (entry xy path))
-      \? {:path (subs line 2) :status :untracked :staged false}
+      \1 (let [[_ xy _ _ _ _ _ _ path] (str/split line #" " 9)] (entries xy path))
+      \2 (let [[_ xy _ _ _ _ _ _ _ path] (str/split line #" " 10)] (entries xy path))
+      \u (let [path (last (str/split line #" " 11))]
+           [{:path path :status :staged :staged true}])
+      \? [{:path (subs line 2) :status :untracked :staged false}]
       nil)))
 
+(defn status-at-root
+  "Read status at a resolved repo root. Returns rows with :path, :status,
+   and :staged. A path changed in the index and worktree has two rows."
+  [root]
+  (when root
+    (let [out (run ["git" "status" "--porcelain=v2" "-z"] root)]
+      (loop [[line & more] (str/split out (re-pattern (str (char 0))))
+             rows []]
+        (if line
+          ;; A rename or copy has an additional NUL-delimited source path.
+          (recur (if (= \2 (first line)) (next more) more)
+                 (into rows (status-entries line)))
+          rows)))))
+
 (defn status
-  "Porcelain v2 -z status. Returns a vector of maps:
-   {:path :status :staged} where :status is :staged :unstaged :untracked
-   and :staged boolean indicates if the index differs from HEAD."
+  "Read status in the repository containing dir, or nil outside a repository."
   [dir]
-  (let [root (repo-root dir)
-        out (when root (run ["git" "status" "--porcelain=v2" "-z"] root))]
-    (when (and root out)
-      (->> (str/split out (re-pattern (str (char 0))))
-           (keep status-entry)
-           vec))))
+  (status-at-root (repo-root dir)))
 
 (defn- in-root
   "Run `argv` in the repo containing `dir`, or return a plain error string."
@@ -93,9 +99,11 @@
                       :author author :date date})))
            vec))))
 
+(defn branch-name-at-root [root]
+  (when root (str/trim (run ["git" "rev-parse" "--abbrev-ref" "HEAD"] root))))
+
 (defn branch-name [dir]
-  (let [root (repo-root dir)]
-    (when root (str/trim (run ["git" "rev-parse" "--abbrev-ref" "HEAD"] root)))))
+  (branch-name-at-root (repo-root dir)))
 
 (defn is-repo? [dir] (boolean (repo-root dir)))
 
@@ -164,14 +172,14 @@
          :patch (str (str/join "\n" (concat header hunk)) "\n")})
       hunks)))
 
-(defn hunk-diff-argv [path staged?]
+(defn diff-argv [path staged?]
   (cond-> ["git" "diff"]
     staged? (conj "--cached")
     true (conj "--no-color" "--" path)))
 
 (defn- read-hunks [dir path staged?]
   (when-let [root (repo-root dir)]
-    (let [out (run (hunk-diff-argv path staged?) root)]
+    (let [out (run (diff-argv path staged?) root)]
       (when (and out (not (str/starts-with? out "Error:")))
         (vec (parse-hunks out))))))
 
